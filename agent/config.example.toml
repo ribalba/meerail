@@ -2,15 +2,18 @@
 #
 # The agent runs on the machine where Proton Bridge is installed. It reads your
 # Bridge IMAP/SMTP credentials (shown in the Bridge app — NOT your Proton
-# password) and syncs into the meerail server.
+# password), fetches and parses your mail, and writes it into the database the
+# web app reads.
 
-server_url   = "http://localhost:8000"   # your meerail server (local or remote)
-agent_token  = ""                          # must match the server's AGENT_TOKEN (empty = none)
+# The agent owns the mail pipeline, so it writes to Postgres directly and calls
+# Tika itself. Both are published on loopback by docker-compose.
+database_url  = "postgresql+psycopg://meerail:meerail@127.0.0.1:5432/meerail"
+tika_url      = "http://127.0.0.1:9998"
 poll_interval = 30                         # seconds between IDLE cycles
-batch_size    = 200                        # UIDs per fetch/upload batch
+batch_size    = 200                        # UIDs per fetch/ingest batch
 
-# One [[account]] block per address. The email MUST match an account you added
-# in the meerail web UI. Add more blocks for multiple accounts.
+# One [[account]] block per address; accounts register themselves in the app on
+# first sync. Add more blocks for multiple accounts.
 [[account]]
 email        = "you@proton.me"
 imap_host    = "127.0.0.1"
@@ -22,3 +25,23 @@ smtp_security = "starttls"
 username     = "you@proton.me"  # the Bridge username
 password     = "BRIDGE-PASSWORD-HERE"
 verify_cert  = false          # Bridge uses a self-signed cert; false trusts it
+# Extra addresses this Proton account can send from (aliases / additional
+# addresses you own in Proton). They appear in the compose "From" dropdown.
+# The primary `email` above is always sendable and need not be repeated here.
+# addresses = ["alias@proton.me", "you@customdomain.com"]
+
+# The agent speaks plain IMAP/SMTP, so non-Proton providers work too. Gmail
+# example (needs 2-Step Verification + an App Password, and IMAP enabled in
+# Gmail settings — your normal Google password will NOT work):
+#
+# [[account]]
+# email         = "you@gmail.com"
+# imap_host     = "imap.gmail.com"
+# imap_port     = 993
+# imap_security = "ssl"
+# smtp_host     = "smtp.gmail.com"
+# smtp_port     = 465
+# smtp_security = "ssl"
+# username      = "you@gmail.com"
+# password      = "your-16-char-app-password"
+# verify_cert   = true          # real certificate — keep verification on

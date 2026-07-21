@@ -37,7 +37,7 @@ venv:
 	.venv/bin/pip install -r requirements.txt
 
 dev:
-	DATABASE_URL=$${DATABASE_URL:-postgresql+psycopg2://meerail:meerail@localhost:5432/meerail} \
+	DATABASE_URL=$${DATABASE_URL:-postgresql+psycopg://meerail:meerail@localhost:5432/meerail} \
 	TIKA_URL=$${TIKA_URL:-http://localhost:9998} \
 	.venv/bin/uvicorn app.main:app --reload --port 8000
 

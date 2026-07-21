@@ -16,9 +16,9 @@ from sqlalchemy import and_, exists, func, select, tuple_
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session as DBSession
 
-from ..database import get_db
+from core.database import get_db
 from ..deps import require_ui_auth
-from ..models import Account, Message, MessageLocation, utcnow
+from core.models import Account, Message, MessageLocation, utcnow
 
 router = APIRouter(prefix="/api", tags=["search"], dependencies=[Depends(require_ui_auth)])
 

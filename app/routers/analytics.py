@@ -7,9 +7,9 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import String, cast, func, select
 from sqlalchemy.orm import Session as DBSession
 
-from ..database import get_db
+from core.database import get_db
 from ..deps import require_ui_auth
-from ..models import Message, Recipient
+from core.models import Message, Recipient
 
 router = APIRouter(prefix="/api/analytics", tags=["analytics"], dependencies=[Depends(require_ui_auth)])
 

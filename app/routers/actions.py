@@ -12,10 +12,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session as DBSession
 
 from .. import events
-from ..database import get_db
+from core.database import get_db
 from ..deps import require_ui_auth
-from ..mail.store import recompute_counts
-from ..models import Mailbox, Message, MessageLocation, PendingAction
+from core.mail.store import recompute_counts
+from core.models import Mailbox, Message, MessageLocation, PendingAction
 
 router = APIRouter(prefix="/api/messages", tags=["actions"], dependencies=[Depends(require_ui_auth)])
 

@@ -1,11 +1,11 @@
 """Integration tests for compose address autocomplete (materialized contacts)."""
 
-import base64
 import uuid
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.utils import format_datetime
 
+import dbfixture
 from helpers import api
 
 T0 = datetime(2026, 5, 1, 9, 0, tzinfo=timezone.utc)
@@ -27,12 +27,7 @@ def _rich(mid, frm, to, cc, bcc, when):
 
 
 def _ingest(email, uid, raw):
-    api("POST", "/api/agent/folders",
-        {"account": email, "folders": [{"imap_name": "INBOX", "uidvalidity": 1}]})
-    api("POST", "/api/agent/messages", {
-        "account": email, "folder": "INBOX", "uidvalidity": 1,
-        "items": [{"uid": uid, "raw_b64": base64.b64encode(raw).decode()}]})
-    api("POST", "/api/agent/cursor", {"account": email, "folder": "INBOX", "last_uid": uid})
+    dbfixture.ingest_raw_message(email, raw, uid=uid)
 
 
 def test_autocomplete_covers_from_to_cc_bcc(account):

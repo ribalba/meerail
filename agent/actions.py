@@ -1,16 +1,24 @@
-"""Apply queued server actions to Bridge over IMAP/SMTP (the write-back half of
-two-way sync)."""
+"""Apply queued actions to Bridge over IMAP/SMTP (the write-back half of
+two-way sync).
+
+The UI enqueues PendingAction rows when you mark read, flag, move or send; the
+agent drains them here and reports the outcome back on the same rows.
+"""
 
 from __future__ import annotations
 
-import base64
+from sqlalchemy import select
+
+from core.models import Outbound, PendingAction, utcnow
 
 import smtp
 
+MAX_ACTION_ATTEMPTS = 5
 
-def apply_action(bridge, server, action: dict) -> None:
-    t = action["type"]
-    p = action.get("payload", {})
+
+def apply_action(db, bridge, account, action: PendingAction) -> None:
+    t = action.type
+    p = action.payload or {}
     c = bridge.client
 
     if t == "setflags":
@@ -32,21 +40,48 @@ def apply_action(bridge, server, action: dict) -> None:
         c.expunge()
 
     elif t == "send":
-        # Fetch the raw MIME by id (keeps large attachments out of the action queue).
-        raw = base64.b64decode(server.get_outbound(p["outbound_id"])["raw_b64"])
-        smtp.send_raw(bridge.acc, p["mail_from"], p["rcpt_to"], raw)
+        outbound = db.get(Outbound, p["outbound_id"])
+        if outbound is None or not outbound.raw_mime:
+            raise ValueError(f"outbound {p.get('outbound_id')} has no MIME to send")
+        smtp.send_raw(bridge.acc, p["mail_from"], p["rcpt_to"], outbound.raw_mime.encode("utf-8"))
 
     else:
         raise ValueError(f"unknown action type: {t}")
 
 
-def drain_actions(bridge, server, email: str) -> int:
-    """Pull pending actions and apply them, ack'ing each. Returns count handled."""
-    actions = server.get_actions(email)
-    for a in actions:
+def _settle(db, action: PendingAction, ok: bool, error: str | None = None) -> None:
+    """Record an attempt's outcome, retiring the action once it succeeds or has
+    burned through its retries."""
+    action.attempts += 1
+    terminal_error = not ok and action.attempts >= MAX_ACTION_ATTEMPTS
+    action.status = "done" if ok else ("error" if terminal_error else "pending")
+    action.error = error
+
+    # A successful send flips its Outbound to "sent" (Proton then auto-saves it
+    # to Sent, which the next folder sync ingests normally).
+    if action.type == "send":
+        outbound = db.get(Outbound, (action.payload or {}).get("outbound_id"))
+        if outbound:
+            outbound.state = "sent" if ok else ("error" if terminal_error else "queued")
+            outbound.error = error
+            if ok:
+                outbound.sent_at = utcnow()
+
+
+def drain_actions(db, bridge, account) -> int:
+    """Apply every pending action for this account. Returns the count handled."""
+    actions = db.execute(
+        select(PendingAction)
+        .where(PendingAction.account_id == account.id, PendingAction.status == "pending")
+        .order_by(PendingAction.created_at)
+        .limit(50)
+    ).scalars().all()
+
+    for action in actions:
         try:
-            apply_action(bridge, server, a)
-            server.ack_action(a["id"], True)
+            apply_action(db, bridge, account, action)
+            _settle(db, action, True)
         except Exception as e:  # noqa: BLE001
-            server.ack_action(a["id"], False, repr(e))
+            _settle(db, action, False, repr(e))
+    db.commit()
     return len(actions)

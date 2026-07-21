@@ -114,7 +114,13 @@ def make_message(mid, subject, frm, to, body, when, in_reply_to=None, refs=None,
         m["References"] = " ".join(refs)
     m.set_content(body)
     if text_attachment is not None:
-        m.add_attachment(text_attachment, filename="notes.txt")
+        # Python 3.14 requires maintype/subtype for bytes payloads, and rejects
+        # them for str ones — the two take different content handlers.
+        if isinstance(text_attachment, bytes):
+            m.add_attachment(text_attachment, maintype="text", subtype="plain",
+                             filename="notes.txt")
+        else:
+            m.add_attachment(text_attachment, filename="notes.txt")
     if pdf_text is not None:
         m.add_attachment(build_pdf(pdf_text), maintype="application", subtype="pdf",
                          filename="report.pdf")

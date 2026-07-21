@@ -8,7 +8,9 @@ agent venv exists (agent/run.sh has been run once). Start GreenMail with:
     -Dgreenmail.auth.disabled' greenmail/standalone:2.1.0
 """
 
+import os
 import subprocess
+import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -18,13 +20,21 @@ import pytest
 from conftest import status_for
 from helpers import SERVER, api, make_message, port_open
 
+AGENT_DIR = Path(__file__).resolve().parent.parent / "agent"
+sys.path.insert(0, str(AGENT_DIR))
+import imaplib_compat  # noqa: E402,F401  (patches imaplib for imapclient on 3.14+)
+
 pytest.importorskip("imapclient")
 from imapclient import IMAPClient  # noqa: E402
-
-AGENT_DIR = Path(__file__).resolve().parent.parent / "agent"
 AGENT_PY = AGENT_DIR / ".venv" / "bin" / "python"
 IMAP_PORT = 3143
 T0 = datetime(2026, 5, 10, 8, 0, tzinfo=timezone.utc)
+
+# The agent writes to the database itself, so the config it gets must point at
+# the same one the tests read through.
+DATABASE_URL = os.environ.get(
+    "DATABASE_URL", "postgresql+psycopg://meerail:meerail@127.0.0.1:5432/meerail")
+TIKA_URL = os.environ.get("TIKA_URL", "http://127.0.0.1:9998")
 
 
 def _mb(email: str, imap_name: str) -> dict:
@@ -33,14 +43,22 @@ def _mb(email: str, imap_name: str) -> dict:
 
 
 def _run_agent(config_path: Path) -> None:
-    subprocess.run([str(AGENT_PY), "main.py", "--once", "--config", str(config_path)],
-                   cwd=str(AGENT_DIR), check=True, capture_output=True, timeout=120)
+    # run.sh normally puts the repo root on the path so the agent can import the
+    # shared `core` package; invoking main.py directly, we do it ourselves.
+    env = dict(os.environ)
+    repo_root = str(AGENT_DIR.parent)
+    env["PYTHONPATH"] = repo_root + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    proc = subprocess.run([str(AGENT_PY), "main.py", "--once", "--config", str(config_path)],
+                          cwd=str(AGENT_DIR), capture_output=True, timeout=180, env=env, text=True)
+    if proc.returncode != 0:
+        raise AssertionError(f"agent failed ({proc.returncode}):\n{proc.stdout}\n{proc.stderr}")
 
 
 def _write_config(tmp_path: Path, email: str) -> Path:
     config = tmp_path / "config.toml"
     config.write_text(
-        f'server_url = "{SERVER}"\nagent_token = ""\npoll_interval = 30\nbatch_size = 200\n\n'
+        f'database_url = "{DATABASE_URL}"\ntika_url = "{TIKA_URL}"\n'
+        'poll_interval = 30\nbatch_size = 200\n\n'
         f'[[account]]\nemail = "{email}"\nimap_host = "127.0.0.1"\nimap_port = {IMAP_PORT}\n'
         'imap_security = "plain"\nsmtp_host = "127.0.0.1"\nsmtp_port = 3025\n'
         f'smtp_security = "plain"\nusername = "{email}"\npassword = "x"\nverify_cert = false\n'

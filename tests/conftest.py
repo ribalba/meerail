@@ -1,18 +1,21 @@
 """Pytest fixtures for meerail.
 
-Unit tests (test_parse.py) need only the server's Python deps.
-Integration tests use fixtures here and are skipped when their backing service
-(the meerail server, or GreenMail) isn't reachable.
+Unit tests (test_parse.py) need only the shared `core` deps. Integration tests
+read through the server's HTTP API and write through `core.ingest` (the agent's
+path), so they need both the server running and the database reachable; they are
+skipped when the server isn't up.
+
+Run with an interpreter that has core's deps — `agent/.venv/bin/python -m pytest`.
 """
 
 from __future__ import annotations
 
-import base64
 import uuid
 from datetime import datetime, timezone
 
 import pytest
 
+import dbfixture
 from helpers import api, make_message, server_up
 
 T0 = datetime(2026, 4, 1, 9, 0, tzinfo=timezone.utc)
@@ -49,14 +52,13 @@ def mailbox(email: str, role: str) -> dict | None:
 
 def ingest_one(email: str, account_id: int, token: str, frm: str = "sender@ex.com",
                uid: int = 1) -> tuple[int, str]:
-    """Ingest one message (body contains `token`) into INBOX; return (message_id, rfc_message_id)."""
+    """Ingest one message (body contains `token`) into INBOX; return (message_id, rfc_message_id).
+
+    Goes straight to the database via core.ingest, which is what the agent does —
+    there is no ingest HTTP API any more.
+    """
     mid = f"m-{uuid.uuid4().hex}@t"
     raw = make_message(f"<{mid}>", f"Subj {token}", frm, email, f"{token} body text", T0)
-    api("POST", "/api/agent/folders",
-        {"account": email, "folders": [{"imap_name": "INBOX", "uidvalidity": 1}]})
-    api("POST", "/api/agent/messages", {
-        "account": email, "folder": "INBOX", "uidvalidity": 1,
-        "items": [{"uid": uid, "raw_b64": base64.b64encode(raw).decode()}]})
-    api("POST", "/api/agent/cursor", {"account": email, "folder": "INBOX", "last_uid": uid})
+    dbfixture.ingest_raw_message(email, raw, uid=uid)
     _, r = api("GET", f"/api/search?q={token}&account_id={account_id}")
     return r["rows"][0]["id"], mid

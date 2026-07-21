@@ -1,3 +1,17 @@
-# meerail-agent — the small connector that runs next to Proton Bridge.
-IMAPClient==3.0.1
+# meerail-agent — owns the mail pipeline: IMAP/SMTP, parsing, Tika, DB writes.
+# It shares the `core` package with the server, so it needs core's deps too;
+# keep the overlapping pins in step with the root requirements.txt.
+#
+# These run on the host's Python (not the container's), so every pin must have a
+# wheel for current interpreters — hence the newer floors than you might expect.
+IMAPClient==3.1.0
+
+# core: database access
+SQLAlchemy==2.0.51
+psycopg[binary]==3.3.4
+
+# core: parsing, config, Tika
+selectolax==0.4.11
+pydantic==2.13.4
+pydantic-settings==2.7.0
 httpx==0.28.1

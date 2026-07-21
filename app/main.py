@@ -6,13 +6,13 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import events
-from .config import get_settings
-from .database import init_db
+from core.config import get_settings
+from core.database import init_db
 from .routers import (
-    accounts, actions, agent, analytics, auth, compose, contacts, mailboxes, messages, search,
+    accounts, actions, analytics, auth, compose, contacts, mailboxes, messages, search,
     stream, sync,
 )
-from .workers import contacts_loop, extraction_loop
+from .workers import contacts_loop
 
 settings = get_settings()
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -24,13 +24,14 @@ app = FastAPI(title="meerail", version="0.2.0")
 async def _startup() -> None:
     init_db()
     events.set_loop(asyncio.get_running_loop())
-    asyncio.create_task(extraction_loop())
+    # Mail ingest (and its Tika extraction) runs in the agent; the app only
+    # listens for the resulting change notifications.
+    asyncio.create_task(events.listener_loop())
     asyncio.create_task(contacts_loop())
 
 
 app.include_router(accounts.router)
 app.include_router(auth.router)
-app.include_router(agent.router)
 app.include_router(mailboxes.router)
 app.include_router(messages.router)
 app.include_router(actions.router)

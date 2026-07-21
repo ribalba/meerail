@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>meerail — your whole mailbox, in a database</title>
+  <meta name="description" content="meerail is a self-hosted email client that downloads every message into PostgreSQL: regex search, a familiar three-pane UI, full keyboard control and an LLM-ready database." />
+  <meta name="theme-color" content="#2185d0" />
+  <link rel="icon" href="/img/logo-square.png" />
+  <link rel="apple-touch-icon" href="/img/logo-square.png" />
+
+  <!-- Heavy stylesheets loaded non-render-blocking, as on the meerkat landing page. -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/fomantic-ui@2.9.3/dist/semantic.min.css" media="print" onload="this.media='all'" />
+  <link rel="stylesheet" href="/css/site.css" />
+  <noscript>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/fomantic-ui@2.9.3/dist/semantic.min.css" />
+  </noscript>
+</head>
+<body>
+  <div class="landing">
+
+    <!-- Top bar -->
+    <header class="landing-nav" id="top">
+      <div class="landing-nav-inner">
+        <a class="landing-brand" href="/">
+          <img src="/img/logo-square.png" alt="" />
+          <span>meerail</span>
+        </a>
+        <nav class="landing-nav-links">
+          <a href="#screenshots">Screenshots</a>
+          <a href="#features">Features</a>
+          <a href="#ai">AI</a>
+          <a href="#start">Get started</a>
+          <a class="ui small primary button" href="https://github.com/ribalba/meerail" target="_blank" rel="noopener">
+            <i class="github icon"></i> GitHub
+          </a>
+        </nav>
+      </div>
+    </header>
+
+    <!-- Hero -->
+    <section class="landing-hero">
+      <img src="/img/logo.png" alt="The meerail meerkat" class="landing-logo" />
+      <div class="landing-hero-copy">
+        <h1 class="landing-title">Your whole mailbox, in a&nbsp;database.</h1>
+        <p class="landing-subtitle">
+          meerail downloads every message you own into PostgreSQL, then puts a
+          familiar email client on top of it. Real regex search that reads inside
+          your attachments, full keyboard control, and a mailbox any LLM can
+          actually read.
+        </p>
+        <div class="landing-hero-actions">
+          <a class="ui primary button" href="#start"><i class="rocket icon"></i> Get started</a>
+          <a class="ui basic button" href="https://github.com/ribalba/meerail/blob/main/website/public/downloads/SKILL.md" target="_blank" rel="noopener"><i class="github icon"></i> Get the AI skill</a>
+        </div>
+      </div>
+    </section>
+
+    <!-- Main features -->
+    <section id="features" class="landing-features">
+      <h2 class="landing-section-title">What makes meerail different</h2>
+      <p class="landing-section-lede">
+        Most email clients hide your mail behind a search box someone else designed.
+        meerail hands you the whole archive.
+      </p>
+
+      <div class="landing-grid">
+        <article class="landing-card">
+          <div class="landing-card-body">
+            <div class="landing-card-icon"><i class="database icon"></i></div>
+            <h3>Every message in PostgreSQL</h3>
+            <p>
+              meerail syncs your accounts over IMAP and stores every message,
+              header, recipient and attachment in Postgres — the original
+              <code>.eml</code> bytes included. Nothing is summarised away, and
+              nothing needs the network to read again.
+            </p>
+          </div>
+        </article>
+
+        <article class="landing-card">
+          <div class="landing-card-body">
+            <div class="landing-card-icon"><i class="search icon"></i></div>
+            <h3>Regex search over everything</h3>
+            <p>
+              Search is a real regular-expression engine over subjects, bodies and
+              extracted attachment text. Match by prefix, alternation or whole
+              words (<code>^Invoice</code>, <code>invoice|receipt</code>,
+              <code>\bcontract\b</code>) and scope it by account, folder or a
+              last-N-years window.
+            </p>
+          </div>
+        </article>
+
+        <article class="landing-card">
+          <div class="landing-card-body">
+            <div class="landing-card-icon"><i class="shield alternate icon"></i></div>
+            <h3>Works with Proton Mail Bridge</h3>
+            <p>
+              Proton keeps your mail out of ordinary clients — meerail is built
+              for it. A small agent runs on your machine and talks IMAP and SMTP
+              to Bridge, so your Proton mailbox becomes a searchable archive
+              without your Bridge credentials ever leaving the host. Aliases and
+              additional addresses work too, and because the agent speaks plain
+              IMAP, Gmail and any other provider work the same way.
+            </p>
+          </div>
+        </article>
+      </div>
+
+      <div class="landing-grid" style="margin-top:1.5rem">
+        <article class="landing-card">
+          <div class="landing-card-body">
+            <div class="landing-card-icon"><i class="mail icon"></i></div>
+            <h3>Feels like the mail app you know</h3>
+            <p>
+              A three-pane Apple-Mail-style layout: mailboxes, conversation list,
+              message. Threading, a unified inbox across accounts, sandboxed HTML
+              with remote images blocked, light and dark. No relearning where
+              anything lives.
+            </p>
+          </div>
+        </article>
+
+        <article class="landing-card">
+          <div class="landing-card-body">
+            <div class="landing-card-icon"><i class="keyboard icon"></i></div>
+            <h3>Your hands never leave the keyboard</h3>
+            <p>
+              Move, read, flag, archive, reply and search without reaching for the
+              mouse. Single-key shortcuts throughout, so triaging a morning's mail
+              is a few keystrokes rather than a few hundred clicks.
+            </p>
+            <div class="landing-keys">
+              <span class="landing-key">j</span>
+              <span class="landing-key">k</span>
+              <span class="landing-key">/</span>
+              <span class="landing-key">r</span>
+              <span class="landing-key">e</span>
+              <span class="landing-key">⌫</span>
+            </div>
+          </div>
+        </article>
+
+        <article class="landing-card">
+          <div class="landing-card-body">
+            <div class="landing-card-icon"><i class="robot icon"></i></div>
+            <h3>AI ready, by construction</h3>
+            <p>
+              Because the mailbox <em>is</em> a database, an LLM can query it with
+              plain SQL: no scraping, no per-message API calls, no rate limits.
+              Import the skill below and ask questions of ten years of email.
+            </p>
+          </div>
+        </article>
+
+        <article class="landing-card">
+          <div class="landing-card-body">
+            <div class="landing-card-icon"><i class="server icon"></i></div>
+            <h3>Self-hosted and open source</h3>
+            <p>
+              One <code>docker compose up</code> gets you the server, Postgres and
+              attachment text extraction. Your mail stays on your machine, and the
+              whole thing is open source as the
+              <a href="https://github.com/ribalba/meerail" target="_blank" rel="noopener">meerail</a>
+              project.
+            </p>
+          </div>
+        </article>
+
+        <article class="landing-card">
+          <div class="landing-card-body">
+            <div class="landing-card-icon"><i class="paperclip icon"></i></div>
+            <h3>Attachments searchable to the last word</h3>
+            <p>
+              Every attachment goes through Apache Tika on the way in and its text
+              is stored with the message. A search for <code>termination clause</code>
+              finds the PDF that <em>contains</em> it, not just mails that mention
+              it — same regex syntax on both. Run the OCR image and scanned
+              documents become searchable too.
+            </p>
+            <div class="landing-filetypes">
+              <span class="landing-filetype"><i class="file pdf outline icon"></i>PDF</span>
+              <span class="landing-filetype"><i class="file word outline icon"></i>DOCX</span>
+              <span class="landing-filetype"><i class="file excel outline icon"></i>XLSX</span>
+              <span class="landing-filetype"><i class="file powerpoint outline icon"></i>PPTX</span>
+              <span class="landing-filetype"><i class="file alternate outline icon"></i>ODF</span>
+              <span class="landing-filetype"><i class="file code outline icon"></i>TXT</span>
+            </div>
+          </div>
+        </article>
+
+        <article class="landing-card">
+          <div class="landing-card-body">
+            <div class="landing-card-icon"><i class="user secret icon"></i></div>
+            <h3>Trackers blocked before they load</h3>
+            <p>
+              Remote images are dropped by default, so the tracking pixels in
+              marketing mail never phone home — meerail tells you how many it
+              blocked and lets you load them for a message you trust. The HTML
+              itself is stripped of anything executable and rendered in a
+              sandboxed frame, and your mail credentials stay on your own machine
+              with the agent.
+            </p>
+            <div class="landing-blocked">
+              <i class="eye slash outline icon"></i>
+              <span>3 remote images blocked</span>
+              <span class="landing-blocked-load">Load images</span>
+            </div>
+          </div>
+        </article>
+
+      </div>
+    </section>
+
+    <!-- Screenshots. Thumbnails only; the full-size image opens in the lightbox
+         at the bottom of the page. -->
+    <section id="screenshots" class="landing-shots">
+      <h2 class="landing-section-title">See it</h2>
+      <p class="landing-section-lede">
+        Real screenshots of a running instance. Click any of them to see it full size.
+      </p>
+
+      <div class="landing-shot-grid">
+        <figure class="landing-shot">
+          <button type="button" class="landing-shot-btn"
+                  data-full="/img/screenshots/inbox.png"
+                  data-full-dark="/img/screenshots/inbox-dark.png"
+                  data-caption="&lt;strong&gt;One unified inbox across every account.&lt;/strong&gt; Conversations are threaded, unread and flagged mail is obvious at a glance, and each account keeps its own colour down the side of the list. Light and dark both ship.">
+            <picture>
+              <source srcset="/img/screenshots/inbox-dark.png" media="(prefers-color-scheme: dark)" />
+              <img src="/img/screenshots/inbox.png" width="2880" height="1800" loading="lazy" decoding="async"
+                   alt="The meerail three-pane inbox: mailboxes for two accounts on the left, a unified message list in the middle, and an open message with a PDF attachment on the right." />
+            </picture>
+            <span class="landing-shot-zoom"><i class="expand icon"></i></span>
+          </button>
+          <figcaption>Unified inbox</figcaption>
+        </figure>
+
+        <figure class="landing-shot">
+          <button type="button" class="landing-shot-btn"
+                  data-full="/img/screenshots/search.png"
+                  data-caption="&lt;strong&gt;Regex that reads inside your attachments.&lt;/strong&gt; This search matched no subject and no message body — the words are inside the attached PDF, extracted through Tika on the way in.">
+            <img src="/img/screenshots/search.png" width="2880" height="1800" loading="lazy" decoding="async"
+                 alt="Regex search for GRAFANA|observability returning the one message whose PDF attachment contains that text." />
+            <span class="landing-shot-zoom"><i class="expand icon"></i></span>
+          </button>
+          <figcaption>Regex search</figcaption>
+        </figure>
+
+        <figure class="landing-shot">
+          <button type="button" class="landing-shot-btn"
+                  data-full="/img/screenshots/thread.png"
+                  data-caption="&lt;strong&gt;Conversations stay whole.&lt;/strong&gt; Replies are threaded by &lt;code&gt;References&lt;/code&gt; with a subject fallback, so a thread holds together even when a client along the way mangles the headers.">
+            <img src="/img/screenshots/thread.png" width="2880" height="1800" loading="lazy" decoding="async"
+                 alt="A two-message conversation shown stacked in the reading pane." />
+            <span class="landing-shot-zoom"><i class="expand icon"></i></span>
+          </button>
+          <figcaption>Threaded conversations</figcaption>
+        </figure>
+
+        <figure class="landing-shot">
+          <button type="button" class="landing-shot-btn"
+                  data-full="/img/screenshots/compose.png"
+                  data-caption="&lt;strong&gt;Compose as any address you own.&lt;/strong&gt; Proton aliases and additional addresses appear in the From picker; replies default to whichever of your addresses the original mail was sent to.">
+            <img src="/img/screenshots/compose.png" width="2880" height="1800" loading="lazy" decoding="async"
+                 alt="The compose window with a From dropdown listing several sender addresses." />
+            <span class="landing-shot-zoom"><i class="expand icon"></i></span>
+          </button>
+          <figcaption>Compose</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <!-- AI / skill section -->
+    <section id="ai" class="landing-login-section">
+      <h2 class="landing-login-title">Point an LLM at your mailbox</h2>
+      <p class="landing-login-lede">
+        meerail ships a skill file you can import into Claude Code (or any agent
+        that reads Markdown instructions). It carries the schema and the
+        connection details for the Docker container, so the model can query your
+        mail directly.
+      </p>
+
+      <div class="landing-skill">
+        <p class="landing-skill-lede">
+          Drop it into your skills directory and restart your agent:
+        </p>
+        <pre class="landing-code">mkdir -p ~/.claude/skills/meerail
+curl -o ~/.claude/skills/meerail/SKILL.md \
+  https://raw.githubusercontent.com/ribalba/meerail/main/website/public/downloads/SKILL.md</pre>
+        <a class="ui fluid large primary button" href="https://github.com/ribalba/meerail/blob/main/website/public/downloads/SKILL.md" target="_blank" rel="noopener">
+          <i class="github icon"></i> View SKILL.md on GitHub
+        </a>
+        <p class="landing-skill-note">
+          <i class="lock icon"></i> The skill connects to <em>your</em> container on
+          localhost. Nothing is sent anywhere you don't send it.
+          Already cloned the repo? It's at
+          <code>website/public/downloads/SKILL.md</code>.
+        </p>
+      </div>
+
+      <div class="landing-asks">
+        <span class="landing-ask">“What did the accountant say about the 2024 filing?”</span>
+        <span class="landing-ask">“Every invoice over €500 last year.”</span>
+        <span class="landing-ask">“Summarise this thread with the landlord.”</span>
+        <span class="landing-ask">“Who emails me most and never gets a reply?”</span>
+      </div>
+    </section>
+
+    <!-- Get started -->
+    <section id="start" class="landing-features">
+      <h2 class="landing-section-title">Get started</h2>
+      <p class="landing-section-lede">
+        Two pieces: the server in Docker, and a small agent that sits next to your
+        mail bridge and speaks IMAP so your credentials never leave the host.
+      </p>
+
+      <div class="landing-grid">
+        <article class="landing-card landing-card-wide">
+          <div class="landing-card-body">
+            <div class="landing-card-wide-inner">
+              <div class="landing-card-wide-copy">
+                <div class="landing-card-icon"><i class="git icon"></i></div>
+                <h3>1. Check out the code</h3>
+                <p>
+                  Everything below runs from the repository, so start by cloning it.
+                  You need <strong>git</strong> and <strong>Docker</strong> with the
+                  Compose plugin; the rest comes out of the containers.
+                </p>
+              </div>
+              <div class="landing-card-wide-aside">
+                <pre class="landing-code">git clone https://github.com/ribalba/meerail.git
+cd meerail</pre>
+              </div>
+            </div>
+          </div>
+        </article>
+
+        <article class="landing-card">
+          <div class="landing-card-body">
+            <div class="landing-card-icon"><i class="docker icon"></i></div>
+            <h3>2. Run the server</h3>
+            <p>Server, Postgres and Apache Tika, in one command.</p>
+            <pre class="landing-code">cp .env.example .env
+docker compose up -d</pre>
+          </div>
+        </article>
+
+        <article class="landing-card">
+          <div class="landing-card-body">
+            <div class="landing-card-icon"><i class="sync icon"></i></div>
+            <h3>3. Start the agent</h3>
+            <p>
+              Copy the example config, then <strong>edit <code>config.toml</code>
+              and put in your own credentials</strong> — the host, ports,
+              username and password for your mail server. For Proton that's the
+              Bridge password shown in the Bridge app, not your Proton password.
+              The agent won't start until they're filled in.
+            </p>
+            <pre class="landing-code">cd agent
+cp config.example.toml config.toml
+$EDITOR config.toml   # your credentials
+./run.sh --once</pre>
+          </div>
+        </article>
+
+        <article class="landing-card">
+          <div class="landing-card-body">
+            <div class="landing-card-icon"><i class="globe icon"></i></div>
+            <h3>4. Open your mail</h3>
+            <p>Accounts the agent syncs show up on their own.</p>
+            <pre class="landing-code">open http://localhost:8000</pre>
+          </div>
+        </article>
+
+        <article class="landing-card landing-card-wide">
+          <div class="landing-card-body">
+            <div class="landing-card-wide-inner">
+              <div class="landing-card-wide-copy">
+                <div class="landing-card-icon"><i class="book icon"></i></div>
+                <h3>The full documentation lives on GitHub</h3>
+                <p>
+                  These four steps are the short version. Every config option,
+                  the agent setup for Proton Bridge and other providers, building
+                  the desktop app, the test suite and the architecture notes are
+                  all documented in the repository — and the code is right there
+                  next to them.
+                </p>
+              </div>
+              <div class="landing-card-wide-aside">
+                <a class="ui primary button" href="https://github.com/ribalba/meerail#readme" target="_blank" rel="noopener">
+                  <i class="book icon"></i> Read the docs
+                </a>
+                <a class="ui basic button" href="https://github.com/ribalba/meerail" target="_blank" rel="noopener">
+                  <i class="github icon"></i> Browse the source
+                </a>
+              </div>
+            </div>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <footer class="landing-footer">
+      <p>
+        <strong>meerail</strong> is the meerkat email program, a sibling of the
+        <a href="https://github.com/ribalba/meerato" target="_blank" rel="noopener">meerato</a> todo project.
+      </p>
+      <p>
+        <a href="https://github.com/ribalba/meerail" target="_blank" rel="noopener">
+          <i class="github icon"></i>Open source
+        </a>
+      </p>
+    </footer>
+
+  </div>
+
+  <!-- Screenshot lightbox. Hidden until a thumbnail is clicked. -->
+  <div class="landing-lightbox" id="lightbox" hidden role="dialog" aria-modal="true" aria-label="Screenshot">
+    <button type="button" class="landing-lightbox-close" id="lightbox-close" aria-label="Close">
+      <i class="times icon"></i>
+    </button>
+    <figure class="landing-lightbox-figure">
+      <img id="lightbox-img" src="" alt="" />
+      <figcaption id="lightbox-caption"></figcaption>
+    </figure>
+  </div>
+
+  <script>
+    // Screenshot lightbox: thumbnails carry the full-size source and the long
+    // caption, so the markup stays readable and nothing loads until it's asked for.
+    (function () {
+      var box = document.getElementById('lightbox');
+      var img = document.getElementById('lightbox-img');
+      var cap = document.getElementById('lightbox-caption');
+      var closeBtn = document.getElementById('lightbox-close');
+      var lastFocused = null;
+      var dark = window.matchMedia('(prefers-color-scheme: dark)');
+
+      function open(btn) {
+        var full = btn.dataset.full;
+        // Some shots ship a dark variant; match what the thumbnail is showing.
+        if (btn.dataset.fullDark && dark.matches) full = btn.dataset.fullDark;
+        var thumb = btn.querySelector('img');
+        lastFocused = btn;
+        img.src = full;
+        img.alt = thumb ? thumb.alt : '';
+        cap.innerHTML = btn.dataset.caption || '';
+        box.hidden = false;
+        document.body.style.overflow = 'hidden';
+        closeBtn.focus();
+      }
+
+      function close() {
+        box.hidden = true;
+        img.src = '';
+        document.body.style.overflow = '';
+        if (lastFocused) lastFocused.focus();
+      }
+
+      document.querySelectorAll('.landing-shot-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () { open(btn); });
+      });
+      closeBtn.addEventListener('click', close);
+      // Clicking the backdrop closes; clicking the image itself does not.
+      box.addEventListener('click', function (e) {
+        if (e.target === box || e.target.tagName === 'FIGURE') close();
+      });
+      document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape' && !box.hidden) close();
+      });
+    })();
+  </script>
+</body>
+</html>

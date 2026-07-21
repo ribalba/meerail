@@ -17,11 +17,11 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy import select
 from sqlalchemy.orm import Session as DBSession
 
-from ..config import get_settings
-from ..database import get_db
+from core.config import get_settings
+from core.database import get_db
 from ..deps import require_ui_auth
-from ..models import Account, Message, Outbound, PendingAction, Recipient
-from ..mail.parse import html_to_text, normalize_subject
+from core.models import Account, Message, Outbound, PendingAction, Recipient
+from core.mail.parse import html_to_text, normalize_subject
 
 router = APIRouter(prefix="/api/compose", tags=["compose"], dependencies=[Depends(require_ui_auth)])
 settings = get_settings()
@@ -45,6 +45,7 @@ def _staged_path(staging_id: str) -> Path:
 
 class SendRequest(BaseModel):
     account_id: int
+    from_address: str | None = None      # a "send as" address owned by the account
     to: list[EmailStr]
     cc: list[EmailStr] = []
     bcc: list[EmailStr] = []
@@ -53,6 +54,30 @@ class SendRequest(BaseModel):
     in_reply_to: str | None = None
     references: list[str] = []
     attachments: list[str] = []          # staging ids from /attachments
+
+
+def _sender_addresses(account: Account) -> list[str]:
+    """Every address this account may send as: primary first, then extras."""
+    out = [account.email]
+    for a in account.send_addresses or []:
+        if a.lower() not in {x.lower() for x in out}:
+            out.append(a)
+    return out
+
+
+def _resolve_from(account: Account, requested: str | None) -> str:
+    """Pick the From address, defaulting to the primary and rejecting any address
+    the account does not own."""
+    if not requested:
+        return account.email
+    allowed = {a.lower(): a for a in _sender_addresses(account)}
+    chosen = allowed.get(requested.strip().lower())
+    if chosen is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"'{requested}' is not a sender address for {account.email}",
+        )
+    return chosen
 
 
 @router.post("/attachments")
@@ -81,15 +106,28 @@ def _attach_staged(m: EmailMessage, staging_ids: list[str]) -> list[Path]:
     return paths
 
 
-def _build_mime(account: Account, req: SendRequest) -> tuple[EmailMessage, list[str], list[Path]]:
+def _with_footer(body: str, footer: str) -> str:
+    """Append the account's footer, separated by a blank line.
+
+    Appended verbatim: a footer may be a signature or a legal disclaimer, so we
+    don't impose the RFC 3676 ``-- `` marker (which some clients collapse).
+    Start the footer with that line yourself if you want signature semantics.
+    """
+    footer = (footer or "").strip("\n")
+    if not footer:
+        return body
+    return f"{body.rstrip()}\n\n{footer}\n" if body.strip() else f"{footer}\n"
+
+
+def _build_mime(account: Account, req: SendRequest, from_addr: str) -> tuple[EmailMessage, list[str], list[Path]]:
     m = EmailMessage()
-    m["From"] = account.email
+    m["From"] = from_addr
     m["To"] = ", ".join(req.to)
     if req.cc:
         m["Cc"] = ", ".join(req.cc)
     m["Subject"] = req.subject
     m["Date"] = formatdate(localtime=True)
-    m["Message-ID"] = make_msgid(domain=account.email.split("@")[-1])
+    m["Message-ID"] = make_msgid(domain=from_addr.split("@")[-1])
     if req.in_reply_to:
         m["In-Reply-To"] = f"<{req.in_reply_to}>"
     refs = list(req.references)
@@ -97,7 +135,7 @@ def _build_mime(account: Account, req: SendRequest) -> tuple[EmailMessage, list[
         refs.append(req.in_reply_to)
     if refs:
         m["References"] = " ".join(f"<{r}>" for r in refs)
-    m.set_content(req.body_text or "")
+    m.set_content(_with_footer(req.body_text or "", account.footer))
     staged_paths = _attach_staged(m, req.attachments)
     rcpt = [str(a) for a in (req.to + req.cc + req.bcc)]
     return m, rcpt, staged_paths
@@ -111,13 +149,16 @@ def send(req: SendRequest, db: DBSession = Depends(get_db)):
     if not req.to:
         raise HTTPException(status_code=400, detail="At least one recipient is required")
 
-    m, rcpt, staged_paths = _build_mime(account, req)
+    from_addr = _resolve_from(account, req.from_address)
+    m, rcpt, staged_paths = _build_mime(account, req, from_addr)
 
     outbound = Outbound(
         account_id=account.id, state="queued",
         to_addrs=[str(a) for a in req.to], cc_addrs=[str(a) for a in req.cc],
         bcc_addrs=[str(a) for a in req.bcc], subject=req.subject,
-        body_text=req.body_text, in_reply_to=req.in_reply_to, references=req.references,
+        # Record the body as actually sent, footer included, so this row matches raw_mime.
+        body_text=_with_footer(req.body_text or "", account.footer),
+        in_reply_to=req.in_reply_to, references=req.references,
         attachments=[p.name for p in staged_paths],
         raw_mime=m.as_string(),
     )
@@ -125,9 +166,10 @@ def send(req: SendRequest, db: DBSession = Depends(get_db)):
     db.flush()
 
     # The agent fetches the raw message by id (keeps big attachments out of the queue).
+    # mail_from is the chosen sender so Proton relays it as that address.
     db.add(PendingAction(
         account_id=account.id, type="send",
-        payload={"outbound_id": outbound.id, "mail_from": account.email, "rcpt_to": rcpt},
+        payload={"outbound_id": outbound.id, "mail_from": from_addr, "rcpt_to": rcpt},
     ))
     db.commit()
 
@@ -148,7 +190,7 @@ def reply_context(message_id: int, mode: str = "reply", db: DBSession = Depends(
     if msg is None:
         raise HTTPException(status_code=404, detail="Message not found")
     account = db.get(Account, msg.account_id)
-    self_addr = account.email.lower() if account else ""
+    self_addrs = {a.lower() for a in _sender_addresses(account)} if account else set()
 
     recips = db.execute(
         select(Recipient.kind, Recipient.name, Recipient.address).where(Recipient.message_pk == msg.id)
@@ -156,12 +198,19 @@ def reply_context(message_id: int, mode: str = "reply", db: DBSession = Depends(
     orig_to = [a for k, _, a in recips if k == "to"]
     orig_cc = [a for k, _, a in recips if k == "cc"]
 
+    # Default the reply's From to whichever of the account's own addresses the
+    # original message was actually addressed to (its alias), else the primary.
+    from_address = account.email if account else ""
+    if account:
+        dest = {a.lower() for a in orig_to + orig_cc}
+        from_address = next((a for a in _sender_addresses(account) if a.lower() in dest), account.email)
+
     base_subj = msg.subject or ""
     quoted = _quote(msg)
 
     if mode == "forward":
         return {
-            "account_id": msg.account_id, "to": [], "cc": [],
+            "account_id": msg.account_id, "from_address": from_address, "to": [], "cc": [],
             "subject": ("" if normalize_subject(base_subj).startswith("fwd") else "Fwd: ") + base_subj,
             "body_text": f"\n\n---------- Forwarded message ----------\nFrom: {msg.from_name or msg.from_addr}"
                          f"\nSubject: {base_subj}\n\n{msg.body_text or html_to_text(msg.body_html)}",
@@ -171,7 +220,7 @@ def reply_context(message_id: int, mode: str = "reply", db: DBSession = Depends(
     to = [msg.from_addr]
     cc: list[str] = []
     if mode == "replyall":
-        seen = {self_addr, msg.from_addr.lower()}
+        seen = {*self_addrs, msg.from_addr.lower()}
         for a in orig_to + orig_cc:
             if a.lower() not in seen:
                 cc.append(a)
@@ -181,8 +230,9 @@ def reply_context(message_id: int, mode: str = "reply", db: DBSession = Depends(
     if msg.message_id and msg.message_id not in references:
         references.append(msg.message_id)
     return {
-        "account_id": msg.account_id, "to": to, "cc": cc, "subject": subject,
-        "body_text": "\n\n" + quoted, "in_reply_to": msg.message_id, "references": references,
+        "account_id": msg.account_id, "from_address": from_address, "to": to, "cc": cc,
+        "subject": subject, "body_text": "\n\n" + quoted,
+        "in_reply_to": msg.message_id, "references": references,
     }
 
 

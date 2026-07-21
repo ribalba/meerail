@@ -23,6 +23,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -57,6 +58,16 @@ class Account(Base):
     # Accent colour for the account dot in the unified inbox (hex or name).
     color: Mapped[str] = mapped_column(String(32), default="#1d6ff2", nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    # Extra "send as" addresses for this account (Proton lets one account own
+    # several addresses/aliases). Declared in the agent config and reported on
+    # sync; the primary ``email`` is always a valid sender regardless of this.
+    send_addresses: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+
+    # Signature/disclaimer appended to every message sent from this account.
+    # Empty disables it. Composition is the web app's job, so unlike the sync
+    # settings above this is set in the UI, not the agent config.
+    footer: Mapped[str] = mapped_column(Text, default="", nullable=False)
 
     # Sync status (denormalized for the UI).
     backfill_complete: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -152,7 +163,9 @@ class Message(Base):
     snippet: Mapped[str] = mapped_column(Text, default="", nullable=False)
     has_attachments: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
-    raw_path: Mapped[str | None] = mapped_column(String(1024))  # .eml on disk
+    # The original RFC822 bytes. Stored in the DB so the ingesting agent and the
+    # serving web app share no filesystem — the DB is the only handoff.
+    raw_mime: Mapped[bytes | None] = mapped_column(LargeBinary)
     body_text: Mapped[str] = mapped_column(Text, default="", nullable=False)
     body_html: Mapped[str] = mapped_column(Text, default="", nullable=False)
     # Concatenation indexed for regex/keyword search.
@@ -241,7 +254,7 @@ class Attachment(Base):
     size_bytes: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     content_id: Mapped[str | None] = mapped_column(String(512))  # inline cid
     is_inline: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    disk_path: Mapped[str | None] = mapped_column(String(1024))
+    content: Mapped[bytes | None] = mapped_column(LargeBinary)
 
     extracted_text: Mapped[str | None] = mapped_column(Text)
     # pending | done | error | skipped

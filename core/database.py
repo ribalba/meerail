@@ -44,3 +44,22 @@ def init_db() -> None:
     # Greenfield schema: models define everything, create_all makes it in one shot.
     # (No incremental migrations pre-1.0 — recreate the volume on schema changes.)
     Base.metadata.create_all(bind=engine)
+
+    # Idempotent column fixups so an existing volume upgrades in place instead of
+    # needing a wipe. create_all never alters existing tables.
+    if settings.database_url.startswith("postgresql"):
+        with engine.begin() as conn:
+            for stmt in (
+                "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS "
+                "send_addresses JSONB NOT NULL DEFAULT '[]'::jsonb",
+                "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS "
+                "footer TEXT NOT NULL DEFAULT ''",
+                # Raw MIME and attachment payloads moved from disk into the DB, so
+                # the agent (which writes them) and the app (which serves them)
+                # share no filesystem.
+                "ALTER TABLE messages ADD COLUMN IF NOT EXISTS raw_mime BYTEA",
+                "ALTER TABLE messages DROP COLUMN IF EXISTS raw_path",
+                "ALTER TABLE attachments ADD COLUMN IF NOT EXISTS content BYTEA",
+                "ALTER TABLE attachments DROP COLUMN IF EXISTS disk_path",
+            ):
+                conn.execute(text(stmt))

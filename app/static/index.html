@@ -80,8 +80,9 @@
         </form>
         <p id="add-error" class="error" hidden></p>
         <p class="muted small">
-          After adding an account, run <code>meerail-agent</code> on the machine
-          with Proton Bridge (see <code>agent/README.md</code>).
+          Accounts register themselves when a <code>meerail-agent</code> connects
+          (see <code>agent/README.md</code>) — adding one here is only needed to
+          pick a label up front.
         </p>
       </div>
     </div>
@@ -89,11 +90,12 @@
 
   <!-- Compose window -->
   <div class="modal-backdrop" id="compose-modal" hidden>
-    <div class="modal compose">
-      <div class="modal-head">
+    <div class="modal compose" id="compose-window">
+      <div class="modal-head" id="compose-head">
         <h2 id="compose-title">New Message</h2>
         <button class="icon-btn" id="compose-close" title="Close"></button>
       </div>
+      <div class="compose-drop" id="compose-drop" hidden><span>Drop files to attach</span></div>
       <div class="modal-body compose-body">
         <div class="compose-row" id="compose-from-row">
           <label>From</label>

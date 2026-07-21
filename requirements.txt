@@ -1,16 +1,17 @@
-# meerail-server dependencies. The agent has its own agent/requirements.txt.
+# meerail-server dependencies. The agent has its own agent/requirements.txt;
+# both share the `core` package, so keep the overlapping pins in step.
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
-sqlalchemy==2.0.36
-pydantic==2.10.4
+sqlalchemy==2.0.51
+pydantic==2.13.4
 pydantic-settings==2.7.0
 email-validator==2.2.0
 python-multipart==0.0.20
-psycopg2-binary==2.9.10
+psycopg[binary]==3.3.4      # psycopg3: has wheels for current Pythons (agent runs on the host)
 
 # Mail-specific
 nh3==0.2.20                 # HTML sanitization for safe rendering
-selectolax==0.3.27          # fast HTML -> text for the search corpus
+selectolax==0.4.11          # fast HTML -> text for the search corpus
 sse-starlette==2.1.3        # server-sent events (live updates + sync progress)
 cryptography==44.0.0        # Fernet, if server-side credential storage is enabled
 python-dateutil==2.9.0.post0

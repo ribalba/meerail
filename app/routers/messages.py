@@ -2,17 +2,14 @@
 
 from __future__ import annotations
 
-import os
-
-from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import func, select, tuple_
 from sqlalchemy.orm import Session as DBSession
 
-from ..database import get_db
+from core.database import get_db
 from ..deps import require_ui_auth
 from ..mail.render import sanitize_html
-from ..models import Account, Attachment, Mailbox, Message, MessageLocation, Recipient
+from core.models import Account, Attachment, Mailbox, Message, MessageLocation, Recipient
 
 router = APIRouter(prefix="/api", tags=["messages"], dependencies=[Depends(require_ui_auth)])
 
@@ -165,10 +162,14 @@ def get_thread(thread_id: str, account_id: int, images: bool = False, db: DBSess
 @router.get("/attachments/{attachment_id}")
 def download_attachment(attachment_id: int, db: DBSession = Depends(get_db)):
     att = db.get(Attachment, attachment_id)
-    if att is None or not att.disk_path or not os.path.exists(att.disk_path):
+    if att is None or att.content is None:
         raise HTTPException(status_code=404, detail="Attachment not found")
-    return FileResponse(att.disk_path, media_type=att.content_type or "application/octet-stream",
-                        filename=att.filename or "attachment")
+    filename = (att.filename or "attachment").replace('"', "")
+    return Response(
+        content=att.content,
+        media_type=att.content_type or "application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/messages/{message_id}/cid/{content_id}")
@@ -178,6 +179,7 @@ def inline_cid(message_id: int, content_id: str, db: DBSession = Depends(get_db)
             Attachment.message_pk == message_id, Attachment.content_id == content_id
         )
     ).scalars().first()
-    if att is None or not att.disk_path or not os.path.exists(att.disk_path):
+    if att is None or att.content is None:
         raise HTTPException(status_code=404, detail="Inline image not found")
-    return FileResponse(att.disk_path, media_type=att.content_type or "application/octet-stream")
+    return Response(content=att.content,
+                    media_type=att.content_type or "application/octet-stream")

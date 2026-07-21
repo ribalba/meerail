@@ -82,6 +82,11 @@ App.shell = (function () {
     refreshTimer = setTimeout(async () => {
       sidebar = await App.api.mailboxes();
       renderSidebar();
+      // Keep the compose From dropdown current (new accounts / send addresses).
+      if (App.compose && App.compose.refreshAccounts) App.compose.refreshAccounts();
+      // An agent may have just registered the first account(s).
+      if (!selection) selectDefault();
+      if (!$("#settings-modal").hidden) renderSettingsAccounts();
       // Don't clobber a live search result set with the folder list.
       if (!App.search || !App.search.isActive()) await loadList();
     }, 500);
@@ -99,7 +104,7 @@ App.shell = (function () {
 
   function connectSSE() {
     const es = new EventSource("/api/stream");
-    ["messages", "flags", "cursor", "present", "folders", "extract"].forEach((t) =>
+    ["accounts", "messages", "flags", "cursor", "present", "folders", "extract"].forEach((t) =>
       es.addEventListener(t, scheduleRefresh));
     es.onerror = () => { /* EventSource auto-reconnects */ };
   }
@@ -125,22 +130,55 @@ App.shell = (function () {
         (Date.now() - new Date(a.last_agent_seen + "Z").getTime()) < 120000;
       const li = document.createElement("li");
       li.innerHTML = `
-        <span class="account-dot" style="background:${a.color}"></span>
-        <span class="sa-main">
-          <div class="sa-email">${App.esc(a.label || a.email)}</div>
-          <div class="sa-sub">${App.esc(a.email)} · agent ${relTime(a.last_agent_seen)}</div>
-        </span>
-        <span class="status-pill ${online ? "ok" : ""}">${online ? "online" : (a.backfill_complete ? "synced" : "waiting")}</span>
-        <button class="link-btn" data-del="${a.id}">Remove</button>`;
+        <div class="sa-row">
+          <span class="account-dot" style="background:${a.color}"></span>
+          <span class="sa-main">
+            <div class="sa-email">${App.esc(a.label || a.email)}</div>
+            <div class="sa-sub">${App.esc(a.email)} · agent ${relTime(a.last_agent_seen)}</div>
+          </span>
+          <span class="status-pill ${online ? "ok" : ""}">${online ? "online" : (a.backfill_complete ? "synced" : "waiting")}</span>
+          <button class="link-btn" data-del="${a.id}">Remove</button>
+        </div>
+        <div class="sa-footer">
+          <label for="footer-${a.id}">Footer — appended to every message sent from this address</label>
+          <textarea id="footer-${a.id}" data-footer="${a.id}" rows="3"
+            placeholder="No footer — messages send without one">${App.esc(a.footer || "")}</textarea>
+          <div class="sa-footer-actions">
+            <button type="button" data-save-footer="${a.id}">Save footer</button>
+            <span class="sa-footer-status" data-footer-status="${a.id}"></span>
+          </div>
+        </div>`;
       list.appendChild(li);
     }
     list.querySelectorAll("[data-del]").forEach((btn) =>
       btn.addEventListener("click", async () => {
-        if (!confirm("Remove this account? Its synced mail is deleted from the server.")) return;
+        if (!confirm("Delete this account's synced mail from the server?\n\n"
+                     + "If the agent is still configured for this address, it will "
+                     + "reappear and re-sync on the next pass.")) return;
         await App.api.del(`/api/accounts/${btn.dataset.del}`);
         await renderSettingsAccounts();
         scheduleRefresh();
       }));
+    list.querySelectorAll("[data-save-footer]").forEach((btn) =>
+      btn.addEventListener("click", () => saveFooter(btn.dataset.saveFooter)));
+  }
+
+  async function saveFooter(accountId) {
+    const box = $(`[data-footer="${accountId}"]`);
+    const status = $(`[data-footer-status="${accountId}"]`);
+    status.textContent = "Saving…";
+    status.classList.remove("error");
+    try {
+      await App.api.patch(`/api/accounts/${accountId}`, { footer: box.value });
+      status.textContent = "Saved";
+      // Keep compose in step: it reads the footer nowhere, but the account list
+      // it caches is the same payload.
+      if (App.compose && App.compose.refreshAccounts) App.compose.refreshAccounts();
+      setTimeout(() => { status.textContent = ""; }, 2500);
+    } catch (e) {
+      status.textContent = e.message || "Could not save";
+      status.classList.add("error");
+    }
   }
 
   function openSettings() { $("#settings-modal").hidden = false; renderSettingsAccounts(); }
@@ -174,15 +212,7 @@ App.shell = (function () {
     });
   }
 
-  async function boot() {
-    await App.api.ensureSession();
-    wire();
-    App.search.init();
-    App.compose.init();
-    connectSSE();
-    sidebar = await App.api.mailboxes();
-    renderSidebar();
-    // Default selection.
+  function selectDefault() {
     if (sidebar.smart.account_count > 1) select(selections["unified"]);
     else if (sidebar.accounts.length) {
       const inbox = sidebar.accounts[0].mailboxes.find((m) => m.role === "inbox")
@@ -191,9 +221,21 @@ App.shell = (function () {
     } else {
       $("#list-title").textContent = "meerail";
       document.getElementById("message-list").innerHTML =
-        `<div class="list-empty">No accounts yet.<br>Open settings (top-left) to add one.</div>`;
+        `<div class="list-empty">No accounts yet.<br>Start a <code>meerail-agent</code> and its
+        accounts appear here automatically.</div>`;
       openSettings();
     }
+  }
+
+  async function boot() {
+    await App.api.ensureSession();
+    wire();
+    App.search.init();
+    App.compose.init();
+    connectSSE();
+    sidebar = await App.api.mailboxes();
+    renderSidebar();
+    selectDefault();
   }
 
   return { boot, currentMailboxId, reloadList };

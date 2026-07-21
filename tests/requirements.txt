@@ -1,4 +1,21 @@
-# Test-only deps. The unit tests also need the server deps (selectolax etc.)
-# from the top-level requirements.txt; the GreenMail test needs imapclient.
+# Test-only deps. The suite spans both halves of the app, so it needs the union:
+#   - `core` (parsing, ingest, DB) — tests ingest the way the agent does
+#   - the server's read-side extras (nh3) — for the rendering unit tests
+#   - IMAPClient — for the end-to-end GreenMail test
+#
+# Build a dedicated venv (see tests/README.md):
+#   python3 -m venv .venv-test
+#   .venv-test/bin/pip install -r tests/requirements.txt
 pytest==8.3.4
-IMAPClient==3.0.1
+IMAPClient==3.1.0
+
+# core
+SQLAlchemy==2.0.51
+psycopg[binary]==3.3.4
+selectolax==0.4.11
+pydantic==2.13.4
+pydantic-settings==2.7.0
+httpx==0.28.1
+
+# server read-side (rendering tests)
+nh3==0.2.20

@@ -1,0 +1,8 @@
+services:
+  website:
+    build: .
+    image: meerail-website
+    ports:
+      # Not 8000 — that's the meerail server, so the two can run side by side.
+      - "${WEBSITE_PORT:-8080}:80"
+    restart: unless-stopped

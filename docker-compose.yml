@@ -5,6 +5,10 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-meerail}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-meerail}
       POSTGRES_DB: ${POSTGRES_DB:-meerail}
+    ports:
+      # The agent writes mail straight into the database, so it needs a port.
+      # Bound to loopback: reachable from the Bridge host, not from the network.
+      - "127.0.0.1:5432:5432"
     volumes:
       # Postgres 18+ expects a single mount at /var/lib/postgresql (not .../data);
       # this layout enables in-place pg_upgrade --link on future upgrades.
@@ -21,6 +25,9 @@ services:
     # Attachment text extraction (PDF/Office -> text). Use the `-full` tag if you
     # also want OCR of scanned/image attachments (heavier image, pulls Tesseract).
     image: apache/tika:latest
+    ports:
+      # The agent extracts attachment text itself; loopback only, as above.
+      - "127.0.0.1:9998:9998"
     restart: unless-stopped
 
   server:
@@ -29,22 +36,18 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      tika:
-        condition: service_started
     ports:
-      # The agent (on the Bridge host) and your browser/Electron both hit this.
+      # Your browser / Electron. The agent no longer talks to the server at all.
       - "8000:8000"
     environment:
-      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-meerail}:${POSTGRES_PASSWORD:-meerail}@db:5432/${POSTGRES_DB:-meerail}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-meerail}:${POSTGRES_PASSWORD:-meerail}@db:5432/${POSTGRES_DB:-meerail}
       SECRET_KEY: ${SECRET_KEY:-dev-insecure-secret-change-me}
       DATA_DIR: /data
-      TIKA_URL: http://tika:9998
-      AGENT_TOKEN: ${AGENT_TOKEN:-}
       SERVER_AUTH_TOKEN: ${SERVER_AUTH_TOKEN:-}
       DEFAULT_SEARCH_YEARS: ${DEFAULT_SEARCH_YEARS:-0}
       CONTACTS_SCAN_YEARS: ${CONTACTS_SCAN_YEARS:-1}
     volumes:
-      # Raw .eml + attachments (the DB is Postgres; these are the on-disk blobs).
+      # Only staging for outgoing attachments now; mail bytes live in Postgres.
       - mail-data:/data
     restart: unless-stopped
     healthcheck:

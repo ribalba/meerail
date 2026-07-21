@@ -3,25 +3,20 @@
 Requires the running server; uses a throwaway account so results are isolated.
 """
 
-import base64
 import uuid
 from datetime import datetime, timezone
 from urllib.parse import urlencode
 
+import dbfixture
 from helpers import api, make_message
 
 T0 = datetime(2026, 4, 1, 9, 0, tzinfo=timezone.utc)
 
 
 def _ingest(email, messages):
-    """messages: list of (uid, raw_bytes). Registers INBOX and uploads them."""
-    api("POST", "/api/agent/folders",
-        {"account": email, "folders": [{"imap_name": "INBOX", "uidvalidity": 1}]})
-    api("POST", "/api/agent/messages", {
-        "account": email, "folder": "INBOX", "uidvalidity": 1,
-        "items": [{"uid": uid, "raw_b64": base64.b64encode(raw).decode()} for uid, raw in messages]})
-    api("POST", "/api/agent/cursor",
-        {"account": email, "folder": "INBOX", "last_uid": max(u for u, _ in messages)})
+    """messages: list of (uid, raw_bytes). Ingests them the way the agent does."""
+    for uid, raw in messages:
+        dbfixture.ingest_raw_message(email, raw, uid=uid)
 
 
 def _search(account_id, q, **kw):

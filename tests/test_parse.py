@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.utils import format_datetime
 
-from app.mail.parse import html_to_text, normalize_subject, parse_email
+from core.mail.parse import html_to_text, normalize_subject, parse_email
 from helpers import PNG_1x1, make_message
 
 WHEN = datetime(2026, 3, 1, 9, 0, tzinfo=timezone.utc)

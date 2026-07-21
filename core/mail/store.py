@@ -1,48 +1,23 @@
-"""Ingest pipeline: parsed email -> disk blobs + DB rows.
+"""Ingest pipeline: parsed email -> DB rows (including the raw/attachment bytes).
 
 Content is stored once per (account, dedup_key); each folder placement is a
-MessageLocation. Attachment text extraction is deferred (attachments land with
-extract_status='pending' and a background worker fills them in, then rebuilds
-the message's search_text).
+MessageLocation. Raw MIME and attachment payloads live in the database, so the
+ingesting process and the serving web app need no shared filesystem.
+
+Attachment text extraction is deferred: attachments land with
+extract_status='pending' and the agent's extraction pass fills them in, then
+rebuilds the message's search_text.
 """
 
 from __future__ import annotations
 
-import hashlib
-import re
-from pathlib import Path
-
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ..config import get_settings
 from ..models import Account, Attachment, Mailbox, Message, MessageLocation, Recipient, utcnow
 from .parse import ParsedEmail, html_to_text, parse_email
 from .threading import assign_thread
 from .tika import should_extract
-
-settings = get_settings()
-
-_UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
-
-
-def _safe_filename(name: str, fallback: str = "attachment") -> str:
-    name = (name or "").strip().replace("\x00", "")
-    name = _UNSAFE.sub("_", name).strip("._") or fallback
-    return name[:180]
-
-
-def _eml_path(account_id: int, dedup_key: str) -> Path:
-    h = hashlib.sha1(dedup_key.encode("utf-8")).hexdigest()
-    p = settings.eml_dir / str(account_id) / f"{h}.eml"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    return p
-
-
-def _attachment_path(account_id: int, message_pk: int, idx: int, filename: str) -> Path:
-    p = settings.attachments_dir / str(account_id) / str(message_pk) / f"{idx}_{_safe_filename(filename)}"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    return p
 
 
 def build_search_text(parsed: ParsedEmail, attachment_texts: list[str] | None = None) -> str:
@@ -140,20 +115,15 @@ def ingest_raw(
             search_text=build_search_text(parsed),
             extract_status="pending" if needs_extract else "none",
         )
+        msg.raw_mime = raw
         db.add(msg)
         db.flush()  # assign msg.id
-
-        eml_path = _eml_path(account.id, parsed.dedup_key)
-        eml_path.write_bytes(raw)
-        msg.raw_path = str(eml_path)
 
         for kind, pairs in parsed.recipients.items():
             for name, addr in pairs:
                 db.add(Recipient(message_pk=msg.id, kind=kind, name=name, address=addr))
 
-        for idx, att in enumerate(parsed.attachments):
-            disk_path = _attachment_path(account.id, msg.id, idx, att.filename)
-            disk_path.write_bytes(att.payload)
+        for att in parsed.attachments:
             extractable = should_extract(att.content_type, att.filename) and bool(att.payload)
             db.add(
                 Attachment(
@@ -163,7 +133,7 @@ def ingest_raw(
                     size_bytes=len(att.payload),
                     content_id=att.content_id,
                     is_inline=att.is_inline,
-                    disk_path=str(disk_path),
+                    content=att.payload,
                     extract_status="pending" if extractable else "skipped",
                 )
             )

@@ -13,7 +13,7 @@ from datetime import timedelta
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from .models import utcnow
+from core.models import utcnow
 
 
 def rebuild_contacts(db: Session, years: int) -> int:

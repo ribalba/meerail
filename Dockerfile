@@ -10,13 +10,14 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# `core` is shared with the agent (models, parsing, ingest); `app` is the web layer.
+COPY core ./core
 COPY app ./app
 
-# Raw .eml files and attachments live here; mount a volume to persist them.
+# Staging for outgoing attachments; mail bytes live in Postgres.
 RUN mkdir -p /data
-ENV DATABASE_URL=postgresql+psycopg2://meerail:meerail@db:5432/meerail \
-    DATA_DIR=/data \
-    TIKA_URL=http://tika:9998
+ENV DATABASE_URL=postgresql+psycopg://meerail:meerail@db:5432/meerail \
+    DATA_DIR=/data
 
 EXPOSE 8000
 

@@ -2,13 +2,14 @@
 
 import uuid
 
+import dbfixture
 from conftest import ingest_one
 from helpers import api
 
 
 def _actions(email):
-    _, a = api("GET", f"/api/agent/actions?account={email}")
-    return a
+    """The queue the agent drains — read straight from the DB now."""
+    return dbfixture.pending_actions(email)
 
 
 def test_mark_read_updates_state_and_enqueues(account):

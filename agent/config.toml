@@ -1,7 +1,7 @@
 # TEST config pointing at the local GreenMail server (see verification).
 # For real use, copy config.example.toml and point at Proton Bridge instead.
-server_url    = "http://localhost:8000"
-agent_token   = ""
+database_url  = "postgresql+psycopg://meerail:meerail@127.0.0.1:5432/meerail"
+tika_url      = "http://127.0.0.1:9998"
 poll_interval = 30
 batch_size    = 200
 

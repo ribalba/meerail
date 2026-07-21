@@ -1,8 +1,8 @@
-"""Optional auth gates.
+"""Optional auth gate for the web UI / REST API.
 
-Both are no-ops unless the corresponding secret is configured, so a localhost
-install is open by default. Set SERVER_AUTH_TOKEN / AGENT_TOKEN when exposing
-the server beyond localhost.
+A no-op unless SERVER_AUTH_TOKEN is configured, so a localhost install is open by
+default. The agent no longer authenticates here at all — it talks straight to
+Postgres, so its credentials are the database's.
 """
 
 import secrets
@@ -10,7 +10,7 @@ import hashlib
 
 from fastapi import Cookie, Header, HTTPException, status
 
-from .config import get_settings
+from core.config import get_settings
 
 settings = get_settings()
 
@@ -35,14 +35,4 @@ def require_ui_auth(
     if not (bearer_ok or cookie_ok):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing server token"
-        )
-
-
-def require_agent_auth(x_agent_token: str | None = Header(default=None)) -> None:
-    token = settings.agent_token
-    if not token:
-        return
-    if x_agent_token != token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing agent token"
         )

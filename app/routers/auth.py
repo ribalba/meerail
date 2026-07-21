@@ -5,7 +5,7 @@ import secrets
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel
 
-from ..config import get_settings
+from core.config import get_settings
 from ..deps import UI_SESSION_COOKIE, ui_session_value
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])

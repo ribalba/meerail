@@ -9,4 +9,8 @@ if [ ! -d .venv ]; then
   .venv/bin/pip install --quiet -r requirements.txt
 fi
 
+# The agent shares the `core` package with the server, which lives at the repo
+# root — put it on the path alongside this directory.
+export PYTHONPATH="$(cd .. && pwd)${PYTHONPATH:+:$PYTHONPATH}"
+
 exec .venv/bin/python main.py "$@"

@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import ssl
 
+import imaplib_compat  # noqa: F401  (patches imaplib for imapclient on 3.14+)
 from imapclient import IMAPClient
 
 from config import AccountConfig

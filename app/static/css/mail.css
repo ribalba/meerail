@@ -190,8 +190,27 @@ svg { display: block; }
 .tb-spacer { flex: 1; }
 
 /* --- Compose --- */
-.modal.compose { width: min(620px, 94vw); }
-.compose-body { display: flex; flex-direction: column; gap: .5rem; }
+/* Resizable via the native grip; `resize` needs a non-visible overflow, which
+   .modal already sets. Dragging switches to absolute positioning (below). */
+.modal.compose {
+  position: relative;  /* containing block for the drop overlay */
+  width: min(620px, 94vw); height: min(660px, 86vh); max-height: none;
+  min-width: 340px; min-height: 300px; max-width: 98vw; resize: both;
+}
+/* Shown while files hover anywhere over the composer; pointer-events off so it
+   never eats the dragleave/drop events fired at the elements beneath it. */
+.compose-drop {
+  position: absolute; inset: 0; z-index: 2; pointer-events: none;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--accent-weak); border: 2px dashed var(--accent); border-radius: 12px;
+}
+.compose-drop[hidden] { display: none; }
+.compose-drop span { font-weight: 600; font-size: .95rem; color: var(--accent); }
+.modal.compose .modal-head { cursor: move; user-select: none; }
+.modal.compose .modal-head .icon-btn { cursor: pointer; }
+/* Once dragged the window is placed by pixel coords instead of backdrop centering. */
+.modal.compose.dragging-placed { position: absolute; margin: 0; }
+.compose-body { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: .5rem; }
 .compose-row { display: flex; align-items: center; gap: .6rem; }
 .compose-row label { width: 54px; flex: 0 0 auto; color: var(--text-muted); font-size: .84rem; text-align: right; }
 .compose-row input, #compose-from {
@@ -200,7 +219,7 @@ svg { display: block; }
 }
 .compose-row input:focus, #compose-from:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 .compose-textarea {
-  min-height: 240px; resize: vertical; font: inherit; font-size: .9rem; line-height: 1.5;
+  flex: 1; min-height: 120px; resize: none; font: inherit; font-size: .9rem; line-height: 1.5;
   padding: .6rem .7rem; border: 1px solid var(--border); border-radius: 8px;
   background: var(--bg); color: var(--text); margin-top: .3rem;
 }
@@ -245,9 +264,9 @@ svg { display: block; }
 .modal-head h2 { margin: 0; font-size: 1.1rem; }
 .modal-body { padding: 1rem 1.2rem 1.4rem; overflow-y: auto; }
 .settings-account-list { list-style: none; margin: 0 0 1rem; padding: 0; }
-.settings-account-list li { display: flex; align-items: center; gap: .6rem; padding: .55rem .1rem;
-  border-bottom: 1px solid var(--border); }
+.settings-account-list li { padding: .55rem .1rem .75rem; border-bottom: 1px solid var(--border); }
 .settings-account-list li:last-child { border-bottom: none; }
+.sa-row { display: flex; align-items: center; gap: .6rem; }
 .sa-main { flex: 1; min-width: 0; }
 .sa-email { font-weight: 550; font-size: .9rem; }
 .sa-sub { font-size: .76rem; color: var(--text-muted); }
@@ -255,6 +274,20 @@ svg { display: block; }
   border: 1px solid var(--border); color: var(--text-muted); }
 .status-pill.ok { color: #1a7f37; border-color: #1a7f3766; }
 .link-btn { background: none; border: none; color: var(--danger); cursor: pointer; font: inherit; font-size: .82rem; }
+/* Per-account signature/disclaimer editor. */
+.sa-footer { margin: .55rem 0 0 1.4rem; }
+.sa-footer label { display: block; font-size: .74rem; color: var(--text-muted); margin-bottom: .3rem; }
+.sa-footer textarea { width: 100%; box-sizing: border-box; font: inherit; font-size: .84rem;
+  line-height: 1.45; padding: .5rem .65rem; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg); color: var(--text); resize: vertical; min-height: 3.4rem; }
+.sa-footer textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.sa-footer-actions { display: flex; align-items: center; gap: .6rem; margin-top: .4rem; }
+.sa-footer-actions button { font: inherit; font-size: .8rem; font-weight: 600; border: none;
+  border-radius: 7px; padding: .34rem .8rem; background: var(--bg-elev); color: var(--text);
+  border: 1px solid var(--border); cursor: pointer; }
+.sa-footer-actions button:hover { background: var(--border); }
+.sa-footer-status { font-size: .76rem; color: var(--text-muted); }
+.sa-footer-status.error { color: var(--danger); }
 .add-account { display: flex; gap: .5rem; flex-wrap: wrap; }
 .add-account input { flex: 1 1 10rem; min-width: 0; font: inherit; padding: .5rem .65rem;
   border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); }

@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session as DBSession
 
-from ..database import get_db
+from core.database import get_db
 from ..deps import require_ui_auth
-from ..models import Account
+from core.models import Account
 from ..schemas import AccountCreate, AccountOut, AccountUpdate
 
 router = APIRouter(prefix="/api/accounts", tags=["accounts"], dependencies=[Depends(require_ui_auth)])

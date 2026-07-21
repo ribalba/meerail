@@ -6,11 +6,11 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session as DBSession
 
-from ..config import get_settings
+from core.config import get_settings
 from ..contacts import rebuild_contacts
-from ..database import get_db
+from core.database import get_db
 from ..deps import require_ui_auth
-from ..models import Contact
+from core.models import Contact
 
 router = APIRouter(prefix="/api/contacts", tags=["contacts"], dependencies=[Depends(require_ui_auth)])
 settings = get_settings()
