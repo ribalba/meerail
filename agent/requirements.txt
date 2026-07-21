@@ -1,0 +1,3 @@
+# meerail-agent — the small connector that runs next to Proton Bridge.
+IMAPClient==3.0.1
+httpx==0.28.1

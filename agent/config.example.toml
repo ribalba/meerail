@@ -1,0 +1,24 @@
+# meerail-agent configuration. Copy to config.toml and fill in.
+#
+# The agent runs on the machine where Proton Bridge is installed. It reads your
+# Bridge IMAP/SMTP credentials (shown in the Bridge app — NOT your Proton
+# password) and syncs into the meerail server.
+
+server_url   = "http://localhost:8000"   # your meerail server (local or remote)
+agent_token  = ""                          # must match the server's AGENT_TOKEN (empty = none)
+poll_interval = 30                         # seconds between IDLE cycles
+batch_size    = 200                        # UIDs per fetch/upload batch
+
+# One [[account]] block per address. The email MUST match an account you added
+# in the meerail web UI. Add more blocks for multiple accounts.
+[[account]]
+email        = "you@proton.me"
+imap_host    = "127.0.0.1"
+imap_port    = 1143            # Bridge default IMAP port
+imap_security = "starttls"    # starttls | ssl | plain
+smtp_host    = "127.0.0.1"
+smtp_port    = 1025            # Bridge default SMTP port
+smtp_security = "starttls"
+username     = "you@proton.me"  # the Bridge username
+password     = "BRIDGE-PASSWORD-HERE"
+verify_cert  = false          # Bridge uses a self-signed cert; false trusts it

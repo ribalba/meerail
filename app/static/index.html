@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>meerail</title>
+  <meta name="theme-color" content="#1d6ff2" />
+  <link rel="icon" type="image/png" href="/static/img/logo-square.png" />
+  <link rel="apple-touch-icon" href="/static/img/logo-square.png" />
+  <link rel="stylesheet" href="/static/css/mail.css" />
+</head>
+<body>
+  <div class="app" id="app">
+    <!-- Sidebar: accounts + mailboxes -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-toolbar">
+        <span class="brand"><img class="brand-logo" src="/static/img/logo.png" alt="" />meerail</span>
+        <button class="icon-btn" id="btn-settings" title="Accounts &amp; settings"></button>
+      </div>
+      <nav class="mailbox-tree" id="mailbox-tree"></nav>
+    </aside>
+
+    <!-- Message list -->
+    <section class="list-pane" id="list-pane">
+      <header class="pane-header">
+        <div class="pane-title" id="list-title">Inbox</div>
+        <div class="pane-header-actions">
+          <button class="icon-btn" id="btn-compose" title="New message"></button>
+          <button class="icon-btn" id="btn-refresh" title="Refresh"></button>
+        </div>
+      </header>
+      <div class="search-region">
+        <div class="search-bar">
+          <span class="search-icon" id="search-icon"></span>
+          <input type="search" id="search-input" placeholder="Search all mail" autocomplete="off" />
+          <button class="icon-btn search-clear" id="search-clear" title="Clear" hidden></button>
+        </div>
+        <div class="search-controls" id="search-controls" hidden>
+          <label class="rx-toggle" title="Match with a POSIX regular expression">
+            <input type="checkbox" id="rx-toggle" /> <span>Regex</span>
+          </label>
+          <select id="scope-select" class="search-select" title="Search scope">
+            <option value="all">All Mailboxes</option>
+            <option value="mailbox">This Mailbox</option>
+          </select>
+          <select id="years-select" class="search-select" title="Time window">
+            <option value="0">All time</option>
+            <option value="2">Last 2 years</option>
+            <option value="1">Last year</option>
+          </select>
+          <span class="search-status" id="search-status"></span>
+        </div>
+      </div>
+      <div class="message-list" id="message-list"></div>
+    </section>
+
+    <!-- Reading pane -->
+    <section class="reading-pane" id="reading-pane">
+      <div class="reader-empty" id="reader-empty">
+        <div class="reader-empty-glyph"></div>
+        <p>No message selected</p>
+      </div>
+      <div class="reader-content" id="reader-content" hidden></div>
+    </section>
+  </div>
+
+  <!-- Settings / accounts modal -->
+  <div class="modal-backdrop" id="settings-modal" hidden>
+    <div class="modal">
+      <div class="modal-head">
+        <h2>Accounts</h2>
+        <button class="icon-btn" id="btn-close-settings" title="Close"></button>
+      </div>
+      <div class="modal-body">
+        <ul id="settings-account-list" class="settings-account-list"></ul>
+        <form id="add-account" class="add-account" autocomplete="off">
+          <input type="email" id="acc-email" placeholder="you@proton.me" required />
+          <input type="text" id="acc-label" placeholder="Label (optional)" />
+          <button type="submit">Add</button>
+        </form>
+        <p id="add-error" class="error" hidden></p>
+        <p class="muted small">
+          After adding an account, run <code>meerail-agent</code> on the machine
+          with Proton Bridge (see <code>agent/README.md</code>).
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Compose window -->
+  <div class="modal-backdrop" id="compose-modal" hidden>
+    <div class="modal compose">
+      <div class="modal-head">
+        <h2 id="compose-title">New Message</h2>
+        <button class="icon-btn" id="compose-close" title="Close"></button>
+      </div>
+      <div class="modal-body compose-body">
+        <div class="compose-row" id="compose-from-row">
+          <label>From</label>
+          <select id="compose-from"></select>
+        </div>
+        <div class="compose-row"><label>To</label>
+          <input id="compose-to" type="text" placeholder="recipient@example.com, …" autocomplete="off" /></div>
+        <div class="compose-row"><label>Cc</label>
+          <input id="compose-cc" type="text" autocomplete="off" /></div>
+        <div class="compose-row"><label>Bcc</label>
+          <input id="compose-bcc" type="text" autocomplete="off" /></div>
+        <div class="compose-row"><label>Subject</label>
+          <input id="compose-subject" type="text" autocomplete="off" /></div>
+        <textarea id="compose-body" class="compose-textarea" placeholder="Write your message…"></textarea>
+        <div id="compose-attachments" class="compose-attachments"></div>
+        <div class="compose-actions">
+          <button id="compose-attach" class="icon-btn" title="Attach file"></button>
+          <input type="file" id="compose-file" multiple hidden />
+          <span id="compose-status" class="compose-status"></span>
+          <button id="compose-send" class="btn-primary">Send</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/js/app.core.js"></script>
+  <script src="/static/js/app.autocomplete.js"></script>
+  <script src="/static/js/app.reader.js"></script>
+  <script src="/static/js/app.list.js"></script>
+  <script src="/static/js/app.search.js"></script>
+  <script src="/static/js/app.compose.js"></script>
+  <script src="/static/js/app.shell.js"></script>
+</body>
+</html>

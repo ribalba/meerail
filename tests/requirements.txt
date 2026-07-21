@@ -1,0 +1,4 @@
+# Test-only deps. The unit tests also need the server deps (selectolax etc.)
+# from the top-level requirements.txt; the GreenMail test needs imapclient.
+pytest==8.3.4
+IMAPClient==3.0.1

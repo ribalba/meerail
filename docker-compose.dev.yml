@@ -1,0 +1,17 @@
+# Development override: live-mounts the source so code changes reload without
+# rebuilding the image. Use alongside the base file:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# (db and tika are inherited unchanged from docker-compose.yml.)
+services:
+  server:
+    # --reload restarts uvicorn on any change under the mounted source tree.
+    # --reload-dir scopes the watcher to /app/app so it ignores /data churn.
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "/app/app"]
+    volumes:
+      # Bind-mount the source over the image's copy — edits on the host take
+      # effect immediately, no rebuild/restart needed.
+      - ./app:/app/app
+      # Keep the named volume for on-disk mail blobs (raw .eml + attachments).
+      - mail-data:/data

@@ -1,0 +1,125 @@
+"""IMAP operations against Proton Bridge (or any IMAP server) via IMAPClient."""
+
+from __future__ import annotations
+
+import re
+import ssl
+
+from imapclient import IMAPClient
+
+from config import AccountConfig
+
+_MSGID_RE = re.compile(rb"<[^>]+>")
+
+# IMAP SPECIAL-USE flags we care about for role hints.
+_SPECIAL = {b"\\sent", b"\\drafts", b"\\junk", b"\\trash", b"\\archive", b"\\all", b"\\flagged"}
+
+
+def _ssl_context(verify: bool) -> ssl.SSLContext:
+    ctx = ssl.create_default_context()
+    if not verify:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+def flags_to_dict(flags: tuple) -> dict:
+    known = {b"\\seen": "seen", b"\\flagged": "flagged", b"\\answered": "answered",
+             b"\\draft": "draft", b"\\deleted": "deleted"}
+    out = {"seen": False, "flagged": False, "answered": False, "draft": False, "deleted": False}
+    keywords: list[str] = []
+    for f in flags or ():
+        key = f.lower() if isinstance(f, bytes) else str(f).lower().encode()
+        if key in known:
+            out[known[key]] = True
+        else:
+            keywords.append(f.decode() if isinstance(f, bytes) else str(f))
+    out["keywords"] = keywords
+    return out
+
+
+def _body_bytes(data: dict) -> bytes:
+    for key, val in data.items():
+        if isinstance(key, bytes) and key.startswith(b"BODY[") and val:
+            return val
+    return b""
+
+
+class Bridge:
+    def __init__(self, account: AccountConfig):
+        self.acc = account
+        self.client: IMAPClient | None = None
+
+    def connect(self) -> None:
+        acc = self.acc
+        ctx = _ssl_context(acc.verify_cert)
+        use_ssl = acc.imap_security == "ssl"
+        self.client = IMAPClient(acc.imap_host, port=acc.imap_port, ssl=use_ssl,
+                                 ssl_context=ctx if use_ssl else None, use_uid=True)
+        if acc.imap_security == "starttls":
+            self.client.starttls(ctx)
+        self.client.login(acc.username or acc.email, acc.password)
+
+    def logout(self) -> None:
+        if self.client:
+            try:
+                self.client.logout()
+            except Exception:
+                pass
+            self.client = None
+
+    def list_folders(self) -> list[dict]:
+        out = []
+        for flags, _delim, name in self.client.list_folders():
+            lower = {f.lower() if isinstance(f, bytes) else str(f).lower().encode() for f in flags}
+            if b"\\noselect" in lower:
+                continue
+            hint = next((f.decode() for f in flags
+                         if (f.lower() if isinstance(f, bytes) else b"") in _SPECIAL), "")
+            out.append({"name": name, "role_hint": hint})
+        return out
+
+    def select(self, name: str) -> tuple[int | None, int | None]:
+        info = self.client.select_folder(name, readonly=True)
+        uidvalidity = info.get(b"UIDVALIDITY")
+        uidnext = info.get(b"UIDNEXT")
+        return (int(uidvalidity) if uidvalidity else None,
+                int(uidnext) if uidnext else None)
+
+    def new_uids(self, last_uid: int) -> list[int]:
+        uids = self.client.search([u"UID", f"{last_uid + 1}:*"])
+        return sorted(u for u in uids if u > last_uid)
+
+    def all_uids(self) -> list[int]:
+        return sorted(self.client.search(["ALL"]))
+
+    def fetch_headers(self, uids: list[int]) -> dict[int, dict]:
+        """Cheap pass: FLAGS + Message-ID header only (no body)."""
+        resp = self.client.fetch(uids, [b"FLAGS", b"BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)]"])
+        out = {}
+        for uid, data in resp.items():
+            hdr = _body_bytes(data)
+            m = _MSGID_RE.search(hdr or b"")
+            message_id = m.group(0)[1:-1].decode(errors="replace") if m else None
+            out[uid] = {"message_id": message_id, "flags": flags_to_dict(data.get(b"FLAGS", ()))}
+        return out
+
+    def fetch_flags(self, uids: list[int]) -> dict[int, dict]:
+        resp = self.client.fetch(uids, [b"FLAGS"])
+        return {uid: flags_to_dict(data.get(b"FLAGS", ())) for uid, data in resp.items()}
+
+    def fetch_raw(self, uids: list[int]) -> dict[int, dict]:
+        resp = self.client.fetch(uids, [b"FLAGS", b"BODY.PEEK[]"])
+        out = {}
+        for uid, data in resp.items():
+            out[uid] = {"raw": _body_bytes(data), "flags": flags_to_dict(data.get(b"FLAGS", ()))}
+        return out
+
+    def idle_wait(self, seconds: int) -> bool:
+        """IDLE on the currently-selected folder; return True if something changed."""
+        self.client.idle()
+        try:
+            responses = self.client.idle_check(timeout=seconds)
+        finally:
+            self.client.idle_done()
+        return bool(responses)
