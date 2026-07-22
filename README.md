@@ -115,7 +115,7 @@ runs*, because the agent has to reach Bridge on that loopback.
 |             | Postgres · Tika · server | agent                               | desktop app         |
 | ----------- | ------------------------ | ----------------------------------- | ------------------- |
 | **Linux**   | Docker                   | Docker (host network) **or** native | Electron or browser |
-| **macOS**   | Docker Desktop           | native — Docker can't see Bridge    | Electron or browser |
+| **macOS**   | Docker Desktop           | native (launchd) — Docker can't see Bridge | Electron or browser |
 | **Windows** | Docker Desktop (WSL2)    | native — Docker can't see Bridge    | Electron or browser |
 
 On macOS and Windows, Docker Desktop runs containers inside a Linux VM, so a container's
@@ -161,10 +161,22 @@ chmod 600 config.toml
 open http://localhost:8000
 ```
 
-`run.sh` builds the venv and puts the repo root on `PYTHONPATH` for you. To have the agent
-start at login and restart on failure, use the **launchd LaunchAgent** plist in
-[`agent/README.md`](agent/README.md#macos--launchd) — it has to be a LaunchAgent rather
-than a LaunchDaemon, since Bridge only runs inside your logged-in session.
+`run.sh` builds the venv and puts the repo root on `PYTHONPATH` for you.
+
+Once that works, hand it to launchd so it runs in the background instead of tying up a
+terminal:
+
+```bash
+./service.sh install                      # or: make agent-service
+./service.sh status                       # running? plus the last few log lines
+./service.sh logs                         # tail -f
+```
+
+That generates a **LaunchAgent** with this checkout's paths, starts the agent at login and
+restarts it if it dies. It has to be a LaunchAgent rather than a LaunchDaemon, since Bridge
+only runs inside your logged-in session — see
+[`agent/README.md`](agent/README.md#macos--launchd) for the rest of the commands and what
+the plist sets.
 
 ### Windows
 
@@ -274,8 +286,9 @@ on `PYTHONPATH` (the agent imports `core`) and passes arguments through:
 | `--backfill-previews` | Render previews for attachments already stored, then exit. |
 
 On Linux the same thing runs containerised with `make agent-docker` / `make agent-test` /
-`make agent-logs`. [`agent/README.md`](agent/README.md) covers the logs, the full-recheck
-path, and start-at-boot units for all three platforms.
+`make agent-logs`; on macOS, `agent/service.sh install` (`make agent-service`) puts it in
+the background under launchd. [`agent/README.md`](agent/README.md) covers the logs, the
+full-recheck path, and start-at-boot setups for all three platforms.
 
 ## Development
 

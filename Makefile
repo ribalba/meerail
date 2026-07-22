@@ -17,7 +17,7 @@ TEST_MEERAIL_URL = http://127.0.0.1:18000
 TEST_TIKA_URL = http://127.0.0.1:59998
 PYTEST ?= .venv-test/bin/pytest
 
-.PHONY: help up down logs build infra dev venv agent agent-docker agent-test agent-logs desktop psql fmt test test-up test-down test-psql screenshots
+.PHONY: help up down logs build infra dev venv agent agent-docker agent-test agent-logs agent-service agent-service-status agent-service-stop desktop psql fmt test test-up test-down test-psql screenshots
 
 help:
 	@echo "meerail targets:"
@@ -31,6 +31,9 @@ help:
 	@echo "  make agent-docker - run the agent in Docker, host network (Linux only)"
 	@echo "  make agent-test   - check the agent's connections in Docker, then exit"
 	@echo "  make agent-logs   - tail agent logs"
+	@echo "  make agent-service        - macOS: run the agent in the background at login"
+	@echo "  make agent-service-status - macOS: is the background agent running?"
+	@echo "  make agent-service-stop   - macOS: stop and remove the background agent"
 	@echo "  make desktop - run the native Electron app (needs the server running)"
 	@echo "  make psql    - open a psql shell on the bundled Postgres"
 	@echo "  make test    - run the suite on a throwaway stack (never touches prod)"
@@ -74,6 +77,17 @@ agent-test:
 
 agent-logs:
 	$(COMPOSE) $(AGENT_FILES) logs -f agent
+
+# macOS only — the launchd equivalent of what agent-docker does on Linux:
+# start at login, restart on failure. `service.sh logs` tails it.
+agent-service:
+	cd agent && ./service.sh install
+
+agent-service-status:
+	cd agent && ./service.sh status
+
+agent-service-stop:
+	cd agent && ./service.sh uninstall
 
 desktop:
 	cd electron && npm install && npm start
