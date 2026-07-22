@@ -15,33 +15,43 @@
     <aside class="sidebar" id="sidebar">
       <div class="sidebar-toolbar">
         <span class="brand"><img class="brand-logo" src="/static/img/logo.png" alt="" />meerail</span>
+        <button class="icon-btn" id="btn-refresh" title="Refresh — fetch new mail now"></button>
+        <button class="icon-btn" id="btn-stats" title="Statistics"></button>
+        <button class="icon-btn" id="btn-agent" title="Agent status"></button>
         <button class="icon-btn" id="btn-settings" title="Accounts &amp; settings"></button>
       </div>
+      <!-- Only shown when the agent has stopped syncing; opens the status modal. -->
+      <button class="agent-warning" id="agent-warning" hidden></button>
       <nav class="mailbox-tree" id="mailbox-tree"></nav>
+      <!-- Live sync progress, rendered by app.status.js while a pass is running.
+           Hidden between passes — the modal keeps the last-pass tallies. Sits
+           above the cheat sheet and collapses the same way. -->
+      <div class="sync-strip" id="sync-strip" hidden></div>
+      <!-- Keyboard cheat sheet — rendered by app.keys.js from its binding table -->
+      <div class="shortcut-box" id="shortcut-box"></div>
     </aside>
 
     <!-- Message list -->
     <section class="list-pane" id="list-pane">
       <header class="pane-header">
         <div class="pane-title" id="list-title">Inbox</div>
-        <div class="pane-header-actions">
-          <button class="icon-btn" id="btn-compose" title="New message"></button>
-          <button class="icon-btn" id="btn-refresh" title="Refresh"></button>
-        </div>
       </header>
       <div class="search-region">
         <div class="search-bar">
           <span class="search-icon" id="search-icon"></span>
-          <input type="search" id="search-input" placeholder="Search all mail" autocomplete="off" />
+          <input type="search" id="search-input" placeholder="Search all mail" autocomplete="off"
+                 title="Words are ANDed; wrap a phrase in quotes to match it exactly. Filters like :unread and :from — see the ⓘ" />
           <button class="icon-btn search-clear" id="search-clear" title="Clear" hidden></button>
+          <button class="icon-btn search-help-btn" id="search-help-btn"
+                  title="What you can type in here"></button>
         </div>
         <div class="search-controls" id="search-controls" hidden>
           <label class="rx-toggle" title="Match with a POSIX regular expression">
             <input type="checkbox" id="rx-toggle" /> <span>Regex</span>
           </label>
+          <!-- One option per folder, filled in by app.search.js from the sidebar. -->
           <select id="scope-select" class="search-select" title="Search scope">
             <option value="all">All Mailboxes</option>
-            <option value="mailbox">This Mailbox</option>
           </select>
           <select id="years-select" class="search-select" title="Time window">
             <option value="0">All time</option>
@@ -51,11 +61,19 @@
           <span class="search-status" id="search-status"></span>
         </div>
       </div>
+      <!-- Bulk action bar — shown by app.bulk.js while rows are ticked -->
+      <div class="bulk-bar" id="bulk-bar" hidden></div>
       <div class="message-list" id="message-list"></div>
     </section>
 
+    <!-- Drag handle between list and reader; width persists in localStorage -->
+    <div class="pane-divider" id="pane-divider" role="separator" aria-orientation="vertical"
+      tabindex="0" title="Drag to resize — double-click to reset"></div>
+
     <!-- Reading pane -->
     <section class="reading-pane" id="reading-pane">
+      <!-- Thread action bar — always present, acts on the newest message -->
+      <div class="reader-bar" id="reader-bar"></div>
       <div class="reader-empty" id="reader-empty">
         <div class="reader-empty-glyph"></div>
         <p>No message selected</p>
@@ -68,22 +86,170 @@
   <div class="modal-backdrop" id="settings-modal" hidden>
     <div class="modal">
       <div class="modal-head">
-        <h2>Accounts</h2>
+        <h2>Settings</h2>
         <button class="icon-btn" id="btn-close-settings" title="Close"></button>
       </div>
       <div class="modal-body">
+        <h3 class="settings-heading">Accounts</h3>
         <ul id="settings-account-list" class="settings-account-list"></ul>
-        <form id="add-account" class="add-account" autocomplete="off">
-          <input type="email" id="acc-email" placeholder="you@proton.me" required />
-          <input type="text" id="acc-label" placeholder="Label (optional)" />
-          <button type="submit">Add</button>
-        </form>
-        <p id="add-error" class="error" hidden></p>
         <p class="muted small">
           Accounts register themselves when a <code>meerail-agent</code> connects
-          (see <code>agent/README.md</code>) — adding one here is only needed to
-          pick a label up front.
+          (see <code>agent/README.md</code>). To add or remove one, edit the
+          agent's <code>config.toml</code> — the name, colour and footer set here
+          are local settings and stay put across syncs. The footer is prefilled
+          into the composer, so it can be edited or removed per message.
         </p>
+
+        <h3 class="settings-heading">Appearance</h3>
+        <div class="settings-section">
+          <label for="age-days">Age tint horizon (days)</label>
+          <input type="number" id="age-days" min="0" max="3650" step="1" />
+          <p class="muted small">
+            Messages in the list fade from white towards red as they age,
+            reaching full red once they are this old. Set to <code>0</code> to
+            switch the tint off. Stored in this browser only.
+          </p>
+        </div>
+
+        <h3 class="settings-heading">Tasks</h3>
+        <div class="settings-section">
+          <label for="meerato-url">Meerato private URL</label>
+          <input type="text" id="meerato-url" autocomplete="off" spellcheck="false"
+            placeholder="https://meerato.example.com/api/create?token=…" />
+          <div class="sa-footer-actions">
+            <button type="button" id="meerato-save">Save</button>
+            <span class="sa-footer-status" id="meerato-status"></span>
+          </div>
+          <p class="muted small">
+            Copy it from Meerato's API page. With one saved, an <em>Add Task</em>
+            button appears on the reading pane and on every message: the subject
+            becomes the task title, the body its text, and any attachments you
+            tick are uploaded with it. Leave the field empty to remove it.
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add-task modal — only reachable when a Meerato URL is configured -->
+  <div class="modal-backdrop" id="task-modal" hidden>
+    <div class="modal">
+      <div class="modal-head">
+        <h2>Add Task</h2>
+        <button class="icon-btn" id="btn-close-task" title="Close"></button>
+      </div>
+      <div class="modal-body">
+        <label class="task-field">
+          <span>Title</span>
+          <input type="text" id="task-title" autocomplete="off" placeholder="Task title" />
+        </label>
+        <div id="task-selects"></div>
+        <div id="task-attachments" class="task-attachments" hidden></div>
+        <p class="muted small">The message body becomes the task text.</p>
+        <div class="task-actions">
+          <span id="task-status-line" class="task-status-line"></span>
+          <button id="task-create" class="btn-primary">Create Task</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- New-folder modal — opened from the + on an account header -->
+  <div class="modal-backdrop" id="folder-modal" hidden>
+    <div class="modal">
+      <div class="modal-head">
+        <h2>New Folder</h2>
+        <button class="icon-btn" id="btn-close-folder" title="Close"></button>
+      </div>
+      <div class="modal-body">
+        <label class="task-field">
+          <span>Name</span>
+          <input type="text" id="folder-name" autocomplete="off" placeholder="Folder name" />
+        </label>
+        <p class="muted small" id="folder-account-hint"></p>
+        <div class="task-actions">
+          <span id="folder-status-line" class="task-status-line"></span>
+          <button id="folder-create" class="btn-primary">Create Folder</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Agent status modal -->
+  <div class="modal-backdrop" id="agent-modal" hidden>
+    <div class="modal">
+      <div class="modal-head">
+        <h2>Agent status</h2>
+        <button class="icon-btn" id="btn-close-agent" title="Close"></button>
+      </div>
+      <div class="modal-body" id="agent-body"></div>
+    </div>
+  </div>
+
+  <!-- Statistics modal — per-account analytics, drawn by app.stats.js -->
+  <div class="modal-backdrop" id="stats-modal" hidden>
+    <div class="modal">
+      <div class="modal-head">
+        <h2>Statistics</h2>
+        <button class="icon-btn" id="btn-close-stats" title="Close"></button>
+      </div>
+      <div class="modal-body" id="stats-body"></div>
+    </div>
+  </div>
+
+  <!-- Search syntax help — the ⓘ next to the search box -->
+  <div class="modal-backdrop" id="search-help-modal" hidden>
+    <div class="modal">
+      <div class="modal-head">
+        <h2>Search syntax</h2>
+        <button class="icon-btn" id="btn-close-search-help" title="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p class="help-lede">Plain words are ANDed — every one of them has to appear somewhere in
+          the mail: subject, participants, body, or the text of an attachment. Wrap a phrase in
+          <code>"double quotes"</code> to match it exactly, spaces and all.</p>
+
+        <h3>Filters</h3>
+        <p class="help-lede">Filters narrow the results instead of searching text, so they work on
+          their own as well as alongside words. Mixing them is an AND.</p>
+        <table class="help-table">
+          <tr>
+            <td><code>:unread</code></td>
+            <td>Conversations with at least one unread message.</td>
+          </tr>
+          <tr>
+            <td><code>:read</code></td>
+            <td>Conversations you have read all the way through.</td>
+          </tr>
+          <tr>
+            <td><code>:has-attachment</code></td>
+            <td>Only mail that carries an attachment.</td>
+          </tr>
+          <tr>
+            <td><code>:from <em>pattern</em></code></td>
+            <td>Sender address or display name matches.</td>
+          </tr>
+          <tr>
+            <td><code>:to <em>pattern</em></code></td>
+            <td>Any recipient matches — To, Cc <em>and</em> Bcc.</td>
+          </tr>
+        </table>
+        <p class="help-lede">The pattern in <code>:from</code> and <code>:to</code> is always a
+          regular expression, whether or not the Regex switch is on — a plain address works as
+          one. Use quotes if it contains a space, or <code>:from=pattern</code> if you prefer.</p>
+
+        <h3>Examples</h3>
+        <table class="help-table">
+          <tr><td><code>invoice :unread</code></td><td>Unread mail mentioning “invoice”.</td></tr>
+          <tr><td><code>:from @acme\.com :has-attachment</code></td>
+              <td>Everything anyone at Acme sent you with a file attached.</td></tr>
+          <tr><td><code>:to (ada|grace)@</code></td><td>Addressed to either of them.</td></tr>
+          <tr><td><code>"board meeting" :from ada</code></td><td>That phrase, from Ada.</td></tr>
+        </table>
+
+        <p class="help-lede">The <strong>Regex</strong> switch turns the rest of the query into a
+          POSIX regular expression instead of a list of words. The scope and time pickers next to
+          it narrow the search the same way the filters do.</p>
       </div>
     </div>
   </div>
@@ -93,7 +259,8 @@
     <div class="modal compose" id="compose-window">
       <div class="modal-head" id="compose-head">
         <h2 id="compose-title">New Message</h2>
-        <button class="icon-btn" id="compose-close" title="Close"></button>
+        <button class="icon-btn" id="compose-minimize" title="Minimize"></button>
+        <button class="icon-btn" id="compose-close" title="Discard"></button>
       </div>
       <div class="compose-drop" id="compose-drop" hidden><span>Drop files to attach</span></div>
       <div class="modal-body compose-body">
@@ -102,31 +269,97 @@
           <select id="compose-from"></select>
         </div>
         <div class="compose-row"><label>To</label>
-          <input id="compose-to" type="text" placeholder="recipient@example.com, …" autocomplete="off" /></div>
-        <div class="compose-row"><label>Cc</label>
+          <input id="compose-to" type="text" placeholder="recipient@example.com, …" autocomplete="off" />
+          <span class="compose-toggles">
+            <button type="button" class="compose-toggle" id="compose-cc-toggle" aria-expanded="false"
+                    aria-controls="compose-cc">Cc</button>
+            <button type="button" class="compose-toggle" id="compose-bcc-toggle" aria-expanded="false"
+                    aria-controls="compose-bcc">Bcc</button>
+          </span></div>
+        <div class="compose-row" id="compose-cc-row" hidden><label>Cc</label>
           <input id="compose-cc" type="text" autocomplete="off" /></div>
-        <div class="compose-row"><label>Bcc</label>
+        <div class="compose-row" id="compose-bcc-row" hidden><label>Bcc</label>
           <input id="compose-bcc" type="text" autocomplete="off" /></div>
         <div class="compose-row"><label>Subject</label>
           <input id="compose-subject" type="text" autocomplete="off" /></div>
-        <textarea id="compose-body" class="compose-textarea" placeholder="Write your message…"></textarea>
+        <!-- Not a textarea: the body renders markdown as you type while keeping
+             the markers in the text, which needs mixed styling in one field. -->
+        <div id="compose-body" class="compose-textarea md-editor" contenteditable="plaintext-only"
+             role="textbox" aria-multiline="true" aria-label="Message body" spellcheck="true"
+             data-placeholder="Write your message…"></div>
         <div id="compose-attachments" class="compose-attachments"></div>
         <div class="compose-actions">
           <button id="compose-attach" class="icon-btn" title="Attach file"></button>
           <input type="file" id="compose-file" multiple hidden />
           <span id="compose-status" class="compose-status"></span>
-          <button id="compose-send" class="btn-primary">Send</button>
+          <!-- Send & Archive is the default, so it sits last where the primary
+               button has always been. Neither variant is drawn unless it can
+               act — archiving needs the conversation this replies to, ticketing
+               needs a Meerato URL — and the primary styling moves to whichever
+               button is the default of the ones on screen. See app.compose.js. -->
+          <button id="compose-send-ticket" class="btn-secondary" hidden
+                  title="Send, then file it in Meerato's Backlog">Send &amp; Ticket</button>
+          <button id="compose-send" class="btn-primary" title="Send (Alt+Enter)">Send</button>
+          <button id="compose-send-archive" class="btn-primary" hidden
+                  title="Send, then archive the whole conversation (Ctrl+Enter)">Send &amp; Archive</button>
         </div>
       </div>
     </div>
   </div>
 
+  <!-- Minimized composer: sits outside the backdrop so it survives it hiding -->
+  <div class="compose-min" id="compose-min" hidden>
+    <button class="compose-min-label" id="compose-min-restore" title="Restore">
+      <span id="compose-min-title">New Message</span>
+    </button>
+    <button class="icon-btn" id="compose-min-close" title="Discard"></button>
+  </div>
+
+  <!-- Bucket + date for the composer's "Send & Ticket". After the composer in
+       the DOM so it stacks above it — every backdrop shares one z-index. -->
+  <div class="modal-backdrop" id="ticket-modal" hidden>
+    <div class="modal">
+      <div class="modal-head">
+        <h2>Send &amp; Ticket</h2>
+        <button class="icon-btn" id="btn-close-ticket" title="Cancel"></button>
+      </div>
+      <div class="modal-body">
+        <div id="ticket-selects"></div>
+        <label class="task-field">
+          <span>Move to Now on</span>
+          <input type="date" id="ticket-date" />
+        </label>
+        <p class="muted small">The mail is sent, then filed in Meerato's Backlog. It
+          moves to Now on that date.</p>
+        <div class="task-actions">
+          <span id="ticket-status-line" class="task-status-line"></span>
+          <button id="ticket-confirm" class="btn-primary">Send &amp; Ticket</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Server unreachable — raised by app.conn.js, spans the bottom of the page -->
+  <div class="conn-bar" id="conn-bar" role="alert" hidden>
+    <span class="cb-dot"></span>
+    <span>Connection to the server lost — retrying…</span>
+  </div>
+
   <script src="/static/js/app.core.js"></script>
+  <script src="/static/js/app.conn.js"></script>
+  <script src="/static/js/app.markdown.js"></script>
+  <script src="/static/js/app.highlight.js"></script>
   <script src="/static/js/app.autocomplete.js"></script>
   <script src="/static/js/app.reader.js"></script>
   <script src="/static/js/app.list.js"></script>
+  <script src="/static/js/app.bulk.js"></script>
   <script src="/static/js/app.search.js"></script>
   <script src="/static/js/app.compose.js"></script>
+  <script src="/static/js/app.tasks.js"></script>
+  <script src="/static/js/app.status.js"></script>
+  <script src="/static/js/app.stats.js"></script>
+  <script src="/static/js/app.keys.js"></script>
+  <script src="/static/js/app.split.js"></script>
   <script src="/static/js/app.shell.js"></script>
 </body>
 </html>

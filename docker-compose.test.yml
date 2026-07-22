@@ -1,0 +1,91 @@
+# meerail — isolated test stack.
+#
+# Standalone (NOT an overlay on docker-compose.yml): the production stack holds
+# real mail, and the suite truncates every table it can reach. Run it under its
+# own project name so containers, networks and volumes can never collide with
+# production:
+#
+#   docker compose -p meerail-test -f docker-compose.test.yml up -d
+#
+# `make test` does that, and wipes the volume first so every run starts on a
+# freshly initdb'd cluster. Ports are shifted off the production ones so both
+# stacks can run at once.
+services:
+  db:
+    image: postgres:18
+    # Test-sized: the production tuning asks for 4GB of shared_buffers, which is
+    # pointless for a suite whose whole dataset is a few dozen messages.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - maintenance_work_mem=256MB   # still builds the GIN trigram index
+      - -c
+      - fsync=off                    # safe: the volume is discarded after each run
+      - -c
+      - synchronous_commit=off
+      - -c
+      - full_page_writes=off
+    environment:
+      POSTGRES_USER: meerail
+      POSTGRES_PASSWORD: meerail
+      # The _test suffix is load-bearing — tests/conftest.py refuses to run
+      # against a database whose name does not end in it.
+      POSTGRES_DB: meerail_test
+    ports:
+      # Shifted off 5432 so this never binds over the production database.
+      - "127.0.0.1:55432:5432"
+    volumes:
+      # Same mount layout as production (see docker-compose.yml); `make test`
+      # removes it with `down -v` before each run, which is what makes the
+      # cluster clean rather than merely truncated.
+      - pg-test-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U meerail -d meerail_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 3s
+
+  tika:
+    # Same tag as production, so this reuses the already-pulled image rather
+    # than downloading the (large) -full variant again. Only test_ingest.py's
+    # attachment-extraction cases need it.
+    image: apache/tika:latest-full
+    ports:
+      - "127.0.0.1:59998:9998"
+    environment:
+      JAVA_TOOL_OPTIONS: "-XX:MaxRAMPercentage=60"
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+
+  server:
+    build: .
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      # Shifted off 8000: the suite's MEERAIL_URL points here, and /healthz
+      # reports the database name so conftest can prove it is not production.
+      - "127.0.0.1:18000:8000"
+    environment:
+      DATABASE_URL: postgresql+psycopg://meerail:meerail@db:5432/meerail_test
+      SECRET_KEY: test-insecure
+      DATA_DIR: /data
+      TIKA_URL: http://tika:9998
+      # 0 = no window, so seeded fixtures dated in the past stay findable.
+      DEFAULT_SEARCH_YEARS: 0
+      CONTACTS_SCAN_YEARS: 0
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+volumes:
+  pg-test-data:

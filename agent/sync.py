@@ -7,11 +7,15 @@ Postgres. The web app never touches this; it only reads the result.
 
 from __future__ import annotations
 
+import random
 import time
 
 from core import ingest
 from core.database import SessionLocal
+from core.models import utcnow
 
+import commands
+import log
 from actions import drain_actions
 from config import AccountConfig, AgentConfig
 from imap import Bridge
@@ -22,13 +26,78 @@ def _chunks(seq, n):
         yield seq[i:i + n]
 
 
-def _sync_new(db, bridge: Bridge, account, mailbox, batch: int) -> int:
+class PassProgress:
+    """Where this pass has got to, as a JSON blob for the status panel.
+
+    The bar is per folder, with a folder counter beside it, rather than one bar
+    across the whole pass. A pass-wide denominator would mean SELECTing and
+    SEARCHing every folder up front just to total them — doubling the IMAP
+    round trips for a number that is stale as soon as mail arrives. Per folder
+    the total is already in hand: ``new_uids`` returns the complete UID list
+    before the first chunk is fetched.
+
+    ``walked`` counts UIDs looked at, not messages stored, and the two diverge
+    by a lot: a Proton mailbox shows the same message under several labels, so
+    most of a backfill's UIDs resolve to a placement row against content that is
+    already held. Driving the bar off stored messages would leave it apparently
+    frozen through exactly those stretches.
+    """
+
+    def __init__(self, folder_count: int):
+        self.folder_count = folder_count
+        self.started_at = utcnow()
+        self.folder = None
+        self.folder_index = 0      # 1-based, for display
+        self.folder_done = 0
+        self.folder_total = 0
+        self.walked = 0            # UIDs examined across the whole pass
+        self.stored = 0            # messages whose content was new
+        self.active = True
+        self.finished_at = None
+
+    def enter_folder(self, name: str, index: int) -> None:
+        """Move to folder ``index`` (0-based). The total lands later, from
+        ``_sync_new``: it is the length of the UID list, which costs a SEARCH."""
+        self.folder = name
+        self.folder_index = index + 1
+        self.folder_done = 0
+        self.folder_total = 0
+
+    def advance(self, walked: int, stored: int) -> None:
+        self.folder_done += walked
+        self.walked += walked
+        self.stored += stored
+
+    def finish(self) -> None:
+        self.active = False
+        self.finished_at = utcnow()
+
+    def snapshot(self) -> dict:
+        return {
+            "active": self.active,
+            "started_at": self.started_at.isoformat(),
+            "updated_at": utcnow().isoformat(),
+            "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+            "folder": self.folder,
+            "folder_index": self.folder_index,
+            "folder_count": self.folder_count,
+            "folder_done": self.folder_done,
+            "folder_total": self.folder_total,
+            "walked": self.walked,
+            "stored": self.stored,
+        }
+
+
+def _sync_new(db, bridge: Bridge, account, mailbox, batch: int,
+              progress: PassProgress | None = None) -> int:
     """Ingest UIDs above the folder's cursor. Returns how many were stored.
 
     The cursor only advances once a chunk is fully ingested, so an interrupted or
     partial IMAP fetch is retried next pass rather than silently skipped.
     """
     new = bridge.new_uids(mailbox.last_uid)
+    if progress is not None:
+        progress.folder_total = len(new)
     if not new:
         return 0
     stored = 0
@@ -57,6 +126,12 @@ def _sync_new(db, bridge: Bridge, account, mailbox, batch: int) -> int:
                     chunk_stored += 1
 
         ingest.advance_cursor(db, mailbox, max(chunk))
+        # Rides the cursor's own transaction on purpose. Progress that committed
+        # separately could outrun a chunk that then rolled back, leaving the bar
+        # claiming ground the next pass has to cover again.
+        if progress is not None:
+            progress.advance(len(chunk), chunk_stored)
+            ingest.set_progress(db, account, progress.snapshot())
         db.commit()
         # Notify only after the batch is durable, so the UI never refreshes onto
         # rows that a later failure would roll back.
@@ -87,33 +162,186 @@ def _extract_all(db, limit_batches: int = 200) -> int:
     return total
 
 
-def sync_once(account: AccountConfig, cfg: AgentConfig, reconcile: bool = True) -> None:
-    """One full pass over every folder for an account."""
-    bridge = Bridge(account)
-    bridge.connect()
+def _thumb_all(db, limit_batches: int = 200) -> int:
+    """Drain pending attachment previews."""
+    total = 0
+    for _ in range(limit_batches):
+        n = ingest.thumb_pending(db)
+        db.commit()
+        if not n:
+            break
+        total += n
+    return total
+
+
+def index_once() -> tuple[int, int]:
+    """Drain the attachment queues once. Returns (extracted, previews)."""
     db = SessionLocal()
     try:
-        account_row = ingest.get_or_create_account(db, account.email)
+        return _extract_all(db), _thumb_all(db)
+    finally:
+        db.close()
+
+
+def run_indexer_forever(cfg: AgentConfig) -> None:
+    """Drain attachment text and previews, forever, on a thread of its own.
+
+    Split out of the sync pass because the two have nothing to do with each
+    other in practice: mail can be fully fetched while thousands of attachments
+    are still queued, and folding the second into the first made every pass as
+    slow as the backlog. One thread for all accounts — the queue is global, and
+    parallel Tika drains would only contend on the same rows.
+    """
+    idle = 0
+    log.info("indexer started", "indexer")
+    while True:
+        try:
+            extracted, thumbed = index_once()
+            if extracted or thumbed:
+                idle = 0
+                log.ok(f"{extracted} attachment(s) extracted, "
+                       f"{thumbed} preview(s) rendered", "indexer")
+            else:
+                # Nothing queued. Back off to the poll interval rather than
+                # spinning on an empty queue; new attachments arrive with new
+                # mail, which is at most a poll interval away anyway.
+                idle = min(idle + 1, 6)
+            time.sleep(cfg.poll_interval if idle else 1)
+        except Exception as e:  # noqa: BLE001
+            # Never let the indexer die: mail sync is unaffected by it, and a
+            # dead thread would silently stop every future extraction.
+            log.error(f"indexing failed: {e!r}", "indexer")
+            time.sleep(30)
+
+
+def backfill_previews() -> int:
+    """Render previews for attachments that predate the feature.
+
+    Upgrading an existing database marks old attachments 'skipped' so that adding
+    this feature does not silently kick off a full-mailbox render; this is the
+    explicit opt-in. Queues and drains in chunks so progress is visible and the
+    work can be interrupted without losing what it has already done.
+    """
+    db = SessionLocal()
+    try:
+        total = 0
+        while True:
+            queued = ingest.backfill_thumbs(db)
+            db.commit()
+            if not queued:
+                break
+            done = _thumb_all(db)
+            total += done
+            print(f"  ...rendered {total} previews")
+        print(f"Done: {total} previews.")
+        return 0
+    finally:
+        db.close()
+
+
+def _report_error(email: str, message: str) -> None:
+    """Record a failed pass so the UI can warn, on a session of its own.
+
+    The caller's session is gone by the time we get here, and the failure may
+    well *be* the database — so this opens its own and swallows anything it
+    throws. Reporting an error must never become a second error that takes the
+    retry loop down with it; the print above is the guaranteed record.
+    """
+    db = SessionLocal()
+    try:
+        ingest.record_agent_error(db, email, message)
         db.commit()
+    except Exception as e:  # noqa: BLE001
+        log.warn(f"could not record sync error in the database: {e!r}", email)
+    finally:
+        db.close()
+
+
+def sync_once(account: AccountConfig, cfg: AgentConfig, reconcile: bool = True) -> None:
+    """One full pass over every folder for an account.
+
+    If the UI has raised a recheck request for this account, the pass rewinds
+    every folder's UID cursor first so it re-walks the whole mailbox rather than
+    only what is new — the repair path for a database that has lost messages the
+    cursor would otherwise skip past.
+    """
+    started = time.monotonic()
+    bridge = Bridge(account)
+    bridge.connect()
+    log.info(f"connected to {account.imap_host}:{account.imap_port} "
+             f"({account.imap_security})", account.email)
+    db = SessionLocal()
+    account_row = None
+    progress = None
+    try:
+        account_row = ingest.get_or_create_account(db, account.email)
+        # Read once, up front: a request arriving mid-pass must not be cleared
+        # by this pass, which has already walked part of the mailbox without it.
+        recheck_at = ingest.take_recheck(db, account_row)
+        db.commit()
+        if recheck_at:
+            log.info("full recheck requested — rewinding all folder cursors", account.email)
 
         # Write-back first: apply any queued flag/move/delete/send actions.
-        drain_actions(db, bridge, account_row)
+        drained = drain_actions(db, bridge, account_row)
+        if drained:
+            log.info(f"applied {drained} queued action(s)", account.email)
 
-        for i, f in enumerate(bridge.list_folders()):
+        folders = bridge.list_folders()
+        progress = PassProgress(len(folders))
+        for i, f in enumerate(folders):
             uidvalidity, uidnext = bridge.select(f["name"])
             mailbox = ingest.register_folder(
                 db, account_row, f["name"], f["role_hint"], uidvalidity, uidnext, sort_order=i
             )
+            if recheck_at:
+                ingest.reset_cursor(db, mailbox)
+            progress.enter_folder(f["name"], i)
+            ingest.set_progress(db, account_row, progress.snapshot())
             db.commit()
-            _sync_new(db, bridge, account_row, mailbox, cfg.batch_size)
-            if reconcile:
+            _sync_new(db, bridge, account_row, mailbox, cfg.batch_size, progress)
+            # A recheck reconciles unconditionally: flags and vanished messages
+            # are as much a part of "is everything still right" as the bodies.
+            if reconcile or recheck_at:
                 _reconcile(db, bridge, mailbox, cfg.batch_size)
 
-        _extract_all(db)
+        # LIST completed and every returned folder synced successfully, so it
+        # is now safe to treat absent rows as folders removed/renamed upstream.
+        ingest.prune_mailboxes(db, account_row, {f["name"] for f in folders})
+        db.commit()
+
+        # Attachment text and previews are deliberately not done here. They are
+        # not mail sync: a large Tika backlog would hold the pass open for
+        # minutes after every message had landed, and the UI reads "a pass is
+        # open" as "still fetching mail". run_indexer_forever drains them on its
+        # own thread, and reports its own progress.
         ingest.record_sync(db, account_row, backfill_complete=True,
                            addresses=account.send_addresses())
+        if recheck_at:
+            ingest.clear_recheck(db, account_row, recheck_at)
         db.commit()
+
+        # The one line that says the pass got all the way to the end. Without it
+        # a healthy agent prints nothing at all, and "no output" is exactly what
+        # a wedged one looks like too.
+        log.ok(f"sync complete in {time.monotonic() - started:.1f}s — "
+               f"{len(folders)} folders, {progress.walked} messages examined, "
+               f"{progress.stored} new", account.email)
     finally:
+        # Close the pass out on the way through, however it ended. A pass that
+        # died mid-folder would otherwise leave 'active' set for good, and the
+        # panel would show a bar creeping nowhere instead of the error the
+        # retry loop is about to record.
+        if progress is not None and account_row is not None:
+            try:
+                progress.finish()
+                ingest.set_progress(db, account_row, progress.snapshot())
+                db.commit()
+            except Exception:  # noqa: BLE001
+                # Advisory to the last: if the failure that got us here was the
+                # database, this write fails too, and it must not replace the
+                # real exception on its way up.
+                db.rollback()
         db.close()
         bridge.logout()
 
@@ -121,9 +349,24 @@ def sync_once(account: AccountConfig, cfg: AgentConfig, reconcile: bool = True) 
 def run_account_forever(account: AccountConfig, cfg: AgentConfig) -> None:
     """Continuous loop: initial backfill, then IDLE for changes."""
     backoff = 5
+    wake = commands.wake_event(account.email)
+    log.info("sync loop started", account.email)
+    # Reconciling walks every UID in every folder to pull flags and prune
+    # vanished mail. On a mailbox with many folders that costs far more than the
+    # poll interval, so doing it every cycle leaves the account permanently
+    # mid-pass — the panel then shows a spinner that never stops, and with
+    # several accounts staggered it never stops for any of them. New mail still
+    # arrives every cycle; only the sweep is put on a slower clock.
+    last_reconcile = 0.0
+
+    def reconcile_due() -> bool:
+        return time.monotonic() - last_reconcile >= cfg.reconcile_interval
+
     while True:
         try:
+            wake.clear()
             sync_once(account, cfg, reconcile=True)
+            last_reconcile = time.monotonic()
             backoff = 5
             # Steady state: IDLE on INBOX, then re-sync on any change.
             bridge = Bridge(account)
@@ -131,11 +374,31 @@ def run_account_forever(account: AccountConfig, cfg: AgentConfig) -> None:
             try:
                 while True:
                     bridge.select("INBOX")
-                    bridge.idle_wait(cfg.poll_interval)
-                    sync_once(account, cfg, reconcile=True)
+                    bridge.idle_wait(cfg.poll_interval, wake=wake)
+                    # Cleared before the pass, not after: a request arriving
+                    # mid-sync then earns its own pass rather than being
+                    # swallowed by the one already in flight.
+                    wake.clear()
+                    reconcile = reconcile_due()
+                    sync_once(account, cfg, reconcile=reconcile)
+                    if reconcile:
+                        last_reconcile = time.monotonic()
             finally:
                 bridge.logout()
         except Exception as e:  # noqa: BLE001
-            print(f"[{account.email}] sync error: {e!r}; retrying in {backoff}s")
-            time.sleep(backoff)
+            # Jittered, not the flat backoff. Every account's thread starts at
+            # the same instant and doubles on the same schedule, so on a cold
+            # start — where Bridge is not up yet and every account fails — they
+            # stay in lockstep and hit Bridge as a burst of simultaneous logins
+            # forever after. Bridge answers a burst with "too many login
+            # attempts", which fails the next pass, which widens the burst.
+            # Spreading each account's retry over the window breaks the convoy.
+            delay = random.uniform(backoff / 2, backoff)
+            log.error(f"sync failed: {e!r}", account.email)
+            advice = log.hint(e)
+            if advice:
+                log.warn(advice, account.email)
+            log.info(f"retrying in {delay:.0f}s", account.email)
+            _report_error(account.email, f"{e!r}")
+            time.sleep(delay)
             backoff = min(backoff * 2, 300)

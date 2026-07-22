@@ -10,6 +10,7 @@
 database_url  = "postgresql+psycopg://meerail:meerail@127.0.0.1:5432/meerail"
 tika_url      = "http://127.0.0.1:9998"
 poll_interval = 30                         # seconds between IDLE cycles
+reconcile_interval = 900                   # seconds between full flag/prune sweeps
 batch_size    = 200                        # UIDs per fetch/ingest batch
 
 # One [[account]] block per address; accounts register themselves in the app on
@@ -25,6 +26,12 @@ smtp_security = "starttls"
 username     = "you@proton.me"  # the Bridge username
 password     = "BRIDGE-PASSWORD-HERE"
 verify_cert  = false          # Bridge uses a self-signed cert; false trusts it
+# Socket timeouts, in seconds. These bound a *stall*, not a slow transfer: the
+# read timeout only fires if the server sends nothing at all for that long.
+# Raise imap_read_timeout if a genuinely slow Bridge starts reporting timeouts
+# mid-backfill; without it a hung Bridge parks the sync thread silently.
+imap_connect_timeout = 10
+imap_read_timeout    = 60
 # Extra addresses this Proton account can send from (aliases / additional
 # addresses you own in Proton). They appear in the compose "From" dropdown.
 # The primary `email` above is always sendable and need not be repeated here.

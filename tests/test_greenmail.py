@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+import dbfixture
 from conftest import status_for
 from helpers import SERVER, api, make_message, port_open
 
@@ -74,8 +75,7 @@ def _seen(flags) -> bool:
 @pytest.mark.skipif(not AGENT_PY.exists(), reason="agent venv missing (run agent/run.sh once)")
 def test_agent_syncs_and_prunes_from_real_imap(require_server, tmp_path):
     email = f"gm-{uuid.uuid4().hex[:10]}@example.com"
-    code, acc = api("POST", "/api/accounts", {"email": email, "label": "gmtest"})
-    assert code == 201, acc
+    acc = dbfixture.create_account(email, label="gmtest")
 
     try:
         # Seed a 2-message thread into GreenMail; first is already read.
@@ -114,8 +114,7 @@ def test_agent_syncs_and_prunes_from_real_imap(require_server, tmp_path):
 def test_flag_writeback_reaches_real_imap(require_server, tmp_path):
     """Mark read in meerail -> agent -> the \\Seen flag appears on the IMAP server."""
     email = f"gm-wb-{uuid.uuid4().hex[:10]}@example.com"
-    code, acc = api("POST", "/api/accounts", {"email": email, "label": "wb"})
-    assert code == 201
+    acc = dbfixture.create_account(email, label="wb")
 
     try:
         token = "WBTOKEN" + uuid.uuid4().hex[:6]

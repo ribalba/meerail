@@ -4,10 +4,15 @@
   "version": "0.1.0",
   "description": "Desktop wrapper for the meerail email client.",
   "main": "main.js",
-  "author": "meerail",
+  "desktopName": "meerail.desktop",
+  "homepage": "https://meerail.com/",
+  "author": {
+    "name": "Didi Hoffmann",
+    "email": "didi@ribalba.de"
+  },
   "license": "MIT",
   "scripts": {
-    "start": "electron .",
+    "start": "electron . --class=meerail",
     "pack": "electron-builder --dir",
     "dist": "electron-builder"
   },
@@ -19,7 +24,7 @@
     "appId": "com.meerail.desktop",
     "productName": "meerail",
     "directories": { "buildResources": "build", "output": "dist" },
-    "files": ["main.js", "package.json"],
+    "files": ["main.js", "package.json", "build/icon.png"],
     "mac": {
       "category": "public.app-category.productivity",
       "target": ["dmg", "zip"],
@@ -28,7 +33,13 @@
     "linux": {
       "target": ["AppImage", "deb"],
       "category": "Office",
-      "icon": "build/icon.png"
+      "icon": "build/icon.png",
+      "synopsis": "Desktop wrapper for the meerail email client.",
+      "syncDesktopName": true,
+      "executableName": "meerail",
+      "desktop": {
+        "entry": { "StartupWMClass": "meerail" }
+      }
     },
     "win": {
       "target": ["nsis"]

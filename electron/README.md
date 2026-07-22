@@ -16,7 +16,7 @@ MEERAIL_URL=http://host:8000 npm start   # or a remote server
 ## Build installers
 
 ```bash
-npm run dist        # -> dist/  (macOS .dmg/.zip, Linux .AppImage/.deb)
+npm run dist        # -> dist/  (macOS .dmg/.zip, Linux .AppImage/.deb, Windows .exe)
 ```
 
 `electron-builder` targets are configured in `package.json`. The app icon is

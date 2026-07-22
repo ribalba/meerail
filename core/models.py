@@ -39,6 +39,18 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+# Footer new accounts start with. Editable per account in Settings; clearing it
+# there sticks (see ``footer_customized``), so this is a starting value and not
+# a floor. The composer prefills it into the editor — the user can edit or
+# delete it before sending — so it is never forced onto a message. No RFC 3676
+# "-- " marker, since that makes some clients collapse it out of sight.
+DEFAULT_FOOTER = (
+    "----\n"
+    "This mail was sent using https://meerail.com/ "
+    "- the email management tool for hardcore users"
+)
+
+
 # --- Accounts & folders ----------------------------------------------------
 
 
@@ -67,12 +79,50 @@ class Account(Base):
     # Signature/disclaimer appended to every message sent from this account.
     # Empty disables it. Composition is the web app's job, so unlike the sync
     # settings above this is set in the UI, not the agent config.
-    footer: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    footer: Mapped[str] = mapped_column(Text, default=DEFAULT_FOOTER, nullable=False)
+
+    # True once the footer has been saved from Settings. Guards the one-time
+    # backfill in init_db: without it, an account whose footer the user cleared
+    # would have DEFAULT_FOOTER put back on every restart.
+    footer_customized: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     # Sync status (denormalized for the UI).
     backfill_complete: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Stamped at the start of every pass, including passes that then fail — so
+    # this tracks "the agent process is alive", not "syncing works".
     last_agent_seen: Mapped[datetime | None] = mapped_column(DateTime)
+    # Stamped only when a pass completes. Lagging well behind last_agent_seen
+    # means passes are starting and dying.
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+    # Last sync failure, cleared on the next successful pass. Without this a
+    # wedged agent is indistinguishable from an idle one: the retry loop in
+    # agent/sync.py swallows its exceptions, so nothing else records them.
+    last_error: Mapped[str | None] = mapped_column(Text)
+    last_error_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+    # Set from the UI to ask the agent for a full recheck: rewind every folder's
+    # UID cursor so the next pass re-walks the mailbox from the start instead of
+    # only fetching what is new. For repairing a database that lost or corrupted
+    # messages the cursor would otherwise skip straight past.
+    #
+    # A column rather than a NOTIFY (which is how the plain refresh button asks)
+    # because this is the button you press when the agent is unhealthy — it has
+    # to survive the agent being down, mid-restart, or in its retry backoff. The
+    # agent clears it only once a full pass has finished.
+    recheck_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    recheck_requested_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+    # Where the agent is in its current (or last) sync pass — folder counter,
+    # per-folder done/total, and pass-level tallies. Written once per ingested
+    # batch, in that batch's own transaction, so it can never claim progress a
+    # rollback took back. See ``agent/sync.py``'s PassProgress for the shape.
+    #
+    # A JSONB blob rather than columns because nothing queries it: it is read
+    # whole, by one panel, and the fields are free to change without a migration.
+    # It survives the pass ending (with ``active`` false) so the UI can show what
+    # the last pass did instead of blanking the moment it finishes.
+    sync_progress: Mapped[dict | None] = mapped_column(JSONB)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
@@ -107,6 +157,8 @@ class Mailbox(Base):
     total_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     subscribed: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # Pinned by the user into the sidebar's Favorites section.
+    favorite: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
@@ -124,6 +176,9 @@ class Message(Base):
     __table_args__ = (
         UniqueConstraint("account_id", "dedup_key", name="uq_message_account_dedup"),
         Index("ix_messages_account_date", "account_id", "date_sent"),
+        # Ingest time, not send time — powers the "downloaded in the last hour/day"
+        # counters in /api/sync/status, which would otherwise seq-scan the table.
+        Index("ix_messages_account_created", "account_id", "created_at"),
         Index("ix_messages_thread", "thread_id"),
         Index("ix_messages_message_id", "message_id"),
         # GIN trigram index: lets Postgres use the index for ~*/LIKE when the
@@ -260,6 +315,11 @@ class Attachment(Base):
     # pending | done | error | skipped
     extract_status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
 
+    # Precomputed WebP preview for PDFs and images (see core/mail/thumbs.py).
+    thumb: Mapped[bytes | None] = mapped_column(LargeBinary)
+    # pending | done | error | skipped
+    thumb_status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
     message: Mapped["Message"] = relationship(back_populates="attachments")
@@ -293,6 +353,26 @@ class Thread(Base):
     latest_date: Mapped[datetime | None] = mapped_column(DateTime)
     message_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     participants: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+
+# --- App settings ----------------------------------------------------------
+
+
+class Setting(Base):
+    """App-wide key/value settings — the ones that belong to the install rather
+    than to an account (which keeps its own on ``accounts``).
+
+    Deliberately schemaless: these are a handful of strings set from the
+    Settings modal, and a table per setting (or a column added for each) buys
+    nothing when nothing else joins against them. Values are stored verbatim;
+    the router that owns a key is what validates it.
+    """
+
+    __tablename__ = "settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, default="", nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
 

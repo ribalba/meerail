@@ -19,7 +19,9 @@ import contextlib
 
 from core import ingest
 from core.database import SessionLocal
-from core.models import Account, Mailbox, Message, MessageLocation, Outbound, PendingAction
+from core.models import (
+    Account, Attachment, Mailbox, Message, MessageLocation, Outbound, PendingAction,
+)
 
 
 @contextlib.contextmanager
@@ -31,6 +33,20 @@ def session():
         db.commit()
     finally:
         db.close()
+
+
+def create_account(email: str, label: str = "") -> dict:
+    """Register an account the only way there is — the agent's path.
+
+    There is no account-creation HTTP API: the web app never provisions accounts,
+    it only edits presentation on rows the agent has already inserted.
+    """
+    with session() as db:
+        account = ingest.get_or_create_account(db, email)
+        if label:
+            account.label = label
+        db.flush()
+        return {"id": account.id, "email": account.email, "label": account.label}
 
 
 def _mailbox(db, account: Account, imap_name: str, role_hint: str = "",
@@ -47,6 +63,13 @@ def ingest_raw_message(email: str, raw: bytes, uid: int = 1, folder: str = "INBO
         mailbox = _mailbox(db, account, folder, role_hint, uidvalidity)
         ingest.store_message(db, account, mailbox, uid, flags or {}, raw)
         ingest.advance_cursor(db, mailbox, uid)
+
+
+def create_folder(email: str, name: str, role_hint: str = "") -> int:
+    """Register a folder the way a sync pass's LIST would. Returns its id."""
+    with session() as db:
+        account = ingest.get_or_create_account(db, email)
+        return _mailbox(db, account, name, role_hint).id
 
 
 def record_placement(email: str, message_id: str, uid: int, folder: str,
@@ -79,6 +102,12 @@ def set_present(email: str, folder: str, uids: list[int]) -> int:
         return ingest.prune_vanished(db, mailbox, uids)
 
 
+def prune_folders(email: str, present_names: set[str]) -> int:
+    with session() as db:
+        account = ingest.get_or_create_account(db, email)
+        return ingest.prune_mailboxes(db, account, present_names)
+
+
 def report_sync(email: str, backfill_complete: bool | None = None,
                 addresses: list[str] | None = None) -> None:
     with session() as db:
@@ -99,6 +128,19 @@ def extract_all(max_batches: int = 50) -> int:
     return total
 
 
+def thumb_all(max_batches: int = 50) -> int:
+    """Drain pending preview rendering, as the agent does after a sync pass."""
+    total = 0
+    with session() as db:
+        for _ in range(max_batches):
+            n = ingest.thumb_pending(db)
+            db.commit()
+            if not n:
+                break
+            total += n
+    return total
+
+
 # --- Read helpers for asserting on agent-owned state ------------------------
 
 
@@ -112,6 +154,20 @@ def pending_actions(email: str, type_: str | None = None) -> list[dict]:
             q = q.filter(PendingAction.type == type_)
         return [{"id": a.id, "type": a.type, "payload": a.payload,
                  "message_pk": a.message_pk} for a in q.order_by(PendingAction.created_at)]
+
+
+def attachment_rows(email: str) -> list[dict]:
+    """Attachment state the read API hides (inline parts, preview status)."""
+    with session() as db:
+        account = db.query(Account).filter(Account.email == email.lower()).one()
+        rows = (db.query(Attachment)
+                .join(Message, Message.id == Attachment.message_pk)
+                .filter(Message.account_id == account.id)
+                .order_by(Attachment.id).all())
+        return [{"filename": a.filename, "content_type": a.content_type,
+                 "is_inline": a.is_inline, "extract_status": a.extract_status,
+                 "thumb_status": a.thumb_status,
+                 "has_thumb": a.thumb is not None} for a in rows]
 
 
 def outbound_mime(outbound_id: int) -> str:

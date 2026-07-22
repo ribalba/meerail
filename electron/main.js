@@ -39,7 +39,14 @@ function createWindow() {
     },
   });
 
-  mainWindow.loadURL(APP_URL);
+  // The window's session is persistent, so its HTTP cache outlives a restart:
+  // an asset cached before the server started sending Cache-Control stays put
+  // until its heuristic freshness runs out, and a shell running half-old js
+  // against a half-new server fails in confusing ways. The server is local, so
+  // refetching the asset set on launch costs nothing worth keeping.
+  const win = mainWindow;
+  win.webContents.session.clearCache()
+    .finally(() => { if (!win.isDestroyed()) win.loadURL(APP_URL); });
 
   // Links to other origins open in the system browser, never a child window.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {

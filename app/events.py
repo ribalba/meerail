@@ -18,8 +18,7 @@ import time
 
 import psycopg
 
-from core.events import CHANNEL, publish  # noqa: F401  (re-exported for routers)
-from core.database import engine
+from core.events import CHANNEL, dsn, publish  # noqa: F401  (publish re-exported for routers)
 
 _loop: asyncio.AbstractEventLoop | None = None
 _subscribers: set[asyncio.Queue] = set()
@@ -59,11 +58,6 @@ def _deliver_threadsafe(event: dict) -> None:
         pass  # loop shutting down
 
 
-def _dsn() -> str:
-    """Plain libpq DSN for the app's database, without the SQLAlchemy driver tag."""
-    return engine.url.set(drivername="postgresql").render_as_string(hide_password=False)
-
-
 def _listen_forever() -> None:
     """Blocking LISTEN loop; run in a worker thread.
 
@@ -73,7 +67,7 @@ def _listen_forever() -> None:
     """
     while True:
         try:
-            with psycopg.connect(_dsn(), autocommit=True) as conn:
+            with psycopg.connect(dsn(), autocommit=True) as conn:
                 conn.execute(f"LISTEN {CHANNEL}")
                 for notify in conn.notifies():
                     try:

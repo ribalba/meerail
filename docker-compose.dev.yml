@@ -8,7 +8,10 @@ services:
   server:
     # --reload restarts uvicorn on any change under the mounted source tree.
     # --reload-dir scopes the watcher to /app/app so it ignores /data churn.
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "/app/app"]
+    # --timeout-graceful-shutdown caps the wait for open connections on reload:
+    # /api/stream is an endless SSE generator, so an open browser tab otherwise
+    # holds the old worker forever and the port never rebinds.
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "/app/app", "--timeout-graceful-shutdown", "3"]
     volumes:
       # Bind-mount the source over the image's copy — edits on the host take
       # effect immediately, no rebuild/restart needed.

@@ -18,6 +18,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 
+SECURITY_MODES = ("starttls", "ssl", "plain")
+
 
 @dataclass
 class AccountConfig:
@@ -33,9 +35,36 @@ class AccountConfig:
     username: str = ""
     password: str = ""
     verify_cert: bool = False          # Proton Bridge uses a self-signed cert
+    # Socket timeouts for the IMAP connection, in seconds. Without these a
+    # Bridge that stops answering mid-pass parks the sync thread in recv()
+    # forever: no exception, so nothing is logged and no error is recorded, and
+    # the UI reports the account as "offline" once last_agent_seen ages out —
+    # blaming a dead agent for a process that is alive and merely deaf.
+    #
+    # These are per-operation, not per-command: a large fetch only trips
+    # imap_read_timeout if Bridge sends *nothing* for that long, so the read
+    # value bounds a stall, not a slow transfer. It still has to tolerate
+    # Bridge pausing mid-fetch while it pulls and decrypts a large message.
+    imap_connect_timeout: int = 10
+    imap_read_timeout: int = 60
     # Extra "send as" addresses this account owns (Proton aliases / additional
     # addresses). The primary `email` is always sendable and need not be listed.
     addresses: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # Normalise casing before anyone compares against it. imap.py/smtp.py
+        # test these strings exactly, so a config saying "STARTTLS" used to fall
+        # through to an unencrypted socket and send the password in the clear —
+        # silently, because Bridge accepts it. Unknown values are rejected rather
+        # than defaulted, for the same reason.
+        for attr in ("imap_security", "smtp_security"):
+            value = (getattr(self, attr) or "").strip().lower()
+            if value not in SECURITY_MODES:
+                raise ValueError(
+                    f"{self.email}: {attr} = {getattr(self, attr)!r} is not valid; "
+                    f"use one of {', '.join(SECURITY_MODES)}"
+                )
+            setattr(self, attr, value)
 
     def send_addresses(self) -> list[str]:
         """Every address the account may send from — primary first, deduped."""
@@ -54,8 +83,14 @@ class AgentConfig:
     database_url: str = "postgresql+psycopg://meerail:meerail@127.0.0.1:5432/meerail"
     tika_url: str = "http://127.0.0.1:9998"
     poll_interval: int = 30
+    # How often the sweep for flag changes and vanished mail runs. Much longer
+    # than poll_interval on purpose: it is the expensive part of a pass, and new
+    # mail does not wait on it.
+    reconcile_interval: int = 900
     batch_size: int = 200
     accounts: list[AccountConfig] = field(default_factory=list)
+    # Where this was loaded from, so --test can check its permissions.
+    config_path: Path | None = None
 
 
 def load_config(path: str | None = None) -> AgentConfig:
@@ -69,14 +104,19 @@ def load_config(path: str | None = None) -> AgentConfig:
     for a in data.get("account", []):
         a = dict(a)
         a.setdefault("username", a["email"])
-        accounts.append(AccountConfig(**a))
+        try:
+            accounts.append(AccountConfig(**a))
+        except (ValueError, TypeError) as exc:
+            raise SystemExit(f"Bad [[account]] in {cfg_path}: {exc}") from exc
 
     cfg = AgentConfig(
         database_url=data.get("database_url", AgentConfig.database_url),
         tika_url=data.get("tika_url", AgentConfig.tika_url),
         poll_interval=int(data.get("poll_interval", 30)),
+        reconcile_interval=int(data.get("reconcile_interval", 900)),
         batch_size=int(data.get("batch_size", 200)),
         accounts=accounts,
+        config_path=cfg_path,
     )
 
     # core.config reads these from the environment; an explicit value in the

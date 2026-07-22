@@ -14,9 +14,19 @@ from __future__ import annotations
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ..models import Account, Attachment, Mailbox, Message, MessageLocation, Recipient, utcnow
-from .parse import ParsedEmail, html_to_text, parse_email
+from ..models import (
+    Account,
+    Attachment,
+    Mailbox,
+    Message,
+    MessageLocation,
+    PendingAction,
+    Recipient,
+    utcnow,
+)
+from .parse import ParsedEmail, canonical_message_id, html_to_text, parse_email
 from .threading import assign_thread
+from .thumbs import should_thumb
 from .tika import should_extract
 
 
@@ -58,6 +68,43 @@ def _apply_flags(loc: MessageLocation, flags: dict) -> None:
     loc.keywords = flags.get("keywords") or []
 
 
+# The flags a new placement can inherit: the two the reader writes back, and so
+# the two that can be locally ahead of what the server has been told.
+_INHERITED = {"seen": "\\Seen", "flagged": "\\Flagged"}
+
+
+def _local_state(db: Session, message_pk: int) -> dict:
+    """How this message is already flagged wherever else it sits."""
+    rows = db.execute(
+        select(MessageLocation.seen, MessageLocation.flagged).where(
+            MessageLocation.message_pk == message_pk
+        )
+    ).all()
+    return {"seen": any(r.seen for r in rows), "flagged": any(r.flagged for r in rows)}
+
+
+def _queue_flag_catchup(
+    db: Session, message_pk: int, mailbox_id: int, uid: int, ahead: list[str]
+) -> None:
+    """Tell the agent to bring the server's copy of this placement into step.
+
+    Inheriting locally is only half of it. The reconcile sweep applies server
+    flags verbatim, so without this the next pass reads the server's 'unseen'
+    back over what was just inherited and the mail goes unread again — on a
+    server that keeps flags per folder rather than per message, once a pass,
+    forever.
+    """
+    msg = db.get(Message, message_pk)
+    mailbox = db.get(Mailbox, mailbox_id)
+    if msg is None or mailbox is None:
+        return
+    db.add(PendingAction(
+        account_id=msg.account_id, message_pk=message_pk, type="setflags",
+        payload={"folder": mailbox.imap_name, "uid": uid,
+                 "add": [_INHERITED[name] for name in ahead], "remove": []},
+    ))
+
+
 def upsert_location(
     db: Session, message_pk: int, mailbox_id: int, uid: int, flags: dict
 ) -> MessageLocation:
@@ -67,14 +114,32 @@ def upsert_location(
         )
     ).scalar_one_or_none()
     if loc is None:
+        # A placement showing up for mail the account already holds inherits the
+        # read/flag state we have locally. Servers that file one message under
+        # several labels hand us each placement separately, and the second one
+        # can arrive after the message has been read — the reader can only mark
+        # the placements that existed when it ran. Taking the server's flags
+        # verbatim there resurrects mail as unread seconds after you read it.
+        #
+        # Escalate only: a flag the server has and we do not still wins on its
+        # own, so this can never quietly un-read something.
+        local = _local_state(db, message_pk)
+        ahead = [name for name in _INHERITED if local.get(name) and not flags.get(name)]
+        if ahead:
+            flags = {**flags, **{name: True for name in ahead}}
         loc = MessageLocation(message_pk=message_pk, mailbox_id=mailbox_id, imap_uid=uid)
         db.add(loc)
+        if ahead:
+            _queue_flag_catchup(db, message_pk, mailbox_id, uid, ahead)
     loc.message_pk = message_pk
     _apply_flags(loc, flags)
     return loc
 
 
 def find_message_by_message_id(db: Session, account_id: int, message_id: str) -> Message | None:
+    message_id = canonical_message_id(message_id)
+    if not message_id:
+        return None
     return db.execute(
         select(Message).where(Message.account_id == account_id, Message.message_id == message_id)
     ).scalars().first()
@@ -125,6 +190,12 @@ def ingest_raw(
 
         for att in parsed.attachments:
             extractable = should_extract(att.content_type, att.filename) and bool(att.payload)
+            # Inline parts are the signature logos and tracking pixels embedded in
+            # the body; they are never listed as attachments, so a preview of one
+            # would only ever be rendering nobody looks at.
+            thumbable = (
+                should_thumb(att.content_type) and bool(att.payload) and not att.is_inline
+            )
             db.add(
                 Attachment(
                     message_pk=msg.id,
@@ -135,6 +206,7 @@ def ingest_raw(
                     is_inline=att.is_inline,
                     content=att.payload,
                     extract_status="pending" if extractable else "skipped",
+                    thumb_status="pending" if thumbable else "skipped",
                 )
             )
 

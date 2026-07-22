@@ -19,3 +19,8 @@ httpx==0.28.1
 
 # server read-side (rendering tests)
 nh3==0.2.20
+
+# agent-side preview rendering — the thumbnail tests drive ingest.thumb_pending
+# in-process, exactly as the agent does.
+PyMuPDF==1.28.0
+Pillow==11.3.0

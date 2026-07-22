@@ -1,10 +1,18 @@
+"""Account read/edit endpoints.
+
+There is deliberately no create endpoint: accounts are provisioned by the agent,
+which inserts the row on its first sync pass (`core.ingest.get_or_create_account`)
+keyed on the email in its `config.toml`. What the UI owns is presentation —
+`label`, `color` and `footer` — which is what PATCH exposes.
+"""
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session as DBSession
 
 from core.database import get_db
 from ..deps import require_ui_auth
 from core.models import Account
-from ..schemas import AccountCreate, AccountOut, AccountUpdate
+from ..schemas import AccountOut, AccountUpdate
 
 router = APIRouter(prefix="/api/accounts", tags=["accounts"], dependencies=[Depends(require_ui_auth)])
 
@@ -12,22 +20,6 @@ router = APIRouter(prefix="/api/accounts", tags=["accounts"], dependencies=[Depe
 @router.get("", response_model=list[AccountOut])
 def list_accounts(db: DBSession = Depends(get_db)):
     return db.query(Account).order_by(Account.created_at).all()
-
-
-@router.post("", response_model=AccountOut, status_code=201)
-def create_account(payload: AccountCreate, db: DBSession = Depends(get_db)):
-    email = payload.email.strip().lower()
-    if db.query(Account).filter(Account.email == email).first():
-        raise HTTPException(status_code=409, detail="An account with that email already exists")
-    account = Account(
-        email=email,
-        label=payload.label.strip() or email.split("@")[0],
-        color=payload.color,
-    )
-    db.add(account)
-    db.commit()
-    db.refresh(account)
-    return account
 
 
 @router.get("/{account_id}", response_model=AccountOut)
@@ -43,8 +35,13 @@ def update_account(account_id: int, payload: AccountUpdate, db: DBSession = Depe
     account = db.get(Account, account_id)
     if account is None:
         raise HTTPException(status_code=404, detail="Account not found")
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    fields = payload.model_dump(exclude_unset=True)
+    for field, value in fields.items():
         setattr(account, field, value)
+    # Saving a footer — including clearing it — opts the account out of the
+    # default-footer backfill for good.
+    if "footer" in fields:
+        account.footer_customized = True
     db.commit()
     db.refresh(account)
     return account

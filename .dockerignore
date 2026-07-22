@@ -3,7 +3,11 @@
 **/__pycache__
 **/*.pyc
 electron
-agent
+# The agent builds its own image from this context (agent/Dockerfile), so the
+# directory can no longer be excluded wholesale — keep out its host venv (wrong
+# platform, ~190 MB) and its credentials, which are bind-mounted at runtime.
+agent/.venv
+agent/config.toml
 data
 *.md
 .env

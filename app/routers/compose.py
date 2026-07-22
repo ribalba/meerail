@@ -12,7 +12,7 @@ from email.message import EmailMessage
 from email.utils import formatdate, make_msgid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import select
 from sqlalchemy.orm import Session as DBSession
@@ -83,13 +83,31 @@ def _resolve_from(account: Account, requested: str | None) -> str:
 @router.post("/attachments")
 async def upload_attachment(file: UploadFile = File(...)):
     """Stage a file for an outgoing message; returns an id to include in /send."""
-    data = await file.read()
-    if len(data) > settings.max_attachment_bytes:
-        raise HTTPException(status_code=413, detail="Attachment too large")
     staging_id = f"{uuid.uuid4().hex}__{_safe(file.filename or 'file')}"
-    (settings.outbox_dir / staging_id).write_bytes(data)
+    path = settings.outbox_dir / staging_id
+    size = 0
+    complete = False
+    try:
+        with path.open("wb") as staged:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > settings.max_attachment_bytes:
+                    raise HTTPException(status_code=413, detail="Attachment too large")
+                staged.write(chunk)
+        complete = True
+    finally:
+        await file.close()
+        if not complete:
+            path.unlink(missing_ok=True)
     return {"id": staging_id, "filename": file.filename or "file",
-            "content_type": file.content_type or "application/octet-stream", "size": len(data)}
+            "content_type": file.content_type or "application/octet-stream", "size": size}
+
+
+@router.delete("/attachments/{staging_id}", status_code=204)
+def delete_attachment(staging_id: str):
+    """Discard a staged attachment when the composer no longer references it."""
+    _staged_path(staging_id).unlink(missing_ok=True)
+    return Response(status_code=204)
 
 
 def _attach_staged(m: EmailMessage, staging_ids: list[str]) -> list[Path]:
@@ -106,20 +124,7 @@ def _attach_staged(m: EmailMessage, staging_ids: list[str]) -> list[Path]:
     return paths
 
 
-def _with_footer(body: str, footer: str) -> str:
-    """Append the account's footer, separated by a blank line.
-
-    Appended verbatim: a footer may be a signature or a legal disclaimer, so we
-    don't impose the RFC 3676 ``-- `` marker (which some clients collapse).
-    Start the footer with that line yourself if you want signature semantics.
-    """
-    footer = (footer or "").strip("\n")
-    if not footer:
-        return body
-    return f"{body.rstrip()}\n\n{footer}\n" if body.strip() else f"{footer}\n"
-
-
-def _build_mime(account: Account, req: SendRequest, from_addr: str) -> tuple[EmailMessage, list[str], list[Path]]:
+def _build_mime(req: SendRequest, from_addr: str) -> tuple[EmailMessage, list[str], list[Path]]:
     m = EmailMessage()
     m["From"] = from_addr
     m["To"] = ", ".join(req.to)
@@ -135,7 +140,9 @@ def _build_mime(account: Account, req: SendRequest, from_addr: str) -> tuple[Ema
         refs.append(req.in_reply_to)
     if refs:
         m["References"] = " ".join(f"<{r}>" for r in refs)
-    m.set_content(_with_footer(req.body_text or "", account.footer))
+    # Body verbatim: the composer prefills the account footer into the editor,
+    # so whatever the user left in there is exactly what goes out.
+    m.set_content(req.body_text or "")
     staged_paths = _attach_staged(m, req.attachments)
     rcpt = [str(a) for a in (req.to + req.cc + req.bcc)]
     return m, rcpt, staged_paths
@@ -150,14 +157,13 @@ def send(req: SendRequest, db: DBSession = Depends(get_db)):
         raise HTTPException(status_code=400, detail="At least one recipient is required")
 
     from_addr = _resolve_from(account, req.from_address)
-    m, rcpt, staged_paths = _build_mime(account, req, from_addr)
+    m, rcpt, staged_paths = _build_mime(req, from_addr)
 
     outbound = Outbound(
         account_id=account.id, state="queued",
         to_addrs=[str(a) for a in req.to], cc_addrs=[str(a) for a in req.cc],
         bcc_addrs=[str(a) for a in req.bcc], subject=req.subject,
-        # Record the body as actually sent, footer included, so this row matches raw_mime.
-        body_text=_with_footer(req.body_text or "", account.footer),
+        body_text=req.body_text or "",
         in_reply_to=req.in_reply_to, references=req.references,
         attachments=[p.name for p in staged_paths],
         raw_mime=m.as_string(),
@@ -240,5 +246,5 @@ def _quote(msg: Message) -> str:
     when = msg.date_sent.strftime("%b %d, %Y at %H:%M") if msg.date_sent else ""
     who = msg.from_name or msg.from_addr
     body = msg.body_text or html_to_text(msg.body_html)
-    quoted = "\n".join("> " + ln for ln in body.splitlines())
+    quoted = "\n".join(("> " + ln).rstrip() for ln in body.splitlines())
     return f"On {when}, {who} wrote:\n{quoted}"

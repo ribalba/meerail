@@ -38,6 +38,17 @@ def api(method: str, path: str, body=None):
             return e.code, raw.decode(errors="replace")
 
 
+def api_bytes(path: str):
+    """GET a binary endpoint. Returns (status, body_bytes, headers) — headers are
+    case-insensitive, and the body stays undecoded so callers can check magic bytes."""
+    req = urllib.request.Request(SERVER + path, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.status, r.read(), r.headers
+    except urllib.error.HTTPError as e:
+        return e.code, e.read(), e.headers
+
+
 def upload_attachment(data: bytes, filename: str, content_type: str = "application/octet-stream"):
     """POST a file to /api/compose/attachments as multipart/form-data (stdlib only)."""
     boundary = "----meerail" + uuid.uuid4().hex
@@ -100,13 +111,36 @@ def build_pdf(text: str) -> bytes:
     return out
 
 
+def build_png(width: int = 800, height: int = 600) -> bytes:
+    """A valid PNG of the given size, built without an imaging dependency.
+
+    The server-side test venv has no Pillow (only the agent renders previews), so
+    this emits the bytes directly: a single IDAT of zlib-compressed scanlines.
+    """
+    import struct
+    import zlib
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + tag + data
+                + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+
+    # Each scanline is a filter byte (0 = none) followed by RGB triples.
+    raw = b"".join(b"\x00" + bytes([40, 90, 160]) * width for _ in range(height))
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw))
+            + chunk(b"IEND", b""))
+
+
 def make_message(mid, subject, frm, to, body, when, in_reply_to=None, refs=None,
-                 text_attachment=None, pdf_text=None) -> bytes:
+                 text_attachment=None, pdf_text=None, png=False, cc=None) -> bytes:
     m = EmailMessage()
     m["Message-ID"] = mid
     m["Subject"] = subject
     m["From"] = frm
     m["To"] = to
+    if cc:
+        m["Cc"] = cc
     m["Date"] = format_datetime(when)
     if in_reply_to:
         m["In-Reply-To"] = in_reply_to
@@ -124,4 +158,7 @@ def make_message(mid, subject, frm, to, body, when, in_reply_to=None, refs=None,
     if pdf_text is not None:
         m.add_attachment(build_pdf(pdf_text), maintype="application", subtype="pdf",
                          filename="report.pdf")
+    if png:
+        m.add_attachment(build_png(), maintype="image", subtype="png",
+                         filename="photo.png")
     return m.as_bytes()

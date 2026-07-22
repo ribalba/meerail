@@ -1,6 +1,54 @@
 services:
   db:
     image: postgres:18
+    # Defaults are sized for a tiny machine; a full mailbox is tens of GB once
+    # raw MIME, attachment bytes and the trigram index are counted. Tuned for a
+    # ~32GB NVMe host — scale shared_buffers/effective_cache_size to yours.
+    command:
+      - postgres
+      # --- memory ---
+      - -c
+      - shared_buffers=4GB              # ~25% of RAM is the usual starting point
+      - -c
+      - effective_cache_size=12GB       # planner hint only; what the OS is likely caching
+      - -c
+      - work_mem=64MB                   # per sort/hash node; few connections here
+      - -c
+      - maintenance_work_mem=2GB        # GIN trigram index builds and VACUUM
+      # --- write path: bulk ingest generates far more WAL than the 1GB default ---
+      - -c
+      - max_wal_size=8GB                # fewer, larger checkpoints during backfill
+      - -c
+      - min_wal_size=2GB
+      - -c
+      - checkpoint_completion_target=0.9
+      - -c
+      - wal_compression=lz4
+      # --- TOAST: raw_mime/body_html/search_text all live in TOAST. lz4 is
+      #     several times faster than the pglz default at similar ratios. ---
+      - -c
+      - default_toast_compression=lz4
+      # --- NVMe: the default costs assume spinning rust ---
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - effective_io_concurrency=200
+      # --- 20 cores; search does big bitmap scans over the trigram index ---
+      - -c
+      - max_parallel_workers_per_gather=4
+      - -c
+      - max_parallel_maintenance_workers=4
+    # Docker gives containers a 64MB /dev/shm, which silently caps parallel
+    # query workers. Postgres needs real shared memory for them.
+    shm_size: 1gb
+    # Headroom over the tuning above: shared_buffers (4GB) and shm both count
+    # against this, plus maintenance_work_mem (2GB) while a GIN index builds and
+    # work_mem per sort node. 10GB leaves the OS free to page-cache the heap,
+    # which is where effective_cache_size=12GB is actually meant to land.
+    deploy:
+      resources:
+        limits:
+          memory: 10g
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-meerail}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-meerail}
@@ -22,12 +70,31 @@ services:
       start_period: 10s
 
   tika:
-    # Attachment text extraction (PDF/Office -> text). Use the `-full` tag if you
-    # also want OCR of scanned/image attachments (heavier image, pulls Tesseract).
-    image: apache/tika:latest
+    # Attachment text extraction (PDF/Office -> text). The `-full` tag bundles
+    # Tesseract, which is what OCRs scanned PDFs and image attachments; it is a
+    # much larger image than plain `apache/tika`. Drop back to `:latest` to skip
+    # OCR — extraction still works, images just come back empty.
+    image: apache/tika:latest-full
     ports:
       # The agent extracts attachment text itself; loopback only, as above.
       - "127.0.0.1:9998:9998"
+    environment:
+      # This image's entrypoint is `exec java -cp ... ` with no $JAVA_OPTS, so
+      # that variable is silently ignored here. JAVA_TOOL_OPTIONS is read by the
+      # JVM itself and does apply.
+      #
+      # A cgroup limit alone is not enough for a JVM: without a heap cap it sizes
+      # itself off the *host* when it cannot see a limit, and even when it can,
+      # hitting the ceiling gets the process OOM-killed rather than triggering a
+      # GC. MaxRAMPercentage keeps the heap strictly under the limit below, so
+      # Tika collects instead of dying.
+      JAVA_TOOL_OPTIONS: "-XX:MaxRAMPercentage=60"
+    # 3GB total: ~1.8GB heap, the rest for JVM metaspace/threads and Tesseract,
+    # which does its OCR work in native memory outside the heap entirely.
+    deploy:
+      resources:
+        limits:
+          memory: 3g
     restart: unless-stopped
 
   server:
@@ -49,6 +116,12 @@ services:
     volumes:
       # Only staging for outgoing attachments now; mail bytes live in Postgres.
       - mail-data:/data
+    # Read path only — it serves the UI and streams from Postgres, so it does not
+    # hold mail bytes for long. Search results are the high-water mark.
+    deploy:
+      resources:
+        limits:
+          memory: 2g
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)"]

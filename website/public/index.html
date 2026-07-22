@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>meerail — your whole mailbox, in a database</title>
-  <meta name="description" content="meerail is a self-hosted email client that downloads every message into PostgreSQL: regex search, a familiar three-pane UI, full keyboard control and an LLM-ready database." />
+  <title>meerail — a mail client built for hardcore users</title>
+  <meta name="description" content="meerail is a self-hosted email client built for hardcore users. It downloads every message into PostgreSQL and handles very large mail accounts: regex search, a familiar three-pane UI, full keyboard control and an LLM-ready database." />
   <meta name="theme-color" content="#2185d0" />
   <link rel="icon" href="/img/logo-square.png" />
   <link rel="apple-touch-icon" href="/img/logo-square.png" />
@@ -42,12 +42,13 @@
     <section class="landing-hero">
       <img src="/img/logo.png" alt="The meerail meerkat" class="landing-logo" />
       <div class="landing-hero-copy">
-        <h1 class="landing-title">Your whole mailbox, in a&nbsp;database.</h1>
+        <h1 class="landing-title">A mail client built for hardcore&nbsp;users.</h1>
         <p class="landing-subtitle">
           meerail downloads every message you own into PostgreSQL, then puts a
-          familiar email client on top of it. Real regex search that reads inside
-          your attachments, full keyboard control, and a mailbox any LLM can
-          actually read.
+          familiar email client on top of it. It stays fast on very large mail
+          accounts with hundreds of thousands of messages, years of archive. Real
+          regex search that reads inside your attachments, full keyboard control,
+          and a mailbox any LLM can actually read.
         </p>
         <div class="landing-hero-actions">
           <a class="ui primary button" href="#start"><i class="rocket icon"></i> Get started</a>
@@ -84,9 +85,9 @@
             <h3>Regex search over everything</h3>
             <p>
               Search is a real regular-expression engine over subjects, bodies and
-              extracted attachment text. Match by prefix, alternation or whole
-              words (<code>^Invoice</code>, <code>invoice|receipt</code>,
-              <code>\bcontract\b</code>) and scope it by account, folder or a
+              extracted attachment text. Match by prefix, alternation or pattern
+              (<code>^Invoice</code>, <code>terminat(e|ion)</code>,
+              <code>RN-\d{4}</code>) and scope it by account, folder or a
               last-N-years window.
             </p>
           </div>
@@ -173,11 +174,11 @@
             <div class="landing-card-icon"><i class="paperclip icon"></i></div>
             <h3>Attachments searchable to the last word</h3>
             <p>
-              Every attachment goes through Apache Tika on the way in and its text
-              is stored with the message. A search for <code>termination clause</code>
-              finds the PDF that <em>contains</em> it, not just mails that mention
-              it — same regex syntax on both. Run the OCR image and scanned
-              documents become searchable too.
+              Every attachment goes through Apache Tika on the way in, so a search
+              for <code>termination clause</code> finds the PDF that
+              <em>contains</em> it, not just mails that mention it. Photos and
+              scans go through OCR on the same pass — a receipt snapshot becomes
+              text you can regex.
             </p>
             <div class="landing-filetypes">
               <span class="landing-filetype"><i class="file pdf outline icon"></i>PDF</span>
@@ -186,27 +187,103 @@
               <span class="landing-filetype"><i class="file powerpoint outline icon"></i>PPTX</span>
               <span class="landing-filetype"><i class="file alternate outline icon"></i>ODF</span>
               <span class="landing-filetype"><i class="file code outline icon"></i>TXT</span>
+              <span class="landing-filetype"><i class="file image outline icon"></i>JPEG</span>
+              <span class="landing-filetype"><i class="file image outline icon"></i>PNG</span>
+              <span class="landing-filetype"><i class="file image outline icon"></i>TIFF</span>
             </div>
           </div>
         </article>
 
         <article class="landing-card">
           <div class="landing-card-body">
-            <div class="landing-card-icon"><i class="user secret icon"></i></div>
-            <h3>Trackers blocked before they load</h3>
+            <div class="landing-card-icon"><i class="font icon"></i></div>
+            <h3>Markdown that stays plain text</h3>
             <p>
-              Remote images are dropped by default, so the tracking pixels in
-              marketing mail never phone home — meerail tells you how many it
-              blocked and lets you load them for a message you trust. The HTML
-              itself is stripped of anything executable and rendered in a
-              sandboxed frame, and your mail credentials stay on your own machine
-              with the agent.
+              Write <code>**bold**</code> or <code>## Heading</code> and the
+              composer styles it as you type — without ever hiding the markers,
+              so the field always shows the exact text you are sending. Mail
+              still goes out as <code>text/plain</code>; there is no HTML part
+              and nothing for a recipient's client to render differently.
+              Incoming plain-text mail gets the same treatment on the way in.
             </p>
-            <div class="landing-blocked">
-              <i class="eye slash outline icon"></i>
-              <span>3 remote images blocked</span>
-              <span class="landing-blocked-load">Load images</span>
+            <div class="landing-md">
+              <span class="landing-md-mark">##</span>&nbsp;<strong class="landing-md-h">Release notes</strong>
+              <br />
+              <span class="landing-md-mark">**</span><strong>Ships Friday</strong><span class="landing-md-mark">**</span>
+              — see <span class="landing-md-mark">[</span><span class="landing-md-link">the plan</span><span class="landing-md-mark">](/plan)</span>
             </div>
+          </div>
+        </article>
+
+        <article class="landing-card">
+          <div class="landing-card-body">
+            <div class="landing-card-icon"><i class="hourglass half icon"></i></div>
+            <h3>Mail that lingers turns red</h3>
+            <p>
+              Inbox rows fade towards red as they age, so a mail you have been
+              avoiding for three weeks looks different from one that arrived this
+              morning. You set the horizon, or <code>0</code> to switch it off.
+              Only the inbox is tinted — there, age means <em>unhandled</em>.
+            </p>
+            <div class="landing-age">
+              <span class="landing-age-row" style="--t:0">today</span>
+              <span class="landing-age-row" style="--t:.35">9 days</span>
+              <span class="landing-age-row" style="--t:.7">18 days</span>
+              <span class="landing-age-row" style="--t:1">27 days</span>
+            </div>
+          </div>
+        </article>
+
+        <article class="landing-card">
+          <div class="landing-card-body">
+            <div class="landing-card-icon"><i class="tasks icon"></i></div>
+            <h3>Turn a mail into a Meerato task</h3>
+            <p>
+              Paste your
+              <a href="https://meerato.com/" target="_blank" rel="noopener">Meerato</a>
+              private URL into settings and an <em>Add Task</em> button appears on
+              every message. The subject becomes the task title, the body its
+              text, and you tick which attachments ride along. Buckets and
+              statuses are read from your Meerato, so the task lands where it
+              belongs rather than in a default pile. The call is proxied by the
+              server — your token never reaches the browser.
+            </p>
+          </div>
+        </article>
+
+        <article class="landing-card">
+          <div class="landing-card-body">
+            <div class="landing-card-icon"><i class="chart bar icon"></i></div>
+            <h3>Statistics about how you actually use mail</h3>
+            <p>
+              Because every message is in Postgres, meerail can answer questions
+              a mail client normally cannot: who you really correspond with, how
+              long you take to reply, how much arrives on an average day, and
+              what hours it lands. Pick an account and a window — a week through
+              to everything you have — and it is one query, not an export.
+            </p>
+            <!-- The figures the screenshot beside this card actually shows, so
+                 the two agree. Regenerate both together: make screenshots. -->
+            <div class="landing-stats">
+              <span class="landing-stat"><b>6.02</b>received / day</span>
+              <span class="landing-stat"><b>7h 56m</b>median reply</span>
+              <span class="landing-stat"><b>25.9%</b>you reply to</span>
+            </div>
+          </div>
+        </article>
+
+        <article class="landing-card">
+          <div class="landing-card-body">
+            <div class="landing-card-icon"><i class="images outline icon"></i></div>
+            <h3>You can see your attachments</h3>
+            <p>
+              Attachments show up as thumbnails, not as a row of identical grey
+              paperclips — page one of the PDF, the photo itself. Finding the
+              right invoice is a glance rather than four downloads. The previews
+              are generated once when the mail is synced and stored alongside it,
+              so opening a message with a dozen photos costs a handful of
+              kilobytes instead of pulling every original out of the database.
+            </p>
           </div>
         </article>
 
@@ -239,21 +316,10 @@
 
         <figure class="landing-shot">
           <button type="button" class="landing-shot-btn"
-                  data-full="/img/screenshots/search.png"
-                  data-caption="&lt;strong&gt;Regex that reads inside your attachments.&lt;/strong&gt; This search matched no subject and no message body — the words are inside the attached PDF, extracted through Tika on the way in.">
-            <img src="/img/screenshots/search.png" width="2880" height="1800" loading="lazy" decoding="async"
-                 alt="Regex search for GRAFANA|observability returning the one message whose PDF attachment contains that text." />
-            <span class="landing-shot-zoom"><i class="expand icon"></i></span>
-          </button>
-          <figcaption>Regex search</figcaption>
-        </figure>
-
-        <figure class="landing-shot">
-          <button type="button" class="landing-shot-btn"
                   data-full="/img/screenshots/thread.png"
                   data-caption="&lt;strong&gt;Conversations stay whole.&lt;/strong&gt; Replies are threaded by &lt;code&gt;References&lt;/code&gt; with a subject fallback, so a thread holds together even when a client along the way mangles the headers.">
             <img src="/img/screenshots/thread.png" width="2880" height="1800" loading="lazy" decoding="async"
-                 alt="A two-message conversation shown stacked in the reading pane." />
+                 alt="A three-message conversation shown stacked in the reading pane, each message with its own reply and archive controls." />
             <span class="landing-shot-zoom"><i class="expand icon"></i></span>
           </button>
           <figcaption>Threaded conversations</figcaption>
@@ -261,13 +327,79 @@
 
         <figure class="landing-shot">
           <button type="button" class="landing-shot-btn"
-                  data-full="/img/screenshots/compose.png"
-                  data-caption="&lt;strong&gt;Compose as any address you own.&lt;/strong&gt; Proton aliases and additional addresses appear in the From picker; replies default to whichever of your addresses the original mail was sent to.">
-            <img src="/img/screenshots/compose.png" width="2880" height="1800" loading="lazy" decoding="async"
-                 alt="The compose window with a From dropdown listing several sender addresses." />
+                  data-full="/img/screenshots/search.png"
+                  data-caption="&lt;strong&gt;Regex that reads inside your attachments.&lt;/strong&gt; &lt;code&gt;terminat(e|ion)&lt;/code&gt; matched no subject and no message body — the word is inside the attached PDF, extracted through Tika on the way in and quoted back with the hit highlighted.">
+            <img src="/img/screenshots/search.png" width="2880" height="1800" loading="lazy" decoding="async"
+                 alt="Regex search for terminat(e|ion) returning the one message whose PDF attachment contains that word, with the match highlighted in a quote from the PDF text." />
             <span class="landing-shot-zoom"><i class="expand icon"></i></span>
           </button>
-          <figcaption>Compose</figcaption>
+          <figcaption>Regex search</figcaption>
+        </figure>
+
+        <figure class="landing-shot">
+          <button type="button" class="landing-shot-btn"
+                  data-full="/img/screenshots/ocr.png"
+                  data-caption="&lt;strong&gt;Even the words that were only ever pixels.&lt;/strong&gt; This attachment is a scan with no text layer at all. Tesseract read it on the way in, so a reference number that exists nowhere but the image is now a regex away.">
+            <img src="/img/screenshots/ocr.png" width="2880" height="1800" loading="lazy" decoding="async"
+                 alt="Regex search for RN-2024-\d{4} matching a scanned PNG attachment, with the reference number highlighted in the OCR'd text." />
+            <span class="landing-shot-zoom"><i class="expand icon"></i></span>
+          </button>
+          <figcaption>OCR'd scans</figcaption>
+        </figure>
+
+        <figure class="landing-shot">
+          <button type="button" class="landing-shot-btn"
+                  data-full="/img/screenshots/attachments.png"
+                  data-caption="&lt;strong&gt;Attachments you can actually see.&lt;/strong&gt; Previews are rendered once when the mail is synced and stored next to it — page one for a PDF, the image itself for a photo — so a message with a dozen files costs kilobytes to open, not megabytes.">
+            <img src="/img/screenshots/attachments.png" width="2880" height="1800" loading="lazy" decoding="async"
+                 alt="A message with three image attachments shown as thumbnail previews rather than as generic file icons." />
+            <span class="landing-shot-zoom"><i class="expand icon"></i></span>
+          </button>
+          <figcaption>Attachment previews</figcaption>
+        </figure>
+
+        <figure class="landing-shot">
+          <button type="button" class="landing-shot-btn"
+                  data-full="/img/screenshots/markdown.png"
+                  data-caption="&lt;strong&gt;Markdown styled as you type, markers and all.&lt;/strong&gt; The &lt;code&gt;##&lt;/code&gt;, &lt;code&gt;**&lt;/code&gt; and &lt;code&gt;[…](…)&lt;/code&gt; stay visible in the field, dimmed rather than hidden, so what you see is exactly the plain text that goes out. There is no HTML part.">
+            <img src="/img/screenshots/markdown.png" width="2880" height="1800" loading="lazy" decoding="async"
+                 alt="The compose window with a markdown message being written: heading, bold, italic, bullets, blockquote, inline code and a link, each styled while its markdown markers remain visible in grey." />
+            <span class="landing-shot-zoom"><i class="expand icon"></i></span>
+          </button>
+          <figcaption>Markdown composer</figcaption>
+        </figure>
+
+        <figure class="landing-shot">
+          <button type="button" class="landing-shot-btn"
+                  data-full="/img/screenshots/age.png"
+                  data-caption="&lt;strong&gt;Mail that lingers turns red.&lt;/strong&gt; Inbox rows fade towards red as they age, so what you have been avoiding looks different from what just arrived. The horizon is yours to set — here it is fourteen days — and &lt;code&gt;0&lt;/code&gt; turns it off.">
+            <img src="/img/screenshots/age.png" width="2880" height="1800" loading="lazy" decoding="async"
+                 alt="The settings panel showing the age tint horizon set to 14 days, with the message list behind it fading from untinted at the top to deep red at the bottom." />
+            <span class="landing-shot-zoom"><i class="expand icon"></i></span>
+          </button>
+          <figcaption>Age tint</figcaption>
+        </figure>
+
+        <figure class="landing-shot">
+          <button type="button" class="landing-shot-btn"
+                  data-full="/img/screenshots/stats.png"
+                  data-caption="&lt;strong&gt;Statistics about how you actually use mail.&lt;/strong&gt; Volume over time, the hours mail actually lands, who you correspond with, and how long you take to reply — per account, over a window you pick.">
+            <img src="/img/screenshots/stats.png" width="2880" height="1800" loading="lazy" decoding="async"
+                 alt="The Statistics panel showing headline figures for mail received and sent per day, median reply time and response rate, a line chart of received versus sent volume over thirty days, and a heatmap of arrivals by weekday and hour concentrated in working hours." />
+            <span class="landing-shot-zoom"><i class="expand icon"></i></span>
+          </button>
+          <figcaption>Statistics</figcaption>
+        </figure>
+
+        <figure class="landing-shot">
+          <button type="button" class="landing-shot-btn"
+                  data-full="/img/screenshots/task.png"
+                  data-caption="&lt;strong&gt;A mail becomes a task without leaving the reader.&lt;/strong&gt; The subject fills the title, the body becomes the task text, and you tick which attachments ride along. Buckets and statuses are read from your own Meerato, so it lands where it belongs.">
+            <img src="/img/screenshots/task.png" width="2880" height="1800" loading="lazy" decoding="async"
+                 alt="The Add Task dialog filing an invoice email into Meerato, with the subject prefilled as the title, a bucket and status picker, and the PDF attachment ticked." />
+            <span class="landing-shot-zoom"><i class="expand icon"></i></span>
+          </button>
+          <figcaption>Meerato tasks</figcaption>
         </figure>
       </div>
     </section>

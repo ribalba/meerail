@@ -1,0 +1,50 @@
+# meerail-agent in Docker — LINUX ONLY. Use alongside the base file:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.agent.yml up -d
+#
+# `network_mode: host` hands the container the host's network namespace, which
+# is the entire point: the agent speaks to Proton Bridge, Postgres and Tika over
+# 127.0.0.1, so every address in agent/config.toml keeps working unchanged — no
+# host.docker.internal, no rewriting hosts to compose service names.
+#
+# It does NOT work on Docker Desktop (macOS/Windows): host mode there joins the
+# Desktop VM's namespace, not your machine's, so Bridge is not on that loopback.
+# Run the agent natively on those platforms — agent/README.md has launchd and
+# Task Scheduler recipes.
+#
+# Prerequisite: agent/config.toml must exist before the first `up`, or Docker
+# creates a *directory* at that path and the agent starts with no config.
+services:
+  agent:
+    build:
+      context: .
+      dockerfile: agent/Dockerfile
+    network_mode: host
+    # python runs as PID 1 and installs no SIGTERM handler, so signals with a
+    # default action are ignored; tini forwards them and `compose stop` returns
+    # promptly instead of waiting out the 10s kill timer.
+    init: true
+    depends_on:
+      db:
+        condition: service_healthy
+      tika:
+        condition: service_started
+    volumes:
+      # Read-only — the agent never writes its config. The 0600 permission check
+      # in preflight.py reads the host file's mode straight through the mount.
+      - ./agent/config.toml:/app/agent/config.toml:ro
+    # The peak here is sync.py's `raws = bridge.fetch_raw(need_raw)`, which holds
+    # a whole chunk of complete raw MIME messages in memory at once — batch_size
+    # messages, with no cap on how big any of them is. A chunk that happens to
+    # collect many large attachments is what pushes this over.
+    #
+    # 6GB is sized for the default batch_size=200. Lower batch_size in
+    # agent/config.toml rather than raising this: it cuts the peak roughly
+    # linearly and costs only a few more round trips.
+    deploy:
+      resources:
+        limits:
+          memory: 6g
+    # Safe to restart at any point: cursors live in the database, so the agent
+    # is stateless and resumes where it left off.
+    restart: unless-stopped

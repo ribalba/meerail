@@ -21,21 +21,49 @@ from .database import engine
 
 CHANNEL = "meerail_events"
 
+# Commands travel the other way — web app to agent — and get their own channel
+# on purpose. The agent publishes ingest events on CHANNEL, so if it also
+# listened there for work it would wake itself on its own notifications.
+COMMAND_CHANNEL = "meerail_commands"
+
 # Well below the 8000-byte NOTIFY limit, leaving room for the JSON envelope.
 _MAX_PAYLOAD = 4000
 
 
-def publish(event: dict) -> None:
-    """Broadcast an event to every listening process. Best-effort: never raises."""
+def dsn() -> str:
+    """Plain libpq DSN for the database, without the SQLAlchemy driver tag.
+
+    LISTEN needs a raw psycopg connection held open in autocommit, which is not
+    something the SQLAlchemy pool should hand out.
+    """
+    return engine.url.set(drivername="postgresql").render_as_string(hide_password=False)
+
+
+def _notify(channel: str, payload: dict) -> None:
+    """Best-effort NOTIFY: never raises."""
     try:
-        payload = json.dumps(event, default=str)
-        if len(payload) > _MAX_PAYLOAD:
-            # Drop the detail but keep the type so listeners still refresh.
-            payload = json.dumps({"type": event.get("type", "change")})
+        body = json.dumps(payload, default=str)
+        if len(body) > _MAX_PAYLOAD:
+            # Drop the detail but keep the type so listeners still act.
+            body = json.dumps({"type": payload.get("type", "change")})
         with engine.connect() as conn:
             conn.execute(text("SELECT pg_notify(:chan, :payload)"),
-                         {"chan": CHANNEL, "payload": payload})
+                         {"chan": channel, "payload": body})
             conn.commit()
     except Exception:
         # Events are advisory; a failure here must never break ingest or an API call.
         pass
+
+
+def publish(event: dict) -> None:
+    """Broadcast an event to every listening process. Best-effort: never raises."""
+    _notify(CHANNEL, event)
+
+
+def publish_command(command: dict) -> None:
+    """Ask the running agent(s) to do something. Best-effort: never raises.
+
+    Fire-and-forget by design: with no agent running the notification is simply
+    dropped, which is the same outcome as the agent being mid-sync already.
+    """
+    _notify(COMMAND_CHANNEL, command)

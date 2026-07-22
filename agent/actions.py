@@ -39,6 +39,28 @@ def apply_action(db, bridge, account, action: PendingAction) -> None:
         c.delete_messages([p["uid"]])
         c.expunge()
 
+    elif t == "create_folder":
+        # Idempotent: a retry after a timeout that actually landed must not fail
+        # the action permanently on an ALREADYEXISTS. The folder row itself is
+        # created by the LIST pass that follows this drain, not here.
+        # Where a user folder is allowed to live is the server's business, not
+        # the web app's, and only this side can see it — so the name arrives as
+        # a bare leaf and gets its namespace here.
+        parent = bridge.user_folder_parent()
+        name = p["name"]
+        if parent and not name.startswith(parent):
+            name = parent + name
+        if not c.folder_exists(name):
+            c.create_folder(name)
+        # Best-effort: Bridge subscribes on create and then rejects the
+        # redundant SUBSCRIBE outright ("already subscribed to this mailbox").
+        # Letting that propagate would fail — and endlessly retry — an action
+        # whose folder is already sitting on the server.
+        try:
+            c.subscribe_folder(name)
+        except Exception:  # noqa: BLE001
+            pass
+
     elif t == "send":
         outbound = db.get(Outbound, p["outbound_id"])
         if outbound is None or not outbound.raw_mime:

@@ -1,0 +1,47 @@
+# Runs the suite exactly the way `make test` does locally: on a throwaway
+# compose stack (`docker-compose.test.yml`, project `meerail-test`) that is
+# built, migrated by first boot, and torn down with its volume afterwards.
+#
+# 3.13 matches the Dockerfile's base image, so the venv resolves the same
+# wheels the server image does.
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # The stack build (server image + Tika pull) dominates; the suite itself is
+    # seconds. Cap generously rather than letting a hung container burn an hour.
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: tests/requirements.txt
+
+      # `make test` invokes $(PYTEST), which defaults to .venv-test/bin/pytest —
+      # the same layout tests/README.md documents, so the target needs no
+      # CI-specific overrides.
+      - name: Build the test venv
+        run: |
+          python3 -m venv .venv-test
+          .venv-test/bin/pip install --upgrade pip
+          .venv-test/bin/pip install -r tests/requirements.txt
+
+      # Brings the stack up, runs pytest against it, and tears it down with the
+      # volume whichever way pytest went (see the `test` target in the Makefile).
+      - name: Run tests
+        run: make test
+
+      # `make test` already tears down on both paths; this only catches a run
+      # cancelled mid-flight, so the runner never leaks the stack.
+      - name: Tear down
+        if: always()
+        run: make test-down

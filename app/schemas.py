@@ -1,15 +1,9 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # --- Accounts --------------------------------------------------------------
-
-
-class AccountCreate(BaseModel):
-    email: EmailStr
-    label: str = ""
-    color: str = "#1d6ff2"
 
 
 class AccountUpdate(BaseModel):

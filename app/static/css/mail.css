@@ -4,6 +4,9 @@
   --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --accent: #1d6ff2;
   --accent-weak: #e8f0fe;
+  /* Lighter than --accent: the keyboard cursor is drawn around content you are
+     reading, so it marks its place without shouting over the text. */
+  --accent-soft: #6ba4f8;
   --bg: #ffffff;
   --bg-elev: #f5f5f7;
   --sidebar: #e8e8ea;
@@ -15,17 +18,41 @@
   --text-faint: #a1a1a6;
   --border: #dededf;
   --border-strong: #cbcbcd;
+  /* Outlines message cards. A shade up from --border so a thread reads as
+     separate cards, but nowhere near black — the mail is the ink here. */
+  --msg-border: #d0d0d3;
   --flag: #f5a623;
   --danger: #d70015;
   --unread-dot: #1d6ff2;
   --shadow: 0 1px 3px rgba(0,0,0,.10), 0 10px 30px rgba(0,0,0,.08);
   --radius: 8px;
+  /* Age tint: rows fade towards red as they get older. --age-max is the alpha
+     at (or past) the configured horizon — kept well below 1 so the text on top
+     stays readable at full age. */
+  --age-rgb: 255, 69, 58;
+  --age-max: .34;
+  /* Statistics panels. Two series colours (received / sent) plus a one-hue
+     sequential ramp for the arrival heatmap. The pair was checked for
+     colour-blind separation against this surface before being chosen, and the
+     panels that use it also label both bars, so hue never carries the
+     distinction on its own. --an-recv deliberately matches --accent: received
+     mail is the subject of most of these panels. */
+  --an-recv: #1d6ff2;
+  --an-sent: #eb6834;
+  --an-seq-0: #f2f2f4;
+  --an-seq-1: #cde2fb;
+  --an-seq-2: #9ec5f4;
+  --an-seq-3: #6da7ec;
+  --an-seq-4: #3987e5;
+  --an-seq-5: #256abf;
+  --an-seq-6: #184f95;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
     --accent: #3b82f6;
     --accent-weak: #1e2a44;
+    --accent-soft: #7cb0fb;
     --bg: #1c1c1e;
     --bg-elev: #2c2c2e;
     --sidebar: #232325;
@@ -37,7 +64,24 @@
     --text-faint: #6a6a6e;
     --border: #313133;
     --border-strong: #3a3a3c;
+    /* Same one-shade-up relationship to --border as in light mode. */
+    --msg-border: #48484b;
     --shadow: 0 1px 3px rgba(0,0,0,.5), 0 10px 30px rgba(0,0,0,.4);
+    /* Red reads hotter against the dark list, so it needs less of it. */
+    --age-rgb: 255, 59, 48;
+    --age-max: .26;
+    /* Both series stepped for the dark surface rather than reused from light —
+       the light steps sit too close to the background to clear 3:1 here. The
+       sequential ramp flips anchor: on dark, more mail means lighter. */
+    --an-recv: #3b82f6;
+    --an-sent: #d95926;
+    --an-seq-0: #2a2a2c;
+    --an-seq-1: #152e4d;
+    --an-seq-2: #1a3f6b;
+    --an-seq-3: #205089;
+    --an-seq-4: #2a6bb5;
+    --an-seq-5: #3987e5;
+    --an-seq-6: #6da7ec;
   }
 }
 
@@ -52,8 +96,22 @@ code { background: var(--bg-elev); border: 1px solid var(--border); padding: .05
 svg { display: block; }
 
 /* --- Layout --- */
-.app { display: grid; grid-template-columns: 232px 340px 1fr; height: 100vh; }
-@media (max-width: 900px) { .app { grid-template-columns: 200px 1fr; } .reading-pane { display: none; } }
+/* --list-w is the user's dragged width, persisted by app.split.js. */
+.app { display: grid; grid-template-columns: 232px var(--list-w, 340px) 0 1fr; height: 100vh; }
+@media (max-width: 900px) {
+  .app { grid-template-columns: 200px 1fr; }
+  .reading-pane, .pane-divider { display: none; }
+}
+
+/* Zero-width grid track: the handle straddles the list pane's own border so the
+   divider costs no layout space, but has a comfortable grab area either side. */
+.pane-divider { position: relative; z-index: 5; cursor: col-resize; }
+.pane-divider::before { content: ""; position: absolute; top: 0; bottom: 0;
+  left: -4px; width: 9px; }
+.pane-divider:hover::before, .pane-divider.dragging::before { background: var(--accent); opacity: .35; }
+/* While dragging, the pointer is captured — keep the whole page from selecting
+   text or flipping cursors as it passes over the panes. */
+body.resizing { cursor: col-resize; user-select: none; }
 
 /* --- Sidebar --- */
 .sidebar { background: var(--sidebar); border-right: 1px solid var(--border);
@@ -61,8 +119,13 @@ svg { display: block; }
 .sidebar-toolbar { display: flex; align-items: center; justify-content: space-between;
   padding: .55rem .75rem .55rem .9rem; -webkit-app-region: drag; }
 .brand { font-weight: 700; font-size: .98rem; letter-spacing: -.01em;
-  display: flex; align-items: center; gap: .4rem; }
+  display: flex; align-items: center; gap: .4rem;
+  /* Keeps the toolbar buttons grouped at the right edge rather than letting
+     space-between spread them once there is more than one. */
+  margin-right: auto; }
 .brand-logo { height: 22px; width: auto; display: block; }
+/* The toolbar is an Electron drag region; buttons in it must opt out to stay clickable. */
+.sidebar-toolbar .icon-btn { -webkit-app-region: no-drag; }
 .mailbox-tree { flex: 1; overflow-y: auto; padding: .25rem .5rem 1rem; }
 .tree-section { font-size: .68rem; font-weight: 700; text-transform: uppercase;
   letter-spacing: .04em; color: var(--sidebar-section); padding: .8rem .55rem .25rem; }
@@ -78,10 +141,50 @@ svg { display: block; }
 .mailbox-row.active .mb-icon { color: #fff; }
 .mailbox-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mailbox-count { font-size: .78rem; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+/* Pin toggle: hidden until the row is hovered, unless the folder is already
+   pinned — a filled star is the only thing marking a Favorites row as removable. */
+.mb-star { flex: 0 0 auto; display: flex; align-items: center; padding: 0; border: 0;
+  background: none; cursor: pointer; color: var(--text-muted); opacity: 0; }
+.mailbox-row:hover .mb-star, .mb-star.on { opacity: 1; }
+.mb-star:hover { color: var(--accent); }
+.mb-star.on { color: #e0a500; }
+.mailbox-row.active .mb-star, .mailbox-row.active .mb-star.on { color: #fff; }
 .account-dot { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; }
 .account-head { display: flex; align-items: center; gap: .45rem; padding: .8rem .55rem .2rem; }
 .account-head .account-label { font-size: .72rem; font-weight: 700; text-transform: uppercase;
   letter-spacing: .03em; color: var(--sidebar-section); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Same reveal-on-hover idiom as .mb-star, so the account rows stay quiet until
+   you reach for them. flex:1 on the label pushes the + to the right edge. */
+.account-head .account-label { flex: 1; }
+.acc-add { flex: 0 0 auto; display: flex; align-items: center; padding: 0; border: 0;
+  background: none; cursor: pointer; color: var(--sidebar-section); opacity: 0; }
+.account-head:hover .acc-add { opacity: 1; }
+.acc-add:hover { color: var(--accent); }
+.acc-add:focus-visible { opacity: 1; }
+
+/* --- Sidebar shortcut cheat sheet --- */
+.shortcut-box { flex: 0 0 auto; border-top: 1px solid var(--border);
+  padding: .35rem .5rem .5rem; max-height: 45vh; display: flex; flex-direction: column; }
+.sc-toggle { display: flex; align-items: center; gap: .35rem; width: 100%; background: none;
+  border: none; cursor: pointer; font: inherit; font-size: .68rem; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .04em; color: var(--sidebar-section);
+  padding: .35rem .55rem; border-radius: 6px; }
+.sc-toggle:hover { background: rgba(0,0,0,.05); }
+@media (prefers-color-scheme: dark) { .sc-toggle:hover { background: rgba(255,255,255,.06); } }
+.sc-glyph { display: flex; margin-left: auto; }
+/* The chevron points down; flip it so "restore" reads as opening upward. */
+.shortcut-box.collapsed .sc-glyph { transform: rotate(180deg); }
+.sc-body { overflow-y: auto; padding: .15rem .55rem .1rem; }
+.shortcut-box.collapsed .sc-body { display: none; }
+.sc-group { font-size: .64rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--text-faint); padding: .45rem 0 .15rem; }
+.sc-group:first-child { padding-top: .1rem; }
+.sc-row { display: flex; align-items: baseline; gap: .45rem; padding: .1rem 0;
+  font-size: .74rem; color: var(--text-muted); }
+.sc-row kbd { flex: 0 0 auto; min-width: 3.4em; text-align: center; font-family: var(--font);
+  font-size: .7rem; color: var(--text); background: var(--bg); border: 1px solid var(--border-strong);
+  border-bottom-width: 2px; border-radius: 5px; padding: .05rem .3rem; }
+.sc-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* --- Panes --- */
 .list-pane { border-right: 1px solid var(--border); background: var(--list-bg);
@@ -89,7 +192,6 @@ svg { display: block; }
 .pane-header { display: flex; align-items: center; justify-content: space-between;
   padding: .5rem .8rem; border-bottom: 1px solid var(--border); min-height: 44px; }
 .pane-title { font-size: 1.15rem; font-weight: 700; letter-spacing: -.01em; }
-.pane-header-actions { display: flex; gap: .25rem; }
 .search-region { border-bottom: 1px solid var(--border); }
 .search-bar { display: flex; align-items: center; gap: .4rem; padding: .5rem .7rem; }
 .search-bar input { flex: 1; border: none; background: var(--bg-elev); color: var(--text);
@@ -97,6 +199,10 @@ svg { display: block; }
 .search-bar input:focus { outline: 2px solid var(--accent); }
 .search-icon { color: var(--text-faint); display: flex; }
 .search-clear { flex: 0 0 auto; }
+/* Sits quietly at the end of the bar until you go looking for it — the filter
+   syntax is the kind of thing you need once and then remember. */
+.search-help-btn { flex: 0 0 auto; color: var(--text-faint); }
+.search-help-btn:hover { color: var(--text); }
 .search-controls { display: flex; align-items: center; gap: .5rem; padding: 0 .7rem .5rem;
   flex-wrap: wrap; }
 .rx-toggle { display: flex; align-items: center; gap: .28rem; font-size: .78rem;
@@ -108,14 +214,61 @@ svg { display: block; }
 .search-status.error { color: var(--danger); }
 
 /* --- Message list --- */
-.message-list { flex: 1; overflow-y: auto; }
+.message-list { flex: 1; overflow-y: auto; padding: .25rem 0; }
+/* Rows are inset pills: the rounded selection needs a little air on both sides
+   to read as a card rather than a full-bleed band with clipped corners. The
+   hairline divider goes with it — the spacing separates the rows now. */
 .msg-row { display: grid; grid-template-columns: 16px 1fr; gap: .5rem;
-  padding: .55rem .8rem .6rem; border-bottom: 1px solid var(--border); cursor: pointer;
-  position: relative; }
+  padding: .55rem .8rem .6rem; margin: 1px .35rem; border-radius: 7px;
+  cursor: pointer; position: relative; overflow: hidden;
+  /* Shift-clicking tick boxes to select a range would otherwise also drag a
+     text highlight across the rows it passes. The mail itself is selectable in
+     the reading pane; these rows are controls. */
+  user-select: none;
+  /* --age-t (0…1) is set per row by app.list.js; unset means no tint. Set as a
+     custom property rather than an inline background so hover/active below can
+     still win — an inline background-color would outrank both. */
+  background: rgba(var(--age-rgb), calc(var(--age-t, 0) * var(--age-max))); }
 .msg-row:hover { background: var(--bg-elev); }
 .msg-row.active { background: var(--list-sel); }
-.msg-gutter { display: flex; flex-direction: column; align-items: center; padding-top: .2rem; gap: .3rem; }
+/* Keyboard cursor — an inset outline rather than a fill, so it reads clearly on
+   top of .active and hover, and does not cover the account stripe on the left. */
+.msg-row.focused { outline: 2px solid var(--accent-soft); outline-offset: -2px; }
+.msg-row.selected { background: var(--accent-weak); }
+.msg-gutter { display: flex; flex-direction: column; align-items: center; padding-top: .2rem; gap: .3rem;
+  position: relative; }
 .unread-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--unread-dot); }
+/* The tick box and the unread dot share the gutter's one slot: the box sits on
+   top and only appears when selecting is in play (hover, ticked, or anything
+   ticked anywhere), and the dot steps aside while it is showing. Stacking them
+   instead of giving each its own row keeps the gutter 16px wide — widening it
+   would re-flow every row in the list for a control that is usually idle. */
+.msg-check { position: absolute; top: .15rem; left: 50%; transform: translateX(-50%);
+  margin: 0; width: 13px; height: 13px; opacity: 0; cursor: pointer;
+  accent-color: var(--accent); }
+.msg-row:hover .msg-check, .msg-row.selected .msg-check,
+.list-selecting .msg-check { opacity: 1; }
+.msg-row:hover .unread-dot, .msg-row.selected .unread-dot,
+.list-selecting .unread-dot { visibility: hidden; }
+
+/* Bulk action bar — sits between the search box and the list while rows are
+   ticked, so the count is next to the button that acts on it. */
+.bulk-bar { display: flex; align-items: center; gap: .5rem; flex: 0 0 auto; flex-wrap: wrap;
+  row-gap: .35rem; padding: .4rem .6rem; border-bottom: 1px solid var(--border);
+  background: var(--bg-elev); font-size: .82rem; }
+.bulk-bar[hidden] { display: none; }
+/* Never break the count mid-phrase — a pane narrow enough to need it should
+   wrap the whole bar instead. */
+.bulk-count { font-weight: 600; white-space: nowrap; }
+.bulk-spacer { flex: 1; }
+.bulk-link { background: none; border: none; padding: 0; font: inherit; cursor: pointer;
+  color: var(--accent); text-decoration: underline; }
+.bulk-btn { display: inline-flex; align-items: center; gap: .3rem; font: inherit;
+  padding: .2rem .5rem; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--border-strong); background: var(--bg); color: var(--text); }
+.bulk-btn:hover:not(:disabled) { background: var(--bg-elev); }
+.bulk-btn:disabled { opacity: .55; cursor: default; }
+.bulk-btn.danger { color: var(--danger); border-color: var(--danger); }
 .msg-main { min-width: 0; }
 .msg-line1 { display: flex; align-items: baseline; gap: .5rem; }
 .msg-sender { font-weight: 600; font-size: .9rem; flex: 1; overflow: hidden;
@@ -128,24 +281,86 @@ svg { display: block; }
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .msg-meta { display: flex; align-items: center; gap: .35rem; margin-top: .2rem; }
 .thread-badge { font-size: .7rem; background: var(--bg-elev); border: 1px solid var(--border-strong);
-  color: var(--text-muted); border-radius: 999px; padding: 0 .4rem; font-variant-numeric: tabular-nums; }
+  color: var(--text-muted); border-radius: 999px; padding: 0 .4rem; font-variant-numeric: tabular-nums;
+  display: inline-flex; align-items: center; gap: .2rem; }
 .flag-dot { color: var(--flag); display: flex; }
 .attach-glyph { color: var(--text-faint); display: flex; }
 .acct-stripe { position: absolute; left: 0; top: 0; bottom: 0; width: 3px; }
 .list-empty, .reader-empty { color: var(--text-faint); text-align: center; padding: 3rem 1rem;
   font-size: .9rem; }
+.list-more { display: block; width: calc(100% - 1.5rem); margin: .5rem auto 1rem;
+  padding: .5rem; background: none; border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text-muted); font: inherit; font-size: .85rem; cursor: pointer; }
+.list-more:hover:not(:disabled) { background: var(--bg-elev); color: var(--text); }
+.list-more:disabled { cursor: default; opacity: .6; }
 
 /* --- Reading pane --- */
 .reading-pane { background: var(--bg); overflow-y: auto; display: flex; flex-direction: column; }
 .reader-empty { margin: auto; }
 .reader-empty-glyph { width: 54px; height: 54px; margin: 0 auto 1rem; opacity: .25;
   color: var(--text-faint); }
-.reader-content { padding: 0; }
-.thread-msg { border-bottom: 8px solid var(--bg-elev); }
-.thread-msg:last-child { border-bottom: none; }
-.msg-head { padding: 1rem 1.4rem .8rem; }
-.msg-head .thread-subject { font-size: 1.3rem; font-weight: 700; letter-spacing: -.01em;
-  margin: 0 0 .8rem; }
+/* Cleared the folder: the meerkat gets to be the whole message, so it is sized
+   against the pane rather than pinned to a fixed width. */
+.reader-empty.all-done { padding: 2rem 1rem; }
+.reader-empty-art { display: block; width: min(320px, 60vw); height: auto;
+  margin: 0 auto 1.4rem; }
+.reader-empty.all-done p { font-size: 1.05rem; color: var(--text-muted); }
+.reader-content { padding: .9rem 1rem 1.4rem; }
+
+/* Each message is its own bordered card. Threads run long and every reply
+   quotes the last one back at you, so the boundary has to be drawn hard —
+   the old 8px spacer left two messages reading as one. */
+.thread-msg { border: 1px solid var(--msg-border); border-radius: 10px;
+  background: var(--bg); overflow: hidden; margin-bottom: .9rem; }
+.thread-msg:last-child { margin-bottom: 0; }
+
+/* Search hits. `mark` is the browser's own element for this, but its default
+   yellow is a fixed light-mode colour that goes unreadable on the dark theme,
+   so both the fill and the text colour are pinned here. The same rule is
+   repeated inside the body iframes (App.highlight.FRAME_CSS) — srcdoc
+   documents inherit nothing from this sheet. */
+mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1px; }
+/* Which message the term is in, readable before you have scrolled into it. */
+.thread-msg.has-hit { border-color: var(--accent); }
+
+/* A hit the reader cannot otherwise show: the term lives in extracted
+   attachment text, not in the mail body. */
+.att-hits { padding: 0 1.1rem 1rem; display: flex; flex-direction: column; gap: .55rem; }
+.att-hit { border-left: 2px solid var(--accent); padding-left: .65rem; }
+.att-hit-name { display: flex; align-items: center; gap: .35rem; font-size: .78rem;
+  color: var(--text-faint); margin-bottom: .2rem; }
+.att-hit-quote { font-size: .82rem; line-height: 1.5; color: var(--text-muted);
+  word-wrap: break-word; overflow-wrap: break-word; }
+.attachment-chip.has-hit { border-color: var(--accent); }
+.thread-msg.collapsed .msg-head { padding-bottom: .85rem; }
+.msg-head { padding: .85rem 1.1rem .8rem; cursor: pointer; user-select: none;
+  background: var(--bg-elev); }
+/* An overlay rather than a second colour: the head and the toolbar under it
+   share one tint, and a flat hover colour would have to be re-picked for both
+   themes to stay this subtle. */
+.msg-head:hover { box-shadow: inset 0 0 0 999px rgba(0,0,0,.035); }
+@media (prefers-color-scheme: dark) {
+  .msg-head:hover { box-shadow: inset 0 0 0 999px rgba(255,255,255,.05); }
+}
+.msg-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* The head folds the card, but the strings in it — sender, recipients, date,
+   subject — are things people copy, so they opt back out of the button. */
+.msg-head .selectable { user-select: text; cursor: text; }
+/* Per-message actions. Not sticky, unlike the pane bar it sits below: it
+   belongs to this card and scrolls away with it. It shares the head's tint and
+   draws no rule above, so sender, recipients and buttons read as one header
+   block sitting on top of the white message. */
+.msg-toolbar { display: flex; gap: .3rem; padding: .3rem .8rem .35rem;
+  border-bottom: 1px solid var(--border); background: var(--bg-elev); }
+/* The shared hover tint is this strip's own background — invert it here. */
+.msg-toolbar .tb-btn:hover:not(:disabled) { background: var(--bg); }
+.msg-chevron { color: var(--text-faint); display: flex; transition: transform .15s; }
+.thread-msg.collapsed .msg-chevron { transform: rotate(-90deg); }
+@media (prefers-reduced-motion: reduce) { .msg-chevron { transition: none; } }
+/* Sits below the sender row, so its spacing hangs off the top. Smaller than a
+   page title would be: it repeats on every card in the thread. */
+.msg-head .thread-subject { font-size: 1.05rem; font-weight: 700; letter-spacing: -.01em;
+  margin: .7rem 0 0; word-wrap: break-word; overflow-wrap: break-word; }
 .from-row { display: flex; align-items: center; gap: .7rem; }
 .avatar { width: 38px; height: 38px; border-radius: 50%; flex: 0 0 auto; color: #fff;
   display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 1rem; }
@@ -154,47 +369,122 @@ svg { display: block; }
 .from-detail { font-size: .8rem; color: var(--text-muted); overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
 .msg-date-full { font-size: .8rem; color: var(--text-muted); white-space: nowrap; }
-.reader-toolbar { display: flex; gap: .3rem; padding: .4rem 1.4rem; border-bottom: 1px solid var(--border);
+/* One toolbar for the pane, pinned to the top of the scroller — it acts on the
+   newest message in the thread, so it has no reason to move with the reading. */
+.reader-bar { display: flex; align-items: center; gap: .15rem; flex: 0 0 auto;
+  padding: .4rem .9rem; border-bottom: 1px solid var(--border);
   position: sticky; top: 0; background: var(--bg); z-index: 5; }
-.collapsed-preview { padding: .7rem 1.4rem; cursor: pointer; display: flex; gap: .7rem; align-items: center; }
-.collapsed-preview:hover { background: var(--bg-elev); }
-.collapsed-preview .from-name { font-size: .9rem; }
-.collapsed-snippet { color: var(--text-muted); font-size: .84rem; overflow: hidden;
-  text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+/* "The arrows are pointed at this pane." The whole bar tints, so the cue is
+   visible from wherever in the thread you are actually reading; the chip leads
+   it and says which keys are meant. */
+.reader-bar.kb-on { background: var(--accent-weak); border-bottom-color: var(--accent-soft); }
+.tb-keys { flex: 0 0 auto; display: flex; align-items: center; gap: .3rem;
+  margin-right: .3rem; font-size: .8rem; line-height: 1; color: var(--accent);
+  background: var(--bg); border: 1px solid var(--accent-soft); border-radius: 999px;
+  padding: .22rem .5rem; user-select: none; white-space: nowrap; }
+.tb-keys-label { font-size: .7rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .04em; }
 .remote-banner { display: flex; align-items: center; justify-content: space-between; gap: .5rem;
   background: var(--bg-elev); border: 1px solid var(--border); border-radius: 7px;
-  margin: .6rem 1.4rem 0; padding: .45rem .7rem; font-size: .82rem; color: var(--text-muted); }
+  margin: .6rem 1.1rem 0; padding: .45rem .7rem; font-size: .82rem; color: var(--text-muted); }
 .remote-banner button { font: inherit; font-weight: 600; font-size: .8rem; border: none;
   background: var(--accent); color: #fff; border-radius: 6px; padding: .3rem .7rem; cursor: pointer; }
 .msg-body-frame { width: 100%; border: none; display: block; }
-.msg-body-text { padding: 1rem 1.4rem 1.4rem; white-space: pre-wrap; word-wrap: break-word;
+.msg-body-text { padding: .9rem 1.1rem 1.1rem; white-space: pre-wrap; word-wrap: break-word;
   font-size: .9rem; line-height: 1.5; }
-.attachments { display: flex; flex-wrap: wrap; gap: .5rem; padding: .3rem 1.4rem 1.2rem; }
+
+/* Plain-text bodies rendered as markdown. No pre-wrap here: the parser has
+   already turned the source line breaks into <br>, so pre-wrap would double
+   every one of them. */
+.msg-body-md { padding: .9rem 1.1rem 1.1rem; word-wrap: break-word; overflow-wrap: break-word;
+  font-size: .9rem; line-height: 1.55; }
+.msg-body-md > :first-child { margin-top: 0; }
+.msg-body-md > :last-child { margin-bottom: 0; }
+.msg-body-md p { margin: 0 0 .8em; }
+.msg-body-md h1, .msg-body-md h2, .msg-body-md h3,
+.msg-body-md h4, .msg-body-md h5, .msg-body-md h6 { margin: 1.1em 0 .45em; line-height: 1.3; }
+.msg-body-md h1 { font-size: 1.4em; }
+.msg-body-md h2 { font-size: 1.22em; }
+.msg-body-md h3 { font-size: 1.08em; }
+.msg-body-md h4, .msg-body-md h5, .msg-body-md h6 { font-size: 1em; }
+.msg-body-md ul, .msg-body-md ol { margin: 0 0 .8em; padding-left: 1.5em; }
+.msg-body-md li { margin: .15em 0; }
+.msg-body-md blockquote { margin: 0 0 .8em; padding-left: .8em;
+  border-left: 3px solid var(--border-strong); color: var(--text-muted); }
+.msg-body-md hr { border: none; border-top: 1px solid var(--border); margin: 1.1em 0; }
+.msg-body-md a { color: var(--accent); }
+.msg-body-md code, .md-code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .88em; background: var(--bg-elev); border-radius: 4px; padding: .08em .3em; }
+.msg-body-md pre { background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px;
+  margin: 0 0 .8em; padding: .6rem .75rem; overflow-x: auto; }
+.msg-body-md pre code { background: none; border: none; padding: 0; }
+
+.attachments { display: flex; flex-wrap: wrap; gap: .5rem; padding: .3rem 1.1rem 1rem; }
 .attachment-chip { display: flex; align-items: center; gap: .45rem; border: 1px solid var(--border);
   border-radius: 8px; padding: .4rem .6rem; font-size: .82rem; text-decoration: none; color: var(--text);
   background: var(--bg-elev); }
 .attachment-chip:hover { border-color: var(--accent); }
 .attachment-chip .att-name { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .attachment-chip .att-size { color: var(--text-faint); font-size: .74rem; }
+/* Keeps the icon+name+size row reading as it did before the wrapper existed. */
+.attachment-chip .att-meta { display: flex; align-items: baseline; gap: .45rem; min-width: 0; }
+
+/* Chips with a preview stack the image above the filename; plain ones keep the
+   original inline icon+name row, so a mixed attachment list still lines up. */
+.attachment-chip.has-thumb { flex-direction: column; align-items: stretch;
+  gap: .4rem; padding: .4rem; width: 132px; }
+.attachment-chip.has-thumb .att-meta { display: flex; flex-direction: column; gap: .05rem; }
+.attachment-chip.has-thumb .att-name { max-width: 124px; }
+.att-thumb { display: block; width: 124px; height: 96px; object-fit: cover;
+  object-position: top center;   /* documents identify by their header, not their middle */
+  border-radius: 5px; background: var(--bg); border: 1px solid var(--border); }
 
 /* --- Buttons --- */
 .icon-btn { background: none; border: none; color: var(--text-muted); cursor: pointer;
   padding: .35rem; border-radius: 6px; display: flex; align-items: center; }
 .icon-btn:hover { background: rgba(0,0,0,.06); color: var(--text); }
+.icon-btn:disabled { cursor: default; }
+.icon-btn.spinning svg { animation: icon-spin 1s linear infinite; }
+@keyframes icon-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .icon-btn.spinning svg { animation: none; opacity: .5; }
+}
 @media (prefers-color-scheme: dark) { .icon-btn:hover { background: rgba(255,255,255,.08); } }
 .tb-btn { background: none; border: none; color: var(--text-muted); cursor: pointer;
   padding: .35rem .5rem; border-radius: 6px; display: flex; align-items: center; gap: .3rem; font: inherit;
   font-size: .82rem; }
-.tb-btn:hover { background: var(--bg-elev); color: var(--text); }
+.tb-btn:hover:not(:disabled) { background: var(--bg-elev); color: var(--text); }
 .tb-btn.on { color: var(--flag); }
+.tb-btn:disabled { opacity: .35; cursor: default; }
 .tb-spacer { flex: 1; }
+/* Groups the bar the way Apple Mail does: compose | reply verbs | filing verbs. */
+.tb-sep { width: 1px; align-self: stretch; margin: .2rem .4rem; background: var(--border); }
+
+/* Move-to-folder menu. Mounted on <body> and positioned in fixed coordinates
+   because the toolbar it hangs off is sticky and clips its own overflow. */
+.move-menu { position: fixed; z-index: 40; min-width: 190px; max-width: 280px;
+  max-height: 320px; overflow-y: auto; padding: .25rem;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0,0,0,.18); }
+@media (prefers-color-scheme: dark) { .move-menu { box-shadow: 0 8px 24px rgba(0,0,0,.5); } }
+.move-item { display: flex; align-items: center; gap: .5rem; width: 100%;
+  background: none; border: none; cursor: pointer; font: inherit; font-size: .85rem;
+  color: var(--text); text-align: left; padding: .4rem .5rem; border-radius: 6px; }
+.move-item:hover { background: var(--bg-elev); }
+.mm-icon { display: flex; color: var(--text-muted); }
+.mm-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.move-empty { padding: .5rem .6rem; font-size: .82rem; color: var(--text-muted); }
 
 /* --- Compose --- */
 /* Resizable via the native grip; `resize` needs a non-visible overflow, which
    .modal already sets. Dragging switches to absolute positioning (below). */
 .modal.compose {
   position: relative;  /* containing block for the drop overlay */
-  width: min(620px, 94vw); height: min(660px, 86vh); max-height: none;
+  /* Writing mail is the foreground task, so the composer opens big rather than
+     as a 620px box floating over a mailbox you are no longer reading — but it
+     caps at 1400px: past that the lines get too long to read back. Still
+     resizable and draggable down from there. */
+  width: min(1400px, 94vw); height: 96vh; max-height: none;
   min-width: 340px; min-height: 300px; max-width: 98vw; resize: both;
 }
 /* Shown while files hover anywhere over the composer; pointer-events off so it
@@ -206,24 +496,74 @@ svg { display: block; }
 }
 .compose-drop[hidden] { display: none; }
 .compose-drop span { font-weight: 600; font-size: .95rem; color: var(--accent); }
-.modal.compose .modal-head { cursor: move; user-select: none; }
+.modal.compose .modal-head { cursor: move; user-select: none; gap: .3rem; }
+.modal.compose .modal-head h2 { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .modal.compose .modal-head .icon-btn { cursor: pointer; }
+/* Minimized composer — a small bar parked bottom-right, above everything. */
+.compose-min {
+  position: fixed; right: 1.2rem; bottom: 0; z-index: 200;
+  display: flex; align-items: center; gap: .2rem; max-width: min(320px, 80vw);
+  padding: .1rem .35rem .1rem .2rem;
+  background: var(--bg); border: 1px solid var(--border-strong);
+  border-radius: 10px 10px 0 0; box-shadow: var(--shadow);
+}
+.compose-min[hidden] { display: none; }
+.compose-min-label {
+  flex: 1; min-width: 0; font: inherit; font-size: .86rem; font-weight: 550; text-align: left;
+  color: var(--text); background: none; border: none; cursor: pointer;
+  padding: .6rem .5rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.compose-min-label:hover { color: var(--accent); }
 /* Once dragged the window is placed by pixel coords instead of backdrop centering. */
 .modal.compose.dragging-placed { position: absolute; margin: 0; }
 .compose-body { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: .5rem; }
 .compose-row { display: flex; align-items: center; gap: .6rem; }
+/* display:flex above would otherwise override the [hidden] attribute. */
+.compose-row[hidden] { display: none; }
 .compose-row label { width: 54px; flex: 0 0 auto; color: var(--text-muted); font-size: .84rem; text-align: right; }
 .compose-row input, #compose-from {
   flex: 1; font: inherit; font-size: .88rem; padding: .45rem .55rem;
   border: 1px solid var(--border); border-radius: 7px; background: var(--bg); color: var(--text); min-width: 0;
 }
 .compose-row input:focus, #compose-from:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+/* Cc/Bcc live folded away behind these; they sit inside the To row so the
+   composer keeps its height until a field is actually wanted. */
+.compose-toggles { display: flex; gap: .1rem; flex: 0 0 auto; }
+.compose-toggle {
+  font: inherit; font-size: .8rem; padding: .2rem .35rem; border: 0; border-radius: 5px;
+  background: none; color: var(--text-muted); cursor: pointer;
+}
+.compose-toggle:hover { background: var(--bg-elev); color: var(--text); }
+.compose-toggle[aria-expanded="true"] { color: var(--accent); }
+.compose-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
 .compose-textarea {
   flex: 1; min-height: 120px; resize: none; font: inherit; font-size: .9rem; line-height: 1.5;
   padding: .6rem .7rem; border: 1px solid var(--border); border-radius: 8px;
   background: var(--bg); color: var(--text); margin-top: .3rem;
 }
 .compose-textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+/* --- Markdown live preview in the composer ---------------------------------
+   The markers are never removed, only dimmed, so the field still shows the
+   exact text that will be sent. Nothing here may change a glyph's advance
+   width outside its own line — line-per-block is what keeps the caret honest. */
+.md-editor { position: relative; overflow-y: auto; cursor: text;
+  white-space: pre-wrap; overflow-wrap: break-word; }
+.md-editor.is-empty::before { content: attr(data-placeholder); position: absolute;
+  color: var(--text-faint); pointer-events: none; }
+.md-line { min-height: 1.5em; }
+.md-mark { color: var(--text-faint); font-weight: 400; font-style: normal; opacity: .65; }
+.md-line.md-h { font-weight: 700; line-height: 1.35; }
+.md-line.md-h1 { font-size: 1.35em; }
+.md-line.md-h2 { font-size: 1.2em; }
+.md-line.md-h3 { font-size: 1.08em; }
+.md-line.md-quote { color: var(--text-muted); }
+.md-line.md-hr { color: var(--text-faint); }
+/* Fenced code is set in mono but keeps the normal text colour — it is content
+   you are writing, not a marker. Only the ``` delimiters themselves dim. */
+.md-line.md-fence, .md-line.md-in-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .86em; }
+.md-link { color: var(--accent); text-decoration: underline; }
 .compose-attachments { display: flex; flex-wrap: wrap; gap: .4rem; }
 .compose-attachments:empty { display: none; }
 .compose-chip { display: inline-flex; align-items: center; gap: .35rem; background: var(--bg-elev);
@@ -233,11 +573,25 @@ svg { display: block; }
 .cc-remove { border: none; background: none; color: var(--text-muted); cursor: pointer;
   font-size: 1.05rem; line-height: 1; padding: 0 .1rem; }
 .cc-remove:hover { color: var(--danger); }
-.compose-actions { display: flex; align-items: center; gap: .8rem; margin-top: .4rem; }
+/* Tighter than the rest of the composer: up to three send buttons sit here, and
+   the status line's flex:1 is what actually holds them apart from the paperclip. */
+.compose-actions { display: flex; align-items: center; gap: .5rem; margin-top: .4rem; }
 .compose-status { flex: 1; color: var(--text-muted); font-size: .84rem; }
+/* Outlined alternative to .btn-primary. The composer swaps the two classes
+   between its send buttons as the default moves, so they have to match in
+   metrics or a button would resize as it changes rank — hence the transparent
+   border on the primary and the same padding on both. */
+.btn-secondary {
+  font: inherit; font-weight: 600; border: 1px solid var(--border-strong); border-radius: 8px;
+  cursor: pointer; padding: .5rem 1.1rem; background: transparent; color: var(--text);
+  white-space: nowrap;
+}
+.btn-secondary:hover { background: var(--bg-elev); }
+.btn-secondary:disabled { opacity: .6; cursor: default; background: transparent; }
 .btn-primary {
-  font: inherit; font-weight: 600; border: none; border-radius: 8px; cursor: pointer;
-  padding: .5rem 1.4rem; background: var(--accent); color: #fff;
+  font: inherit; font-weight: 600; border: 1px solid transparent; border-radius: 8px;
+  cursor: pointer; padding: .5rem 1.1rem; background: var(--accent); color: #fff;
+  white-space: nowrap;
 }
 .btn-primary:hover { filter: brightness(1.05); }
 .btn-primary:disabled { opacity: .6; cursor: default; }
@@ -263,17 +617,37 @@ svg { display: block; }
   padding: 1rem 1.2rem; border-bottom: 1px solid var(--border); }
 .modal-head h2 { margin: 0; font-size: 1.1rem; }
 .modal-body { padding: 1rem 1.2rem 1.4rem; overflow-y: auto; }
+
+/* Search syntax help. Wider than the settings modal so a filter and the line
+   explaining it stay on one row each. */
+#search-help-modal .modal { width: min(580px, 94vw); }
+#search-help-modal h3 { margin: 1.2rem 0 .4rem; font-size: .82rem; text-transform: uppercase;
+  letter-spacing: .04em; color: var(--text-muted); }
+#search-help-modal h3:first-child { margin-top: 0; }
+.help-lede { margin: 0 0 .7rem; font-size: .84rem; line-height: 1.5; color: var(--text-muted); }
+.help-table { width: 100%; border-collapse: collapse; font-size: .84rem; margin-bottom: .7rem; }
+.help-table td { padding: .3rem .5rem .3rem 0; vertical-align: top; border-top: 1px solid var(--border); }
+.help-table tr:first-child td { border-top: none; }
+.help-table td:first-child { white-space: nowrap; width: 1%; }
+.help-table td:last-child { color: var(--text-muted); }
+.help-table em { color: var(--text-faint); font-style: italic; }
 .settings-account-list { list-style: none; margin: 0 0 1rem; padding: 0; }
 .settings-account-list li { padding: .55rem .1rem .75rem; border-bottom: 1px solid var(--border); }
 .settings-account-list li:last-child { border-bottom: none; }
 .sa-row { display: flex; align-items: center; gap: .6rem; }
 .sa-main { flex: 1; min-width: 0; }
-.sa-email { font-weight: 550; font-size: .9rem; }
 .sa-sub { font-size: .76rem; color: var(--text-muted); }
 .status-pill { font-size: .7rem; padding: .1rem .5rem; border-radius: 999px; background: var(--bg-elev);
   border: 1px solid var(--border); color: var(--text-muted); }
 .status-pill.ok { color: #1a7f37; border-color: #1a7f3766; }
-.link-btn { background: none; border: none; color: var(--danger); cursor: pointer; font: inherit; font-size: .82rem; }
+.status-pill.busy { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+.status-pill.warn { color: #9a6700; border-color: #9a670066; }
+.status-pill.error { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, transparent); }
+@media (prefers-color-scheme: dark) {
+  .status-pill.ok { color: #4ac26b; border-color: #4ac26b55; }
+  .status-pill.warn { color: #d4a72c; border-color: #d4a72c55; }
+  .status-pill.error { color: #ff6369; border-color: #ff636955; }
+}
 /* Per-account signature/disclaimer editor. */
 .sa-footer { margin: .55rem 0 0 1.4rem; }
 .sa-footer label { display: block; font-size: .74rem; color: var(--text-muted); margin-bottom: .3rem; }
@@ -288,9 +662,317 @@ svg { display: block; }
 .sa-footer-actions button:hover { background: var(--border); }
 .sa-footer-status { font-size: .76rem; color: var(--text-muted); }
 .sa-footer-status.error { color: var(--danger); }
-.add-account { display: flex; gap: .5rem; flex-wrap: wrap; }
-.add-account input { flex: 1 1 10rem; min-width: 0; font: inherit; padding: .5rem .65rem;
-  border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); }
-.add-account input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-.add-account button { font: inherit; font-weight: 600; border: none; border-radius: 8px;
-  padding: .5rem 1rem; background: var(--accent); color: #fff; cursor: pointer; }
+/* Section headings — the modal holds more than accounts now. */
+.settings-heading { margin: .2rem 0 .7rem; font-size: .78rem; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .04em; color: var(--text-muted); }
+.settings-section label { display: block; font-size: .74rem; color: var(--text-muted);
+  margin-bottom: .3rem; }
+.settings-section input[type="text"], .settings-section input[type="number"] {
+  width: 100%; box-sizing: border-box; font: inherit;
+  font-size: .84rem; padding: .5rem .65rem; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg); color: var(--text); }
+/* The horizon is a small number — a full-width box would look like a mistake. */
+.settings-section input[type="number"] { width: 7rem; }
+.settings-section input[type="text"]:focus,
+.settings-section input[type="number"]:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+/* --- Add-task dialog --- */
+.task-field { display: block; margin-bottom: .8rem; }
+.task-field > span { display: block; font-size: .74rem; color: var(--text-muted); margin-bottom: .3rem; }
+.task-field input, .task-field select { width: 100%; box-sizing: border-box; font: inherit;
+  font-size: .88rem; padding: .5rem .65rem; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg); color: var(--text); }
+.task-field input:focus, .task-field select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.task-loading { font-size: .8rem; color: var(--text-muted); padding: .4rem 0 .8rem; }
+.task-attachments { margin: 0 0 .8rem; }
+.task-att-head { font-size: .74rem; color: var(--text-muted); margin-bottom: .35rem; }
+.task-att { display: flex; align-items: center; gap: .45rem; padding: .25rem 0;
+  font-size: .82rem; cursor: pointer; }
+.task-att svg { flex: 0 0 auto; color: var(--text-muted); }
+.task-att-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-att-size { flex: 0 0 auto; font-size: .74rem; color: var(--text-muted); }
+.task-actions { display: flex; align-items: center; justify-content: flex-end; gap: .7rem;
+  margin-top: 1rem; }
+.task-status-line { font-size: .78rem; color: var(--text-muted); }
+.task-status-line.error { color: var(--danger); }
+/* Name + colour are the two account fields the UI owns; the address itself is
+   agent-provisioned and shown read-only underneath. */
+.sa-name { font: inherit; font-weight: 550; font-size: .9rem; width: 100%; box-sizing: border-box;
+  padding: .2rem .35rem; border: 1px solid transparent; border-radius: 6px;
+  background: none; color: var(--text); }
+.sa-name:hover { border-color: var(--border); }
+.sa-name:focus { outline: none; border-color: var(--accent); background: var(--bg); }
+.sa-color { flex: 0 0 auto; width: 22px; height: 22px; padding: 0; cursor: pointer;
+  border: 1px solid var(--border); border-radius: 50%; background: none;
+  -webkit-appearance: none; appearance: none; }
+.sa-color::-webkit-color-swatch-wrapper { padding: 0; }
+.sa-color::-webkit-color-swatch { border: none; border-radius: 50%; }
+.sa-color::-moz-color-swatch { border: none; border-radius: 50%; }
+
+/* --- Agent status --- */
+/* The toolbar indicator only takes on colour when something is wrong; a healthy
+   agent should be a quiet glyph, not another thing demanding attention. */
+.icon-btn.warn { color: var(--danger); }
+.icon-btn.warn:hover { color: var(--danger); }
+
+/* Warning strip under the sidebar toolbar. Full-width button so the whole bar
+   is the hit target for opening the status modal. */
+.agent-warning { display: flex; align-items: center; gap: .4rem; width: calc(100% - 1rem);
+  margin: 0 .5rem .3rem; padding: .38rem .5rem; border-radius: 6px; cursor: pointer;
+  font: inherit; font-size: .76rem; text-align: left;
+  color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent); }
+.agent-warning[hidden] { display: none; }
+.agent-warning:hover { background: color-mix(in srgb, var(--danger) 20%, transparent); }
+.agent-warning .aw-icon { flex: 0 0 auto; display: flex; }
+.agent-warning .aw-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (prefers-color-scheme: dark) { .agent-warning { color: #ff6369; } }
+
+/* Server unreachable — a bar across the bottom, above everything including the
+   minimized composer, since nothing else on screen can be trusted while it is up. */
+.conn-bar {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 500;
+  display: flex; align-items: center; justify-content: center; gap: .5rem;
+  padding: .5rem .8rem calc(.5rem + env(safe-area-inset-bottom));
+  font-size: .82rem; font-weight: 550; color: #fff; background: var(--danger);
+  box-shadow: 0 -2px 12px rgba(0, 0, 0, .18);
+  animation: conn-bar-in .18s ease-out;
+}
+.conn-bar[hidden] { display: none; }
+.cb-dot { flex: 0 0 auto; width: .5rem; height: .5rem; border-radius: 50%;
+  background: #fff; animation: conn-pulse 1.4s ease-in-out infinite; }
+@keyframes conn-bar-in { from { transform: translateY(100%); } to { transform: none; } }
+@keyframes conn-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) {
+  .conn-bar { animation: none; }
+  .cb-dot { animation: none; }
+}
+
+.ag-list { list-style: none; margin: 0 0 1rem; padding: 0; }
+.ag-account { padding: .3rem 0 .9rem; border-bottom: 1px solid var(--border); margin-bottom: .9rem; }
+.ag-account:last-child { border-bottom: none; margin-bottom: .4rem; }
+.ag-head { display: flex; align-items: center; gap: .6rem; }
+.ag-name { font-weight: 550; font-size: .92rem; flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ag-detail { font-size: .78rem; color: var(--text-muted); margin-top: .2rem; }
+/* Two columns of label/value; collapses to one when the modal is phone-width. */
+.ag-stats { display: grid; grid-template-columns: 1fr 1fr; gap: .3rem .9rem; margin: .7rem 0 0; }
+@media (max-width: 460px) { .ag-stats { grid-template-columns: 1fr; } }
+.ag-stats > div { display: flex; align-items: baseline; justify-content: space-between;
+  gap: .5rem; border-bottom: 1px dotted var(--border); padding-bottom: .15rem; }
+.ag-stats dt { font-size: .76rem; color: var(--text-muted); }
+.ag-stats dd { margin: 0; font-size: .8rem; font-variant-numeric: tabular-nums; }
+/* Sync progress: per-folder bar plus the pass tallies underneath. */
+.ag-progress { margin-top: .6rem; }
+.ag-progress-head { display: flex; align-items: baseline; justify-content: space-between;
+  gap: .5rem; font-size: .76rem; color: var(--text-muted); }
+.ag-progress-head b { font-weight: 600; color: var(--text); }
+.ag-progress-when { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ag-progress-sub { margin-top: .25rem; font-size: .74rem; color: var(--text-muted);
+  font-variant-numeric: tabular-nums; line-height: 1.4; }
+.ag-bar { margin-top: .3rem; height: 5px; border-radius: 3px; overflow: hidden;
+  background: color-mix(in srgb, var(--text-muted) 18%, transparent); }
+.ag-bar-fill { height: 100%; border-radius: 3px; background: var(--accent);
+  transition: width .4s ease; }
+/* No total yet (the folder's UID list is still coming back), so the bar sweeps
+   instead of sitting at a percentage it cannot know. */
+.ag-bar.indeterminate .ag-bar-fill { width: 35%; animation: ag-sweep 1.1s ease-in-out infinite; }
+@keyframes ag-sweep {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(285%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ag-bar-fill { transition: none; }
+  .ag-bar.indeterminate .ag-bar-fill { animation: none; opacity: .55; }
+}
+/* Between passes this is a footnote, not a status — step it back so the live
+   bar stays the thing the eye lands on. */
+.ag-progress.idle .ag-progress-head { font-size: .72rem; }
+
+/* The sidebar mount of the same progress markup, sitting at the foot of the
+   sidebar above the cheat sheet and sharing its collapsible chrome (.sc-toggle,
+   .sc-body). The type steps down a notch because the sidebar is narrower than
+   the modal and the folder name can be long. */
+.sync-strip { flex: 0 0 auto; border-top: 1px solid var(--border);
+  padding: .35rem .5rem .5rem; max-height: 40vh; display: flex; flex-direction: column; }
+.sync-strip .sc-body { padding: .15rem .25rem .1rem; }
+.sync-strip.collapsed .sc-body { display: none; }
+.sync-strip.collapsed .sc-glyph { transform: rotate(180deg); }
+.sync-strip .ag-progress { margin-top: .35rem; }
+.sync-strip .ag-progress-head,
+.sync-strip .ag-progress-sub { font-size: .71rem; }
+/* Folder names run long and the sidebar has no room to wrap them onto three
+   lines — clip rather than push the percentage out of view. */
+.sync-strip .ag-progress-head > span:first-child {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sync-strip-who { font-size: .7rem; font-weight: 600; color: var(--text-muted);
+  margin-top: .45rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.ag-error { margin-top: .7rem; border-radius: 8px; padding: .5rem .6rem;
+  background: color-mix(in srgb, var(--danger) 9%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent); }
+.ag-error-head { font-size: .72rem; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .03em; color: var(--danger); margin-bottom: .3rem; }
+.ag-error pre { margin: 0; font-size: .75rem; line-height: 1.4; white-space: pre-wrap;
+  word-break: break-word; color: var(--text); max-height: 9rem; overflow-y: auto; }
+.ag-recheck { margin-top: .7rem; display: flex; align-items: baseline; gap: .6rem; flex-wrap: wrap; }
+.ag-btn { flex: none; font: inherit; font-size: .78rem; padding: .3rem .7rem;
+  border-radius: 7px; border: 1px solid var(--border-strong); background: var(--bg-elev);
+  color: var(--text); cursor: pointer; }
+.ag-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.ag-btn:disabled { opacity: .6; cursor: default; }
+.ag-btn-hint { flex: 1 1 12rem; font-size: .74rem; line-height: 1.35; color: var(--text-muted); }
+/* Pending: a recheck can run for many minutes, so it stays visible until the
+   agent clears the flag rather than flashing a confirmation and vanishing. */
+.ag-recheck.pending { display: block; font-size: .76rem; line-height: 1.4;
+  border-radius: 8px; padding: .45rem .6rem; color: var(--text);
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); }
+
+/* --- Statistics modal --- */
+/* Wider than every other modal: these are side-by-side panels and a 24-column
+   heatmap, none of which survive being squeezed into the 480px default. */
+#stats-modal .modal { width: min(1000px, 96vw); max-height: 92vh; }
+#stats-modal .modal-body { padding-top: .8rem; }
+
+.an-controls { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap;
+  position: sticky; top: 0; z-index: 2; background: var(--bg);
+  padding: .2rem 0 .7rem; margin-bottom: .2rem; }
+.an-ranges { display: flex; gap: 2px; margin-left: auto; background: var(--bg-elev);
+  border: 1px solid var(--border); border-radius: 7px; padding: 2px; }
+.an-range { border: none; background: none; color: var(--text-muted); cursor: pointer;
+  font: inherit; font-size: .78rem; padding: .25rem .6rem; border-radius: 5px; }
+.an-range:hover { background: rgba(0,0,0,.05); color: var(--text); }
+.an-range.on { background: var(--bg); color: var(--text); font-weight: 550;
+  box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+@media (prefers-color-scheme: dark) {
+  .an-range:hover { background: rgba(255,255,255,.06); }
+  .an-range.on { box-shadow: 0 1px 2px rgba(0,0,0,.4); }
+}
+
+.an-reloading { font-size: .76rem; color: var(--text-muted); margin: 0 0 .5rem; }
+.an-error { font-size: .84rem; color: var(--danger); margin: .6rem 0; }
+.an-empty { font-size: .82rem; color: var(--text-muted); margin: .4rem 0 0; }
+.an-note { font-size: .74rem; color: var(--text-muted); margin: .5rem 0 0;
+  font-variant-numeric: tabular-nums; }
+
+/* KPI row. Plain figures rather than one-bar charts — there is no comparison
+   to draw, so a number is the honest form. */
+.an-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: .5rem; margin-bottom: 1rem; }
+.an-kpi { background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px;
+  padding: .55rem .7rem; }
+.an-kpi-label { font-size: .71rem; color: var(--text-muted); text-transform: uppercase;
+  letter-spacing: .04em; }
+/* Proportional figures: these are standalone numbers, not a column to align. */
+.an-kpi-value { font-size: 1.5rem; font-weight: 600; line-height: 1.25; margin-top: .1rem; }
+.an-kpi-sub { font-size: .71rem; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+
+.an-panel { margin-bottom: 1.2rem; min-width: 0; }
+.an-panel h3 { margin: 0 0 .5rem; font-size: .8rem; text-transform: uppercase;
+  letter-spacing: .04em; color: var(--text-muted); }
+/* Two panels abreast on a wide modal, stacked once there is no room. */
+.an-two { display: grid; grid-template-columns: 1fr 1fr; gap: 0 1.4rem; }
+@media (max-width: 720px) { .an-two { grid-template-columns: 1fr; } }
+
+.an-legend { display: flex; gap: .9rem; margin-bottom: .4rem; font-size: .74rem;
+  color: var(--text-muted); }
+.an-key { display: inline-flex; align-items: center; gap: .3rem; }
+.an-swatch { width: 9px; height: 9px; border-radius: 2px; display: inline-block; flex: 0 0 auto; }
+.an-swatch.recv { background: var(--an-recv); }
+.an-swatch.sent { background: var(--an-sent); }
+
+/* Volume chart */
+.an-chart { position: relative; }
+.an-chart svg { width: 100%; height: 200px; display: block; overflow: visible; }
+.an-line { fill: none; stroke-width: 2; vector-effect: non-scaling-stroke;
+  stroke-linejoin: round; stroke-linecap: round; }
+.an-line.recv { stroke: var(--an-recv); }
+.an-line.sent { stroke: var(--an-sent); }
+.an-dot.recv { fill: var(--an-recv); }
+.an-dot.sent { fill: var(--an-sent); }
+/* A 2px surface ring so a dot sitting on the other series stays readable. */
+.an-dot { stroke: var(--bg); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.an-grid { stroke: var(--border); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.an-cross { stroke: var(--border-strong); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.an-axis { fill: var(--text-faint); font-size: 10px; font-variant-numeric: tabular-nums; }
+.an-tip { position: absolute; top: 6px; pointer-events: none; background: var(--bg);
+  border: 1px solid var(--border-strong); border-radius: 6px; box-shadow: var(--shadow);
+  padding: .35rem .5rem; font-size: .74rem; white-space: nowrap; z-index: 3; }
+.an-tip[hidden] { display: none; }
+.an-tip-head { font-weight: 600; margin-bottom: .15rem; }
+.an-tip .an-swatch { margin-right: .3rem; }
+.an-tip b { font-variant-numeric: tabular-nums; }
+
+/* Arrival heatmap: 7 rows x 24 hours. */
+.an-hm { display: flex; flex-direction: column; gap: 2px; }
+.an-hm-row { display: flex; align-items: center; gap: .4rem; }
+.an-hm-day { flex: 0 0 2.1rem; font-size: .7rem; color: var(--text-muted); text-align: right; }
+.an-hm-cells { flex: 1; display: grid; grid-template-columns: repeat(24, 1fr); gap: 2px; }
+.an-cell { display: block; aspect-ratio: 1; border-radius: 2px; background: var(--an-seq-0); }
+.an-cell.s0 { background: var(--an-seq-0); }
+.an-cell.s1 { background: var(--an-seq-1); }
+.an-cell.s2 { background: var(--an-seq-2); }
+.an-cell.s3 { background: var(--an-seq-3); }
+.an-cell.s4 { background: var(--an-seq-4); }
+.an-cell.s5 { background: var(--an-seq-5); }
+.an-cell.s6 { background: var(--an-seq-6); }
+.an-hm-axis .an-hm-cells { font-size: .68rem; color: var(--text-faint); margin-top: .1rem; }
+.an-hm-legend { display: flex; align-items: center; gap: 3px; margin-top: .5rem;
+  font-size: .7rem; color: var(--text-muted); }
+.an-hm-legend .an-cell { width: 10px; height: 10px; aspect-ratio: auto; }
+.an-hm-legend .an-note { margin: 0 0 0 .6rem; }
+
+/* Shared bar primitive: track + proportional fill + its own number. */
+.an-track { flex: 1; height: 7px; border-radius: 4px; background: var(--bg-elev);
+  border: 1px solid var(--border); overflow: hidden; min-width: 0; }
+.an-fill { display: block; height: 100%; border-radius: 3px; min-width: 2px; }
+.an-fill.recv { background: var(--an-recv); }
+.an-fill.sent { background: var(--an-sent); }
+.an-fill.seq { background: var(--an-seq-4); }
+
+.an-bar-list { list-style: none; margin: 0; padding: 0; display: flex;
+  flex-direction: column; gap: .3rem; }
+.an-bar-row { display: flex; align-items: center; gap: .5rem; }
+.an-bar-label { flex: 0 0 6.5rem; font-size: .75rem; color: var(--text-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.an-bar-n { flex: 0 0 3rem; text-align: right; font-size: .75rem;
+  font-variant-numeric: tabular-nums; }
+
+/* Correspondents: one row per person, two bars on a shared scale. */
+.an-corr-list { list-style: none; margin: 0; padding: 0; display: flex;
+  flex-direction: column; gap: .45rem; }
+.an-corr { display: flex; align-items: center; gap: .7rem; }
+.an-corr-who { flex: 0 0 40%; min-width: 0; display: flex; flex-direction: column; }
+.an-corr-name { font-size: .8rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.an-corr-addr { font-size: .69rem; color: var(--text-faint);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.an-corr-bars { flex: 1; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.an-pair { display: flex; align-items: center; gap: .45rem; }
+.an-pair-n { flex: 0 0 2.6rem; text-align: right; font-size: .72rem;
+  font-variant-numeric: tabular-nums; color: var(--text-muted); }
+@media (max-width: 560px) {
+  .an-corr { flex-direction: column; align-items: stretch; gap: .2rem; }
+  .an-corr-who { flex: none; }
+}
+
+.an-threads { width: 100%; border-collapse: collapse; margin-top: .6rem; }
+.an-threads td { padding: .25rem 0; border-bottom: 1px dotted var(--border); font-size: .78rem; }
+.an-thread-subj { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 0; width: 100%; color: var(--text-muted); }
+.an-thread-n { text-align: right; font-variant-numeric: tabular-nums; padding-left: .6rem; }
+
+/* Methodology note. Collapsed by default, but present: several figures above
+   rest on inferences the schema does not record. */
+.an-about { margin-top: .4rem; border-top: 1px solid var(--border); padding-top: .6rem; }
+.an-about summary { cursor: pointer; font-size: .76rem; color: var(--text-muted); }
+.an-about ul { margin: .5rem 0 0; padding-left: 1.1rem; }
+.an-about li { font-size: .75rem; color: var(--text-muted); line-height: 1.5; margin-bottom: .3rem; }
+/* SVG ignores the HTML `hidden` attribute, so the hover crosshair and dots need
+   an explicit rule — without it they park at the chart origin and read as a
+   stray data point. */
+.an-cross[hidden], .an-dot[hidden] { display: none; }
+.an-threads th { text-align: left; padding: .25rem 0 .3rem; font-size: .71rem; font-weight: 500;
+  text-transform: uppercase; letter-spacing: .04em; color: var(--text-faint);
+  border-bottom: 1px solid var(--border); }
+.an-threads th.an-thread-n { text-align: right; }
