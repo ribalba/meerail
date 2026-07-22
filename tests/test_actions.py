@@ -124,6 +124,33 @@ def test_archive_thread_is_idempotent(account):
     assert code == 200 and again["moved"] == 0
 
 
+def test_archive_falls_back_to_all_mail(account):
+    """Gmail publishes no \\Archive — archiving there files into \\All ("All Mail").
+
+    Every Gmail account used to fail the action outright with "This account has
+    no Archive folder", because only the \\Archive role was ever looked up.
+    """
+    email, aid = account["email"], account["id"]
+    tok = "ALLTOK" + uuid.uuid4().hex[:6]
+    dbfixture.ingest_raw_message(email, make_message(
+        f"<g-{uuid.uuid4().hex}@t>", f"Subject {tok}", "x@y.com", email, f"{tok} body", T0),
+        uid=1)
+    # \\All in place of \\Archive, exactly as imap.gmail.com lists it.
+    dbfixture.ingest_raw_message(email, make_message(
+        f"<seed-{uuid.uuid4().hex}@t>", "Seed", "x@y.com", email, "seed", T0),
+        uid=1, folder="[Gmail]/All Mail", role_hint="\\All")
+
+    _, r = api("GET", f"/api/search?q={tok}&account_id={aid}")
+    thread_id = r["rows"][0]["thread_id"]
+
+    code, body = api("POST", f"/api/messages/threads/{thread_id}/archive?account_id={aid}")
+    assert code == 200, body
+    assert body["moved"] == 1
+
+    moves = [x for x in _actions(email) if x["type"] == "move"]
+    assert [m for m in moves if m["payload"]["to_folder"] == "[Gmail]/All Mail"]
+
+
 def test_bulk_trash_clears_every_selected_row(account):
     """Ctrl-A then Delete: the whole ticked set goes in one request.
 

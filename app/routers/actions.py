@@ -278,6 +278,18 @@ def _role_mailbox(db: DBSession, account_id: int, role: str) -> Mailbox | None:
     ).scalars().first()
 
 
+def _archive_mailbox(db: DBSession, account_id: int) -> Mailbox | None:
+    """Where "archive" files mail, which is not always an \\Archive folder.
+
+    Gmail-style servers publish no \\Archive at all: archiving there means
+    dropping the INBOX label while the message stays in \\All ("All Mail"),
+    which as an IMAP MOVE is exactly INBOX -> All Mail. Without this fallback
+    every Gmail account fails the archive action outright.
+    """
+    return (_role_mailbox(db, account_id, "archive")
+            or _role_mailbox(db, account_id, "all"))
+
+
 @router.post("/{message_id}/trash")
 def trash(message_id: int, source_mailbox_id: int, db: DBSession = Depends(get_db)):
     msg = _get_message(db, message_id)
@@ -292,7 +304,7 @@ def trash(message_id: int, source_mailbox_id: int, db: DBSession = Depends(get_d
 @router.post("/{message_id}/archive")
 def archive(message_id: int, source_mailbox_id: int, db: DBSession = Depends(get_db)):
     msg = _get_message(db, message_id)
-    target = _role_mailbox(db, msg.account_id, "archive")
+    target = _archive_mailbox(db, msg.account_id)
     if target is None:
         raise HTTPException(status_code=400, detail="This account has no Archive folder")
     _move_to(db, msg, source_mailbox_id, target)
@@ -345,7 +357,7 @@ def _move_messages(db: DBSession, msgs: list[Message], target: Mailbox | None,
 
 @router.post("/threads/{thread_id:path}/archive")
 def archive_thread(thread_id: str, account_id: int, db: DBSession = Depends(get_db)):
-    target = _role_mailbox(db, account_id, "archive")
+    target = _archive_mailbox(db, account_id)
     if target is None:
         raise HTTPException(status_code=400, detail="This account has no Archive folder")
     return {"ok": True, "moved": _thread_move(db, thread_id, account_id, target)}
