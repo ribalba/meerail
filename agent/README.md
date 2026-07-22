@@ -31,6 +31,10 @@ agent isn't running, nothing new arrives.
                                   # previews existed, then exit
    ```
 
+4. Once it syncs cleanly, stop babysitting it in a terminal — see [Running it
+   as a service](#running-it-as-a-service). On macOS that is
+   `./service.sh install`; on Linux, `make agent-docker` or a systemd user unit.
+
 Previews are precomputed at ingest, so new mail needs nothing extra. Attachments
 that were already in the database when you upgraded are left alone until you ask
 for them with `--backfill-previews` — on a large mailbox that pass renders every
@@ -144,44 +148,52 @@ one: Bridge runs in your session and so must the agent.
 **Docker host networking does not work here.** On Docker Desktop the container
 joins the Desktop VM's network namespace, not macOS's, so `127.0.0.1` reaches
 the VM and Bridge is not there. Run the agent natively and let launchd keep it
-alive.
+alive in the background.
 
-Create `~/Library/LaunchAgents/de.meerail.agent.plist` (adjust the path):
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>            <string>de.meerail.agent</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/Users/YOU/code/meerail/agent/run.sh</string>
-    </array>
-    <key>WorkingDirectory</key> <string>/Users/YOU/code/meerail/agent</string>
-    <key>RunAtLoad</key>        <true/>
-    <!-- Restart it if it exits for any reason; the agent is stateless, so a
-         restart just resumes from the cursors in the database. -->
-    <key>KeepAlive</key>        <true/>
-    <!-- Don't hammer Bridge if it's not up yet (e.g. right after login). -->
-    <key>ThrottleInterval</key> <integer>30</integer>
-    <key>StandardOutPath</key>  <string>/Users/YOU/Library/Logs/meerail-agent.log</string>
-    <key>StandardErrorPath</key><string>/Users/YOU/Library/Logs/meerail-agent.log</string>
-</dict>
-</plist>
-```
+`service.sh` does the whole thing — it generates a LaunchAgent plist with this
+checkout's paths baked in, loads it, and starts syncing:
 
 ```bash
-launchctl load  ~/Library/LaunchAgents/de.meerail.agent.plist   # start + enable
-launchctl list | grep meerail                                   # PID / last exit code
-tail -f ~/Library/Logs/meerail-agent.log
-launchctl unload ~/Library/LaunchAgents/de.meerail.agent.plist  # stop + disable
+cd agent
+./service.sh install     # or: make agent-service, from the repo root
 ```
+
+From then on the agent starts at login, is restarted if it dies, and needs no
+terminal left open. The rest of the commands:
+
+| | |
+| --- | --- |
+| `./service.sh status` | Running? With what PID? Plus the last few log lines. |
+| `./service.sh logs` | `tail -f` the log. |
+| `./service.sh restart` | Pick up an edited `config.toml`. |
+| `./service.sh stop` | Stop it, but keep it installed. `start` resumes. |
+| `./service.sh uninstall` | Stop it and delete the plist. |
+| `./service.sh install --config PATH` | Run against a config other than `agent/config.toml`. |
+
+It writes `~/Library/LaunchAgents/de.meerail.agent.plist` and logs to
+`~/Library/Logs/meerail-agent.log`. `install` is idempotent — re-run it after
+moving the checkout and it rewrites the plist with the new paths.
+
+Four things the generated plist gets right, if you would rather write your own:
+
+- **`KeepAlive`**, so any exit is restarted. The agent is stateless — cursors
+  live in Postgres — so a restart just resumes where it left off.
+- **`ThrottleInterval 30`**, because Bridge opens its IMAP port before it has
+  finished loading accounts. An agent that wins that race at login gets
+  `no such user`; 30s between respawns rides it out instead of hot-looping.
+- **An explicit `PATH`.** launchd hands jobs a minimal environment, and `run.sh`
+  needs `python3` to build the venv — often Homebrew's, not `/usr/bin`'s.
+- **No `ProcessType`.** The default is `Standard`; `Background` would let the
+  system throttle CPU and I/O, which is the opposite of what a multi-GB first
+  sync wants.
 
 It must be a **LaunchAgent** (`~/Library/LaunchAgents`), not a LaunchDaemon.
 Daemons run before login, in a different session, where the Bridge app isn't
-running — the agent would just fail its IMAP connect forever.
+running — the agent would just fail its IMAP connect forever. `service.sh`
+installs it as an agent for that reason and there is no daemon mode.
+
+The log is plain text and is not rotated — launchd appends to it forever. If it
+gets unwieldy, `./service.sh stop`, truncate it, `./service.sh start`.
 
 Docker is still how you run the *rest* of the stack on macOS: `docker compose up
 -d` for Postgres, Tika and the server, exactly as on Linux. Only the agent is
