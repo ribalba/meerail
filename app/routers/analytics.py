@@ -173,6 +173,9 @@ def overview(
     accounts = _accounts(db, account_id)
     if not accounts:
         return _empty(range)
+    # The picker is drawn from this list, so it always carries every account —
+    # narrowing it to the selection would leave nothing to switch back to.
+    all_accounts = _accounts(db, None) if account_id is not None else accounts
 
     own = _own_addresses(accounts)
     days = RANGES[range]
@@ -218,7 +221,7 @@ def overview(
     payload = {
         "range": range,
         "grain": GRAINS[range],
-        "accounts": [{"id": a.id, "email": a.email, "label": a.label} for a in accounts],
+        "accounts": [{"id": a.id, "email": a.email, "label": a.label} for a in all_accounts],
         "totals": {
             "messages": int(total),
             "received": n_recv,

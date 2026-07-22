@@ -111,7 +111,27 @@ App.list = (function () {
     activeId = r.id;
     document.querySelectorAll(".msg-row.active").forEach((n) => n.classList.remove("active"));
     el.classList.add("active");
-    if (r.thread_id) App.reader.openThread(r.thread_id, r.account_id, r.id);
+    if (!r.thread_id) return;
+    // Every caller of open() is someone asking to read this conversation —
+    // a tap, or Enter/j-k on the cursor — so the narrow layout turns the page
+    // here rather than at each call site.
+    App.mobile.show("reader");
+    App.reader.openThread(r.thread_id, r.account_id, r.id);
+    markSeen(r.id);
+  }
+
+  // The reader marks the conversation read as it opens it; this is the row
+  // saying so. In a folder the dot would clear on its own once the agent's
+  // write-back arrived and the list reloaded, but search results are not
+  // refreshed by those events (see app.shell.js), so without this the row a
+  // `:unread` search turned up stays bold after being read.
+  function markSeen(id) {
+    const r = rows.find((x) => x.id === id);
+    if (!r || r.data.seen) return;
+    r.data.seen = true;
+    r.el.classList.remove("unread");
+    const dot = r.el.querySelector(".unread-dot");
+    if (dot) dot.remove();
   }
 
   function row(r, showAccount) {
@@ -297,7 +317,7 @@ App.list = (function () {
   }
 
   return { render, append, setMore, reset, move, moveAndOpen, openFocused, setFocus, ageDays, setAgeDays,
-           selectAllLoaded, clearSelection, selection,
+           selectAllLoaded, clearSelection, selection, markSeen,
            count: () => rows.length, hasFocus: () => focusIndex() >= 0,
            selectedCount: () => selected.size };
 })();

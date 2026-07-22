@@ -49,10 +49,11 @@ services:
       start_period: 3s
 
   tika:
-    # Same tag as production, so this reuses the already-pulled image rather
-    # than downloading the (large) -full variant again. Only test_ingest.py's
+    # Same image as production, so this reuses the already-built one rather than
+    # rebuilding on the (large) -full variant again. Only test_ingest.py's
     # attachment-extraction cases need it.
-    image: apache/tika:latest-full
+    image: meerail-tika
+    build: ./tika
     ports:
       - "127.0.0.1:59998:9998"
     environment:

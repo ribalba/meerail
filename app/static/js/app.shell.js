@@ -87,7 +87,14 @@ App.shell = (function () {
     }
     tree.innerHTML = html;
     tree.querySelectorAll(".mailbox-row").forEach((el) => {
-      el.addEventListener("click", () => select(selections[el.dataset.key]));
+      el.addEventListener("click", () => {
+        select(selections[el.dataset.key]);
+        // Only on the click, not inside select(): the narrow layout must follow
+        // a tap on a folder, but not selectDefault() at boot (which would open
+        // onto the list rather than the folders page) nor a re-select after
+        // unpinning, which is bookkeeping and not a navigation.
+        App.mobile.show("list");
+      });
     });
     tree.querySelectorAll(".mb-star").forEach((el) => {
       el.addEventListener("click", (e) => {
@@ -247,7 +254,12 @@ App.shell = (function () {
 
   function currentTitle() { return selection ? selection.title : ""; }
 
+  // Called after an action changed what the list should show. loadList() bails
+  // while a search is up (it would replace the results with the folder), so the
+  // search has to refresh itself — otherwise a deleted conversation sits on
+  // screen until the query is retyped, which reads as the delete not working.
   async function reloadList() {
+    if (App.search && App.search.isActive()) return App.search.rerun();
     if (!selection) return;
     $("#list-title").textContent = selection.title;
     await loadList(true);   // an archive from row 200 shouldn't snap back to page one
@@ -506,6 +518,7 @@ App.shell = (function () {
     try {
       await App.api.ensureSession();
       wire();
+      App.mobile.init();
       App.search.init();
       App.compose.init();
       App.keys.init();

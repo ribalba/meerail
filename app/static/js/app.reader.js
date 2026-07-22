@@ -55,8 +55,38 @@ App.reader = (function () {
     const el = (marks.length && host.querySelector(".thread-msg.has-hit")) || host.lastElementChild;
     if (!el) return;
     const bar = document.getElementById("reader-bar");
+    const nav = document.getElementById("mobile-nav");
+    // Both bars stick to the top of this pane on a narrow layout, so what the
+    // landing spot has to clear is however much of them is actually up —
+    // offsetHeight is 0 for the nav at desktop widths, where it is display:none.
+    const stuck = (bar ? bar.offsetHeight : 0) + (nav ? nav.offsetHeight : 0);
     const top = el.getBoundingClientRect().top - pane.getBoundingClientRect().top;
-    pane.scrollTop = Math.max(0, pane.scrollTop + top - (bar ? bar.offsetHeight : 0) - 10);
+    pane.scrollTop = Math.max(0, pane.scrollTop + top - stuck - 10);
+  }
+
+  // Sizes a loaded body frame to its document.
+  //
+  // Mail laid out for a desktop window does not reflow: a 600px table is still
+  // 600px in a 360px-wide frame, and `scrolling="no"` clips that overflow
+  // rather than offering a scrollbar — the right-hand third of the message
+  // simply is not there. So give the frame the width its document actually
+  // wants and scale the whole thing down to fit, which is the one option that
+  // loses nothing off the edge. On a wide enough pane the scale is 1 and this
+  // is just the height measurement it always was.
+  function fitFrame(frame, doc) {
+    const avail = frame.clientWidth;                    // read before we resize it
+    const want = doc.documentElement.scrollWidth;
+    const scale = avail > 0 && want > avail ? avail / want : 1;
+
+    frame.style.width = scale < 1 ? want + "px" : "";
+    frame.style.transform = scale < 1 ? `scale(${scale})` : "";
+    // Height comes after the width, so it is measured against the reflowed
+    // document rather than the squeezed one.
+    const h = doc.documentElement.scrollHeight + 4;
+    frame.style.height = h + "px";
+    // A transform is drawn small but laid out full size, so without this the
+    // message trails a gap the height of everything the scale took off.
+    frame.style.marginBottom = scale < 1 ? -h * (1 - scale) + "px" : "";
   }
 
   function mountFrame(container, html, onHit) {
@@ -72,7 +102,7 @@ App.reader = (function () {
         // Marked before the height is measured, so a term that wraps a line
         // does not leave the frame short by one.
         if (App.highlight.mark(doc.body, marks) && onHit) onHit();
-        frame.style.height = (doc.documentElement.scrollHeight + 4) + "px";
+        fitFrame(frame, doc);
         // Once you click inside a message body the iframe owns the keyboard and
         // shortcuts would silently stop working. Forward them back out — this
         // reaches across only because the sandbox allows same-origin.

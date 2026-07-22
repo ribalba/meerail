@@ -110,9 +110,13 @@ class RecheckIngest:
         self.cleared = []         # timestamps handed back to clear_recheck
         self.progress = []        # every progress snapshot written
         self.pruned = []          # authoritative folder-name sets
+        self.errors_cleared = 0   # calls to clear_agent_error
 
     def get_or_create_account(self, _db, email):
         return type("Acc", (), {"email": email, "id": 1})()
+
+    def clear_agent_error(self, _db, _account):
+        self.errors_cleared += 1
 
     def take_recheck(self, _db, _account):
         return self.pending
@@ -182,6 +186,19 @@ def test_normal_pass_leaves_cursors_alone(monkeypatch):
     assert spy.reset == []
     assert spy.cleared == []
     assert spy.pruned == [{"INBOX", "Archive"}]
+
+
+def test_pass_clears_a_recorded_error_up_front(monkeypatch):
+    """Not at the end, where a completed pass would be the only proof.
+
+    The initial backfill of a large mailbox runs for many minutes, so an error
+    cleared only on completion leaves the panel reading "failing" long after the
+    agent has reconnected and started working again. Connect and login having
+    succeeded is the earliest point the previous failure is known to be over.
+    """
+    spy = _run_pass(monkeypatch, None)
+
+    assert spy.errors_cleared == 1
 
 
 # --- Progress reporting ------------------------------------------------------

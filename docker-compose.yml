@@ -74,7 +74,10 @@ services:
     # Tesseract, which is what OCRs scanned PDFs and image attachments; it is a
     # much larger image than plain `apache/tika`. Drop back to `:latest` to skip
     # OCR — extraction still works, images just come back empty.
-    image: apache/tika:latest-full
+    # apache/tika:latest-full plus the JPEG2000 ImageIO jars — see tika/Dockerfile
+    # for why the stock image cannot ship them.
+    image: meerail-tika
+    build: ./tika
     ports:
       # The agent extracts attachment text itself; loopback only, as above.
       - "127.0.0.1:9998:9998"

@@ -54,7 +54,12 @@ App.search = (function () {
     if (!scope.value) scope.value = "all";
   }
 
-  async function run(request) {
+  // refresh: re-fetch the rows for the query already in the box, rather than
+  // starting a search someone just typed. The difference is the reader and the
+  // cursor — a refresh leaves both alone, because the thread on screen is not
+  // necessarily the thread that changed, and closing it would be a second,
+  // unasked-for effect of pressing Delete.
+  async function run(request, refresh = false) {
     clearTimeout(timer);
     timer = null;
     if (typeof request !== "number") request = ++requestSeq;
@@ -75,8 +80,12 @@ App.search = (function () {
     try {
       const data = await App.api.search(params);
       if (request !== requestSeq) return false;
-      App.list.reset();
-      App.reader.clear();
+      if (!refresh) {
+        App.list.reset();
+        App.reader.clear();
+      }
+      // render() prunes ticks whose rows are gone and keeps the keyboard cursor
+      // on the slot a deleted row vacated, so a refresh needs nothing further.
       App.list.render(data.rows, true);
       e.status.textContent = data.total === 0 ? "No results"
         : `${data.total} result${data.total === 1 ? "" : "s"}`;
@@ -88,6 +97,15 @@ App.search = (function () {
       e.status.textContent = ex.message || "Search failed";
       return false;
     }
+  }
+
+  // What App.shell.reloadList() means while a search is showing. The results
+  // came from /api/search, so the rows that an action just changed are only
+  // dropped by asking that query again — reloading the folder underneath would
+  // replace the search with mail nobody asked to see.
+  async function rerun() {
+    if (!active) return;
+    await run(undefined, true);
   }
 
   function debouncedRun() {
@@ -170,6 +188,6 @@ App.search = (function () {
   function helpOpen() { return !els().helpModal.hidden; }
   function closeHelp() { els().helpModal.hidden = true; }
 
-  return { init, clear, focusInput, query, syncScope, isActive: () => active,
+  return { init, clear, focusInput, query, syncScope, rerun, isActive: () => active,
            helpOpen, closeHelp };
 })();

@@ -323,6 +323,23 @@ def clear_recheck(db, account: Account, requested_at) -> None:
     events.publish({"type": "agent", "account": account.email, "recheck": "done"})
 
 
+def clear_agent_error(db, account: Account) -> None:
+    """Drop a recorded failure once the agent demonstrably works again.
+
+    Called from two places, and deliberately so. record_sync calls it when a
+    pass completes, but a completed pass is a slow proof: the initial backfill
+    of a large mailbox runs for many minutes, so an error cleared only there
+    stays on screen long after the fault is gone. The agent therefore also calls
+    it the moment a pass has connected and logged in, which is the earliest
+    point the previous failure is known to be over.
+    """
+    if account.last_error is None:
+        return
+    account.last_error = None
+    account.last_error_at = None
+    events.publish({"type": "agent", "account": account.email, "ok": True})
+
+
 def record_sync(db, account: Account, backfill_complete: bool | None = None,
                 addresses: list[str] | None = None) -> None:
     """Update per-account sync status and the agent-declared sender addresses."""
@@ -341,11 +358,10 @@ def record_sync(db, account: Account, backfill_complete: bool | None = None,
             account.send_addresses = extras
             events.publish({"type": "accounts", "account": account.email})
     account.last_sync_at = utcnow()
-    # A pass got all the way here, so whatever failed last time is over.
-    if account.last_error is not None:
-        account.last_error = None
-        account.last_error_at = None
-        events.publish({"type": "agent", "account": account.email, "ok": True})
+    # A pass got all the way here, so whatever failed last time is over. Usually
+    # already cleared at connect time; this is the backstop for a pass that
+    # started before that call existed, or an error recorded mid-pass.
+    clear_agent_error(db, account)
 
 
 def record_agent_error(db, email: str, error: str) -> None:

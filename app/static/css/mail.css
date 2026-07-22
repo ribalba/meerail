@@ -98,10 +98,8 @@ svg { display: block; }
 /* --- Layout --- */
 /* --list-w is the user's dragged width, persisted by app.split.js. */
 .app { display: grid; grid-template-columns: 232px var(--list-w, 340px) 0 1fr; height: 100vh; }
-@media (max-width: 900px) {
-  .app { grid-template-columns: 200px 1fr; }
-  .reading-pane, .pane-divider { display: none; }
-}
+/* Below 900px the panes become pages instead — see "Narrow layout" at the foot
+   of this file. */
 
 /* Zero-width grid track: the handle straddles the list pane's own border so the
    divider costs no layout space, but has a comfortable grab area either side. */
@@ -389,7 +387,10 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
   margin: .6rem 1.1rem 0; padding: .45rem .7rem; font-size: .82rem; color: var(--text-muted); }
 .remote-banner button { font: inherit; font-weight: 600; font-size: .8rem; border: none;
   background: var(--accent); color: #fff; border-radius: 6px; padding: .3rem .7rem; cursor: pointer; }
-.msg-body-frame { width: 100%; border: none; display: block; }
+/* Width and height are both set inline once the document has loaded and been
+   measured — see fitFrame() in app.reader.js. transform-origin has to be the
+   top-left or a scaled-down body drifts away from the header above it. */
+.msg-body-frame { width: 100%; border: none; display: block; transform-origin: top left; }
 .msg-body-text { padding: .9rem 1.1rem 1.1rem; white-space: pre-wrap; word-wrap: break-word;
   font-size: .9rem; line-height: 1.5; }
 
@@ -456,6 +457,10 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
 .tb-btn:hover:not(:disabled) { background: var(--bg-elev); color: var(--text); }
 .tb-btn.on { color: var(--flag); }
 .tb-btn:disabled { opacity: .35; cursor: default; }
+/* The two Back buttons and the bar holding the second one. Off at desktop
+   widths, where all three panes are on screen at once and there is nowhere to
+   go back to; the narrow block at the foot of this file turns them on. */
+.mobile-back, .mobile-nav { display: none; }
 .tb-spacer { flex: 1; }
 /* Groups the bar the way Apple Mail does: compose | reply verbs | filing verbs. */
 .tb-sep { width: 1px; align-self: stretch; margin: .2rem .4rem; background: var(--border); }
@@ -976,3 +981,112 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
   text-transform: uppercase; letter-spacing: .04em; color: var(--text-faint);
   border-bottom: 1px solid var(--border); }
 .an-threads th.an-thread-n { text-align: right; }
+
+/* --- Narrow layout: three pages ---------------------------------------- */
+/* There is no room for two panes side by side down here, let alone three, so
+   the sidebar, the list and the reader stop being columns and become pages you
+   walk between: folders → list → reader. Nothing about the panes themselves
+   changes — they stack in the same grid cell and `data-mview` on .app says
+   which one is showing. app.mobile.js owns that attribute and wires the
+   browser's Back button to walk the same path in reverse.
+
+   The breakpoint is duplicated in app.mobile.js; that copy only decides
+   whether a page turn is worth a history entry, this one does the layout. */
+@media (max-width: 900px) {
+  .app {
+    grid-template-columns: 100%; grid-template-rows: 100%;
+    /* dvh rather than vh: a URL bar that slides away on scroll must not leave
+       the bottom of the list stranded underneath it. */
+    height: 100dvh;
+    /* Landscape on a notched phone — the page is edge-to-edge because of
+       viewport-fit=cover in the <head>. */
+    padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right);
+  }
+  .sidebar, .list-pane, .reading-pane { grid-area: 1 / 1; min-width: 0; border-right: none; }
+  .app:not([data-mview="folders"]) .sidebar,
+  .app:not([data-mview="list"]) .list-pane,
+  .app:not([data-mview="reader"]) .reading-pane { display: none; }
+  /* Nothing to drag when only one pane is on screen. */
+  .pane-divider { display: none; }
+  /* Touch has no keyboard to learn shortcuts for, and the sheet costs 45vh of
+     the folder page to say so. */
+  .shortcut-box { display: none; }
+
+  /* Back buttons. The chevron is drawn pointing down, so it turns a quarter
+     turn anticlockwise to point the way it goes. */
+  .mobile-back { display: flex; align-items: center; gap: .1rem; flex: 0 0 auto;
+    background: none; border: none; font: inherit; font-size: .9rem; font-weight: 550;
+    color: var(--accent); cursor: pointer; padding: .5rem .3rem .5rem 0; }
+  .mobile-back svg { transform: rotate(90deg); }
+  .mobile-back span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pane-header { gap: .2rem; }
+  .pane-header .pane-title { flex: 1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* .reading-pane is the scroller, so both bars stick to its top. The nav's
+     height is fixed here precisely so the action bar has a number to sit at —
+     keep the two in step. */
+  .mobile-nav { display: flex; align-items: center; flex: 0 0 auto; height: 44px;
+    padding: 0 .9rem; background: var(--bg); border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 6; }
+  .reading-pane .reader-bar { top: 44px; }
+  /* Ten actions do not fit across a phone; let the bar scroll rather than
+     wrap, which would change its height and break the offset above. */
+  .reader-bar { overflow-x: auto; scrollbar-width: none; }
+  .reader-bar::-webkit-scrollbar { display: none; }
+  /* The per-message row carries labels as well as icons — nine buttons wide,
+     which at this width squeezes "Reply All" onto two lines and pushes the
+     filing verbs off the edge. Drop to icons only, like the bar above it.
+     The labels are bare text nodes with no element to hide, so the size they
+     are set in is the only thing there is to take away from them. */
+  .msg-toolbar .tb-btn { font-size: 0; padding: .5rem; }
+  /* Which leaves the row short enough to spread out rather than crowd left. */
+  .msg-toolbar { justify-content: space-between; }
+  .msg-toolbar .tb-spacer { display: none; }
+
+  /* A long sender wrapped to a second line and ran under the timestamp. The
+     detail line beneath it already truncates to one line; at this width the
+     name has to do the same, and the date has to stop being shrinkable. */
+  .from-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .msg-date-full { flex: 0 0 auto; font-size: .74rem; }
+
+  /* Sync progress is a footnote, but it renders a block per account and can
+     take half the folder page during a backfill. */
+  .sync-strip .sc-body { max-height: 26vh; overflow-y: auto; }
+
+  /* Touch targets. Rows and buttons drawn for a mouse are all a little under
+     the ~44px a fingertip wants. */
+  .mailbox-row { padding: .55rem; font-size: .95rem; }
+  .account-head { padding-top: 1rem; }
+  .msg-row { padding: .7rem .8rem .75rem; }
+  .icon-btn { padding: .5rem; }
+  .tb-btn { padding: .5rem .55rem; }
+  /* Reveal-on-hover hides these permanently on a device with no hover. */
+  .mb-star, .acc-add { opacity: 1; }
+  /* Same problem for the tick box, but it cannot simply be shown where it is:
+     it is stacked on top of the unread dot, which is only sound while the two
+     take turns. With both permanently on, the gutter widens and they sit one
+     above the other — and the box goes up to a size a fingertip can hit. */
+  .msg-row { grid-template-columns: 26px 1fr; }
+  .msg-check { position: static; transform: none; opacity: 1; width: 18px; height: 18px; }
+  .msg-row .msg-gutter .unread-dot { visibility: visible; }
+
+  /* iOS zooms the page in on any input it considers small, and never zooms
+     back out. 16px is the threshold. */
+  .search-bar input, .compose-row input, #compose-from, .compose-textarea,
+  .modal-body input, .modal-body textarea { font-size: 16px; }
+
+  /* Content the panes scroll needs to clear the home indicator. */
+  .mailbox-tree, .message-list, .reader-content {
+    padding-bottom: calc(1.4rem + env(safe-area-inset-bottom)); }
+  .conn-bar { padding-bottom: calc(.5rem + env(safe-area-inset-bottom)); }
+
+  /* Writing mail takes the whole screen — a draggable, resizable window is a
+     desktop affordance, and there is nothing behind it worth seeing anyway. */
+  .modal.compose { width: 100vw; max-width: none; height: 100dvh; border-radius: 0;
+    resize: none; }
+  /* Neutralises a drag that landed before the window was narrowed. */
+  .modal.compose.dragging-placed { position: relative; margin: revert; inset: auto; }
+  .modal.compose .modal-head { cursor: default; }
+  .compose-row label { width: 44px; }
+  .modal { width: min(480px, 94vw); max-height: 88vh; }
+}

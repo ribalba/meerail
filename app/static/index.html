@@ -10,7 +10,10 @@
   <link rel="stylesheet" href="/static/css/mail.css" />
 </head>
 <body>
-  <div class="app" id="app">
+  <!-- data-mview drives the narrow layout only: below the breakpoint the three
+       panes stop being columns and become pages, and this says which one is up.
+       Inert at desktop widths. Owned by app.mobile.js. -->
+  <div class="app" id="app" data-mview="folders">
     <!-- Sidebar: accounts + mailboxes -->
     <aside class="sidebar" id="sidebar">
       <div class="sidebar-toolbar">
@@ -34,6 +37,9 @@
     <!-- Message list -->
     <section class="list-pane" id="list-pane">
       <header class="pane-header">
+        <!-- Narrow layouts only; the sidebar is a page of its own down there. -->
+        <button class="icon-btn mobile-back" id="btn-back-folders"
+                title="Folders" aria-label="Back to folders"></button>
         <div class="pane-title" id="list-title">Inbox</div>
       </header>
       <div class="search-region">
@@ -72,6 +78,14 @@
 
     <!-- Reading pane -->
     <section class="reading-pane" id="reading-pane">
+      <!-- Narrow layouts only. Sits above the action bar rather than inside it:
+           renderBar() owns that element's contents and redraws it freely. Both
+           stick, at heights the mobile block in mail.css pins down. -->
+      <div class="mobile-nav" id="mobile-nav">
+        <button class="mobile-back" id="btn-back-list" aria-label="Back to the message list">
+          <span id="mobile-back-label">Inbox</span>
+        </button>
+      </div>
       <!-- Thread action bar — always present, acts on the newest message -->
       <div class="reader-bar" id="reader-bar"></div>
       <div class="reader-empty" id="reader-empty">
@@ -360,6 +374,7 @@
   <script src="/static/js/app.stats.js"></script>
   <script src="/static/js/app.keys.js"></script>
   <script src="/static/js/app.split.js"></script>
+  <script src="/static/js/app.mobile.js"></script>
   <script src="/static/js/app.shell.js"></script>
 </body>
 </html>

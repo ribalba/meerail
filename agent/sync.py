@@ -275,6 +275,12 @@ def sync_once(account: AccountConfig, cfg: AgentConfig, reconcile: bool = True) 
     progress = None
     try:
         account_row = ingest.get_or_create_account(db, account.email)
+        # Connect and login are behind us, so a failure recorded by an earlier
+        # pass is over — say so now rather than at the end of the pass. The
+        # initial backfill of a large mailbox runs for many minutes, and an
+        # error left standing for that whole window reads as "still broken"
+        # while the progress bar beside it visibly advances.
+        ingest.clear_agent_error(db, account_row)
         # Read once, up front: a request arriving mid-pass must not be cleared
         # by this pass, which has already walked part of the mailbox without it.
         recheck_at = ingest.take_recheck(db, account_row)
