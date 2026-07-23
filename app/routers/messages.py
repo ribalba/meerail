@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session as DBSession
 
 from core import ingest
 from core.database import get_db
+from core.mail.parse import html_to_text
 from .. import searchquery
 from ..deps import require_ui_auth
 from ..mail.render import sanitize_html
@@ -211,6 +212,12 @@ def _message_detail(db: DBSession, msg: Message, load_remote: bool,
         "date": msg.date_sent.isoformat() if msg.date_sent else None,
         "recipients": _recipients(db, msg.id),
         "body_html": safe_html, "body_text": msg.body_text,
+        # What the reader's "show plain text" switch displays. Most HTML mail
+        # here carries no text/plain part at all, and that mail is exactly the
+        # mail whose layout misbehaves — so fall back to flattening the HTML
+        # rather than withholding the escape hatch. Flattened from the sanitized
+        # copy, so nothing nh3 stripped can come back as text.
+        "body_plain": msg.body_text or html_to_text(safe_html),
         "remote_blocked": blocked, "images_loaded": load_remote,
         "has_attachments": msg.has_attachments,
         # full | skipped | pruned, plus the window that explains the last two.

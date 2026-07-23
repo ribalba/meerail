@@ -115,7 +115,8 @@ services:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-meerail}:${POSTGRES_PASSWORD:-meerail}@db:5432/${POSTGRES_DB:-meerail}
       SECRET_KEY: ${SECRET_KEY:-dev-insecure-secret-change-me}
       DATA_DIR: /data
-      SERVER_AUTH_TOKEN: ${SERVER_AUTH_TOKEN:-}
+      SERVER_PASSWORD: ${SERVER_PASSWORD:-}
+      SESSION_MAX_AGE_DAYS: ${SESSION_MAX_AGE_DAYS:-30}
       DEFAULT_SEARCH_YEARS: ${DEFAULT_SEARCH_YEARS:-0}
       CONTACTS_SCAN_YEARS: ${CONTACTS_SCAN_YEARS:-1}
     volumes:

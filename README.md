@@ -253,7 +253,8 @@ untouched copy runs.
 | `DATABASE_URL` | local Postgres | Only used for a *native* server run; compose builds its own from the `POSTGRES_*` keys below. |
 | `POSTGRES_USER` / `_PASSWORD` / `_DB` | `meerail` | Credentials for the bundled Postgres container. |
 | `SECRET_KEY` | `dev-insecure-…` | Signs tokens and encrypts any server-side stored credentials. **Change it** before exposing the app: `python -c "import secrets;print(secrets.token_urlsafe(48))"`. |
-| `SERVER_AUTH_TOKEN` | *(empty)* | Empty means no auth — correct for a localhost app. Set it (**with TLS**) if the server is reachable from anywhere else. |
+| `SERVER_PASSWORD` | *(empty)* | Empty means no auth — correct for a localhost app. Set it (**with TLS**) if the server is reachable from anywhere else: the UI then shows a password screen, and a successful login holds a signed session cookie for `SESSION_MAX_AGE_DAYS`. Scripted clients send it as `Authorization: Bearer <password>`. Failed logins are rate-limited per address (5 per 15 minutes). |
+| `SESSION_MAX_AGE_DAYS` | `30` | How long a browser login lasts before the password is asked again. Changing `SERVER_PASSWORD` or `SECRET_KEY` logs every browser out immediately. |
 | `DATA_DIR` | `./data` | Scratch space for staging outgoing attachments. Mail bytes live in Postgres. |
 | `TIKA_URL` | `http://127.0.0.1:9998` | Attachment text extraction endpoint, called by the agent. |
 | `DEFAULT_SEARCH_YEARS` | `0` | Default search window; `0` searches everything. The UI can override per query. |
@@ -272,8 +273,11 @@ effect for mail synced from then on, and existing rows keep their copy) and
 `content_window_months` (below).
 
 Then one `[[account]]` block per address — IMAP and SMTP host/port/security, username,
-password, `verify_cert` (`false` for Bridge's self-signed cert, `true` for a real one), and
-an optional `addresses = [...]` list of aliases to offer in the composer's *From*. Accounts
+password, `verify_cert` (`false` for Bridge's self-signed cert, `true` for a real one), an
+optional `batch_size` that overrides the global one for that account (Gmail answers a
+200-message fetch with UIDs missing or by dropping the connection — `25` is a good starting
+point there), and an optional `addresses = [...]` list of aliases to offer in the composer's
+*From*. Accounts
 register themselves in the app on first sync; there is nothing to add in the UI. The example
 file carries a commented-out Gmail block alongside the Proton one.
 

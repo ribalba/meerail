@@ -353,6 +353,21 @@
     </div>
   </div>
 
+  <!-- Password gate — raised by App.api.promptLogin() when the server requires
+       a login. Covers everything: the app shell is public code, the mail behind
+       it is not, and no API call succeeds until this form has. -->
+  <div class="login-overlay" id="login-overlay" hidden>
+    <form class="login-card" id="login-form">
+      <img class="login-logo" src="/static/img/logo.png" alt="" />
+      <h1>meerail</h1>
+      <p class="muted small">This server is password protected.</p>
+      <input type="password" id="login-password" placeholder="Password"
+             autocomplete="current-password" autocapitalize="off" />
+      <button type="submit" class="btn-primary" id="login-submit">Unlock</button>
+      <p class="login-error" id="login-error" role="alert" hidden></p>
+    </form>
+  </div>
+
   <!-- Server unreachable — raised by app.conn.js, spans the bottom of the page -->
   <div class="conn-bar" id="conn-bar" role="alert" hidden>
     <span class="cb-dot"></span>

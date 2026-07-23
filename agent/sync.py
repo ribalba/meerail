@@ -71,6 +71,64 @@ def _missing(uids: list[int], got: dict[int, dict], needs_body: bool) -> list[in
                   if u not in got or (needs_body and not got[u].get("raw")))
 
 
+# How long a loop inside a pass may go without telling the database it is still
+# working. The status panel calls an account offline after 180s of silence
+# (app/syncstate.STALE_AFTER_HEALTHY), so this leaves room for several beats to
+# be missed — to a slow write, or to a single IMAP round trip that outruns the
+# interval — before a live agent is mistaken for a dead one.
+_HEARTBEAT_INTERVAL = 30
+
+
+class Heartbeat:
+    """Proof, written as the pass runs, that a long loop is still working.
+
+    A pass stamps ``last_agent_seen`` once when it opens and once when it
+    closes. That was enough while every pass was seconds long, and it stops
+    being enough the moment one is not: reconciling a folder is a single loop of
+    IMAP round trips with one commit at the end, and against a server that
+    answers slowly — Gmail charges some accounts about ten seconds per command,
+    whatever it was asked for — a large folder holds that loop open for hours.
+    For all of that time the panel has nothing newer than the stamp from when
+    the pass opened, so it reports an agent that is visibly working as offline.
+
+    ``mark`` rides a commit the caller was making anyway; ``beat`` is for a loop
+    that has none of its own and is rate-limited, because against a fast server
+    the same loop runs a chunk in milliseconds and a commit apiece would be pure
+    write amplification.
+    """
+
+    def __init__(self, db, account, progress: "PassProgress | None" = None):
+        self.db = db
+        self.account = account
+        self.progress = progress
+        self._last = time.monotonic()
+
+    def mark(self) -> None:
+        """Stamp onto the open transaction. The caller commits."""
+        self._last = time.monotonic()
+        ingest.touch_agent(self.db, self.account)
+
+    def beat(self) -> None:
+        """Stamp, refresh the progress blob and commit — at most every interval.
+
+        The blob is rewritten unchanged rather than left alone: ``pass_advancing``
+        reads its ``updated_at`` and documents the assumption that a pass rewrites
+        it as it goes, and a loop that quietly broke that assumption is what let a
+        working pass be classified from a stale error instead.
+
+        Committing takes whatever the loop has done so far with it. For the flag
+        sweep that calls this, that is safe by construction: the next reconcile
+        re-reads every flag from the server regardless, so a partially applied
+        sweep costs nothing and a wholly invisible one costs a heartbeat.
+        """
+        if time.monotonic() - self._last < _HEARTBEAT_INTERVAL:
+            return
+        self.mark()
+        if self.progress is not None:
+            ingest.set_progress(self.db, self.account, self.progress.snapshot())
+        self.db.commit()
+
+
 class PassProgress:
     """Where this pass has got to, as a JSON blob for the status panel.
 
@@ -134,7 +192,8 @@ class PassProgress:
 
 
 def _sync_new(db, bridge: Bridge, account, mailbox, batch: int,
-              progress: PassProgress | None = None, cutoff=None) -> int:
+              progress: PassProgress | None = None, cutoff=None,
+              beat: "Heartbeat | None" = None) -> int:
     """Ingest UIDs above the folder's cursor. Returns how many were stored.
 
     The cursor only advances once a chunk is fully ingested, so an interrupted or
@@ -193,6 +252,12 @@ def _sync_new(db, bridge: Bridge, account, mailbox, batch: int,
         if progress is not None:
             progress.advance(len(chunk), chunk_stored)
             ingest.set_progress(db, account, progress.snapshot())
+        # Rides the commit below rather than making one of its own: this loop
+        # already writes once per chunk, and the stamp is a column on a row it
+        # is writing anyway. Unlike the flag sweep, the reason a chunk here can
+        # take minutes is that it is fetching whole message bodies.
+        if beat is not None:
+            beat.mark()
         db.commit()
         # Notify only after the batch is durable, so the UI never refreshes onto
         # rows that a later failure would roll back.
@@ -201,12 +266,22 @@ def _sync_new(db, bridge: Bridge, account, mailbox, batch: int,
     return stored
 
 
-def _reconcile(db, bridge: Bridge, mailbox, batch: int) -> None:
-    """Push flag changes for known UIDs and prune the ones that vanished."""
+def _reconcile(db, bridge: Bridge, mailbox, batch: int,
+               beat: "Heartbeat | None" = None) -> None:
+    """Push flag changes for known UIDs and prune the ones that vanished.
+
+    The one loop in a pass that reports nothing on its own: it walks every UID
+    in the folder in fixed chunks and commits once, at the end. On a mailbox of
+    tens of thousands against a server that answers a command a second, that is
+    hours of silence from a thread that is working the whole time — hence the
+    heartbeat, which is the only thing here the UI can see until the sweep ends.
+    """
     uids = bridge.all_uids()
     for chunk in _chunks(uids, batch):
         flags = bridge.fetch_flags(chunk)
         ingest.update_flags(db, mailbox, [{"uid": u, "flags": f} for u, f in flags.items()])
+        if beat is not None:
+            beat.beat()
     ingest.prune_vanished(db, mailbox, uids)
     db.commit()
 
@@ -388,6 +463,7 @@ def sync_once(account: AccountConfig, cfg: AgentConfig, reconcile: bool = True) 
 
         folders = bridge.list_folders()
         progress = PassProgress(len(folders))
+        beat = Heartbeat(db, account_row, progress)
         for i, f in enumerate(folders):
             uidvalidity, uidnext = bridge.select(f["name"])
             mailbox = ingest.register_folder(
@@ -397,12 +473,13 @@ def sync_once(account: AccountConfig, cfg: AgentConfig, reconcile: bool = True) 
                 ingest.reset_cursor(db, mailbox)
             progress.enter_folder(f["name"], i)
             ingest.set_progress(db, account_row, progress.snapshot())
+            beat.mark()
             db.commit()
-            _sync_new(db, bridge, account_row, mailbox, batch, progress, cutoff)
+            _sync_new(db, bridge, account_row, mailbox, batch, progress, cutoff, beat)
             # A recheck reconciles unconditionally: flags and vanished messages
             # are as much a part of "is everything still right" as the bodies.
             if reconcile or recheck_at:
-                _reconcile(db, bridge, mailbox, batch)
+                _reconcile(db, bridge, mailbox, batch, beat)
 
         # LIST completed and every returned folder synced successfully, so it
         # is now safe to treat absent rows as folders removed/renamed upstream.

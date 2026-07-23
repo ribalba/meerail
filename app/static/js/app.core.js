@@ -16,9 +16,45 @@ App.api = {
     if (!status.required) return;
     const probe = await fetch("/api/mailboxes");
     if (probe.ok) return;
-    const token = window.prompt("Enter the meerail server token:");
-    if (!token) throw new Error("Authentication is required");
-    await this.post("/api/auth/login", { token });
+    await this.promptLogin();
+  },
+  // Full-screen password gate. Returns a promise that resolves once a login
+  // succeeds; concurrent callers (several requests hitting 401 at once, as
+  // happens when the 30-day session expires mid-use) share one overlay and one
+  // promise instead of stacking prompts.
+  promptLogin() {
+    if (this._loginPromise) return this._loginPromise;
+    const overlay = document.getElementById("login-overlay");
+    const form = document.getElementById("login-form");
+    const input = document.getElementById("login-password");
+    const error = document.getElementById("login-error");
+    const submit = document.getElementById("login-submit");
+    this._loginPromise = new Promise((resolve) => {
+      overlay.hidden = false;
+      input.value = "";
+      error.hidden = true;
+      setTimeout(() => input.focus(), 0);
+      form.onsubmit = async (e) => {
+        e.preventDefault();
+        if (!input.value) return;
+        submit.disabled = true;
+        try {
+          await this.post("/api/auth/login", { password: input.value });
+        } catch (err) {
+          error.textContent = err.message || "Login failed";
+          error.hidden = false;
+          input.select();
+          return;
+        } finally {
+          submit.disabled = false;
+        }
+        overlay.hidden = true;
+        form.onsubmit = null;
+        this._loginPromise = null;
+        resolve();
+      };
+    });
+    return this._loginPromise;
   },
   async request(method, path, body) {
     const opts = { method, headers: {} };
@@ -38,6 +74,14 @@ App.api = {
       throw err;
     }
     App.conn.ok();
+    // A 401 outside the auth endpoints means the session cookie expired (or
+    // never existed): raise the password gate, then replay the request. The
+    // auth endpoints are excluded so a wrong password surfaces as an error in
+    // the login form rather than re-opening it forever.
+    if (res.status === 401 && !path.startsWith("/api/auth/")) {
+      await this.promptLogin();
+      return this.request(method, path, body);
+    }
     if (!res.ok) {
       let detail = res.statusText;
       try { detail = (await res.json()).detail || detail; } catch (_) {}

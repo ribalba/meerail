@@ -774,6 +774,29 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
   .cb-dot { animation: none; }
 }
 
+/* Password gate — above even the connection bar: nothing behind it is usable
+   until the login succeeds, and the app must not look usable either. */
+.login-overlay {
+  position: fixed; inset: 0; z-index: 600; background: var(--bg-elev);
+  display: flex; align-items: center; justify-content: center;
+}
+.login-overlay[hidden] { display: none; }
+.login-card {
+  display: flex; flex-direction: column; align-items: stretch; gap: .7rem;
+  width: min(320px, 88vw); padding: 2rem 1.8rem; background: var(--bg);
+  border-radius: 12px; box-shadow: var(--shadow); text-align: center;
+}
+.login-card h1 { margin: 0; font-size: 1.3rem; }
+.login-card .muted { margin: 0 0 .4rem; }
+.login-logo { width: 56px; height: 56px; margin: 0 auto .2rem; }
+.login-card input {
+  font: inherit; padding: .5rem .7rem; border: 1px solid var(--border-strong);
+  border-radius: 8px; background: var(--bg); color: var(--text);
+}
+.login-card input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.login-error { margin: 0; font-size: .82rem; color: var(--danger); }
+.login-error[hidden] { display: none; }
+
 .ag-list { list-style: none; margin: 0 0 1rem; padding: 0; }
 .ag-account { padding: .3rem 0 .9rem; border-bottom: 1px solid var(--border); margin-bottom: .9rem; }
 .ag-account:last-child { border-bottom: none; margin-bottom: .4rem; }

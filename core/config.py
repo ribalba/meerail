@@ -37,8 +37,14 @@ class Settings(BaseSettings):
     # their bytes, and turning it back on does not backfill the gap.
     store_raw_mime: bool = True
 
-    # Optional shared secret to gate the web UI / REST API. Empty = open (localhost).
-    server_auth_token: str = ""
+    # Password gating the web UI / REST API. Empty = open — correct for a
+    # localhost install; set it (with TLS in front) before exposing the server
+    # to the internet. The browser asks once, then holds a signed session
+    # cookie for session_max_age_days.
+    server_password: str = ""
+
+    # How long a browser login lasts before the password is asked again.
+    session_max_age_days: int = 30
 
     # Default search window in years (0 = everything). The UI can override per query.
     default_search_years: int = 0

@@ -139,11 +139,16 @@ App.reader = (function () {
   // one" — it is how you reply to something halfway up a long thread without
   // the reply silently going to the last mail instead.
   function msgToolbar(m) {
-    // Only worth offering when the mail carries both parts: HTML that renders
-    // badly is the reason to reach for it, and a text-only mail is already
-    // showing the very thing the button would switch to.
-    const plain = !!(m.body_html && m.body_text);
+    // The switch is always drawn, so the toolbar keeps one shape as you move
+    // down a thread and the escape hatch is never somewhere you have to look
+    // for it. It only has work to do on HTML mail, though — text mail is
+    // already showing the very thing it would switch to — so there it goes
+    // disabled rather than missing, the same way the top bar handles a verb
+    // that does not apply.
     const on = plainFor.has(m.id);
+    const off = !m.body_html;
+    const hint = off ? "This message is already plain text"
+      : on ? "Show the formatted message" : "Show the plain text version";
     return `<div class="msg-toolbar" data-msg="${m.id}">
       <button class="tb-btn" data-act="reply" title="Reply">${App.icon("reply", 16)} Reply</button>
       <button class="tb-btn" data-act="replyall" title="Reply All">${App.icon("replyAll", 16)} Reply All</button>
@@ -151,9 +156,9 @@ App.reader = (function () {
       ${tasksOn() ? `<button class="tb-btn" data-act="task" title="Add Task"
         >${App.icon("task", 16)} Add Task</button>` : ""}
       <span class="tb-spacer"></span>
-      ${plain ? `<button class="tb-btn${on ? " on" : ""}" data-act="plain"
-        aria-pressed="${on}" title="${on ? "Show the formatted message" : "Show the plain text version"}"
-        >${App.icon("plaintext", 16)}</button>` : ""}
+      <button class="tb-btn${on ? " on" : ""}" data-act="plain" aria-pressed="${on}"
+        title="${hint}" aria-label="${hint}"${off ? " disabled" : ""}
+        >${App.icon("plaintext", 16)}</button>
       <button class="tb-btn ${m.flagged ? "on" : ""}" data-act="flag" title="Flag">${App.icon("flag", 16, m.flagged)}</button>
       <button class="tb-btn" data-act="move" title="Move to folder">${App.icon("move", 16)}</button>
       <button class="tb-btn" data-act="archive" title="Archive">${App.icon("archive", 16)}</button>
@@ -326,6 +331,7 @@ App.reader = (function () {
       if (act === "replyall") return App.compose.openReply(m.id, "replyall");
       if (act === "forward") return App.compose.openReply(m.id, "forward");
       if (act === "plain") {
+        if (!m.body_html) return;   // nothing to switch away from
         if (plainFor.has(m.id)) plainFor.delete(m.id); else plainFor.add(m.id);
         return rerender();
       }
@@ -470,19 +476,23 @@ App.reader = (function () {
       body.innerHTML = contentNotice(m);
     } else if (m.body_html && !plainFor.has(m.id)) {
       mountFrame(body, m.body_html, () => wrap.classList.add("has-hit"));
-    } else if (m.body_text) {
-      // Both text-only mail and the plain-text toggle land here.
+    } else if (m.body_plain) {
+      // Text-only mail and the plain-text toggle both land here — for text mail
+      // body_plain *is* the text part, so this is the path it always took.
       // Plain-text mail is rendered as markdown: headings, lists, emphasis and
       // `>` quote levels all read better, and text that uses none of it comes
       // out looking exactly as it did before. No iframe needed — the parser
       // escapes everything and builds the HTML itself, so there is nothing of
       // the sender's to sanitize.
       body.className = "msg-body-md";
-      body.innerHTML = App.markdown.toHtml(m.body_text);
+      body.innerHTML = App.markdown.toHtml(m.body_plain);
       if (App.highlight.mark(body, marks)) wrap.classList.add("has-hit");
     } else {
       body.className = "msg-body-text";
-      body.textContent = "(no content)";
+      // Switched to plain on a message that is all pictures and layout: there
+      // is HTML, it just has no words in it. Say which of the two it is, so the
+      // empty pane does not read as the switch having broken.
+      body.textContent = m.body_html ? "(no text content in this message)" : "(no content)";
     }
     wrap.appendChild(body);
 

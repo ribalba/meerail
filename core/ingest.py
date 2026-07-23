@@ -251,6 +251,19 @@ def note_ingested(account: Account, mailbox: Mailbox, stored: int) -> None:
                         "folder": mailbox.imap_name, "stored": stored})
 
 
+def touch_agent(db, account: Account) -> None:
+    """Mark the agent as alive, without claiming a pass got anywhere.
+
+    ``get_or_create_account`` stamps this when a pass opens and ``record_sync``
+    again when it closes, which is all a pass measured in seconds ever needed.
+    A pass that runs for hours has to say so in between: the status panel
+    (app/syncstate.py) judges liveness by this column alone, and calls an
+    account offline after three minutes of silence — so without a stamp from
+    inside the long loops, the agent working hardest is the one reported dead.
+    """
+    account.last_agent_seen = utcnow()
+
+
 def set_progress(db, account: Account, progress: dict | None) -> None:
     """Record how far the agent has got in this pass.
 
