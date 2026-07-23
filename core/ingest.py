@@ -18,6 +18,7 @@ import calendar
 from datetime import datetime
 
 from sqlalchemy import func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from . import events
 from .mail import thumbs, tika
@@ -236,11 +237,16 @@ def record_content_window(db, months: int) -> None:
     the database by the process that actually applies it.
     """
     value = str(max(0, int(months)))
-    row = db.get(Setting, CONTENT_WINDOW_KEY)
-    if row is None:
-        db.add(Setting(key=CONTENT_WINDOW_KEY, value=value))
-    elif row.value != value:
-        row.value = value
+    # Upsert rather than get-then-add: every account thread calls this once per
+    # pass with its own session, and on a fresh database they all read "no row"
+    # and all insert. One wins, the rest die on settings_pkey and get retried as
+    # a sync failure. The WHERE keeps updated_at still when nothing changed.
+    stmt = pg_insert(Setting).values(key=CONTENT_WINDOW_KEY, value=value, updated_at=utcnow())
+    db.execute(stmt.on_conflict_do_update(
+        index_elements=[Setting.key],
+        set_={"value": value, "updated_at": utcnow()},
+        where=Setting.value != value,
+    ))
 
 
 def note_ingested(account: Account, mailbox: Mailbox, stored: int) -> None:
