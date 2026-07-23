@@ -85,12 +85,14 @@ below has the per-OS detail, including PowerShell commands for Windows and how t
 agent running at boot.
 
 ```bash
-# 1. Start the backing services + web app (Postgres, Tika, server)
+# 1. Start the backing services + web app (Postgres, Tika, server). The
+#    hostports overlay also publishes Postgres and Tika on 127.0.0.1, which a
+#    natively-run agent needs; drop it if you run the agent in Docker (Linux).
 cp .env.example .env
-docker compose up -d
+docker compose -f docker-compose.yml -f docker-compose.hostports.yml up -d
 
 # 2. Run the agent next to Proton Bridge — it does the syncing and the parsing,
-#    writing straight into Postgres (published on 127.0.0.1 by compose).
+#    writing straight into Postgres.
 cd agent
 cp config.example.toml config.toml   # fill in your Bridge host/ports + credentials
 ./run.sh --once                       # first full sync; then run ./run.sh to stay live
@@ -128,17 +130,20 @@ Everything can be containerised, including the agent.
 
 ```bash
 cp .env.example .env
-docker compose up -d                               # Postgres, Tika, server
 
 cp agent/config.example.toml agent/config.toml      # Bridge host/ports + credentials
 chmod 600 agent/config.toml                         # it holds your password in plaintext
-make agent-docker                                   # agent in Docker, host network
+make agent-docker                                   # whole stack + agent, host network
 make agent-test                                     # verify every connection
 ```
 
-`make agent-docker` is the [`docker-compose.agent.yml`](docker-compose.agent.yml) overlay:
-host networking, so `127.0.0.1` inside the container is your machine, and
-`restart: unless-stopped` so the agent comes back after a reboot.
+`make agent-docker` brings up Postgres, Tika, the server *and* the agent with the
+[`docker-compose.agent.yml`](docker-compose.agent.yml) overlay: host networking, so
+`127.0.0.1` inside the container is your machine, and `restart: unless-stopped` so the
+agent comes back after a reboot. It pulls in
+[`docker-compose.hostports.yml`](docker-compose.hostports.yml) too — sharing the host's
+network means the agent is *not* on the compose network, so it needs Postgres and Tika on
+loopback rather than at `db:5432` / `tika:9998`.
 
 Prefer it native? `cd agent && ./run.sh` — and see [`agent/README.md`](agent/README.md)
 for the systemd user unit that keeps it alive.
@@ -150,8 +155,8 @@ Stack in Docker Desktop, agent on your host Python.
 ```bash
 brew install --cask docker                # if you don't have Docker Desktop
 cp .env.example .env
-docker compose up -d                      # Postgres, Tika, server
-
+make up-hostports                         # Postgres, Tika, server — the first two
+                                          # published on 127.0.0.1 for the agent
 cd agent
 cp config.example.toml config.toml        # Bridge host/ports + credentials
 chmod 600 config.toml
@@ -185,7 +190,7 @@ Stack in Docker Desktop (WSL2 backend), agent natively in PowerShell. There is n
 
 ```powershell
 copy .env.example .env
-docker compose up -d                      # Postgres, Tika, server
+docker compose -f docker-compose.yml -f docker-compose.hostports.yml up -d
 
 cd agent
 copy config.example.toml config.toml      # then edit: Bridge host/ports + credentials
@@ -198,9 +203,10 @@ $env:PYTHONPATH = (Resolve-Path ..).Path  # the agent imports the shared `core` 
 start http://localhost:8000
 ```
 
-Everything lives on Windows' own loopback — Bridge, and the Postgres/Tika ports Docker
-Desktop publishes there — so the default `127.0.0.1` addresses in `config.toml` work as
-written.
+Everything lives on Windows' own loopback — Bridge, and the Postgres/Tika ports the
+`hostports` overlay tells Docker Desktop to publish there — so the default `127.0.0.1`
+addresses in `config.toml` work as written. Without that second `-f`, only the server is
+published and the agent has nothing to connect to.
 
 Two Windows-specific notes: `PYTHONPATH` must be set for whatever launches the agent
 (a new shell won't have it — make it a persistent user variable), and `chmod 600` has no
@@ -237,6 +243,32 @@ Content is stored once per Message-ID with per-folder placement tracked separate
 Proton exposing labels as folders). Raw MIME and attachment bytes live in the database, so
 there is no shared filesystem between the agent and the app. Sync cursors live in the database
 too, so the agent stays stateless — stop and restart it anytime.
+
+### What is exposed
+
+Every container sits on one Docker network, `meerail`, and addresses the others by service
+name. **Port 8000 is the only thing published** — Postgres and Tika have no host binding at
+all, so the database is reachable as `db:5432` and Tika as `tika:9998` from inside that
+network and from nowhere else. Neither authenticates a caller worth the name (the shipped
+Postgres password is `meerail`; Tika will extract whatever anyone POSTs it), so the smaller
+that surface the better.
+
+| Service | Address on the `meerail` network | Published on the host |
+| --- | --- | --- |
+| `server` | `server:8000` | **`8000`** — browser / Electron |
+| `db` | `db:5432` | — |
+| `tika` | `tika:9998` | — |
+
+The one thing that needs more is a **natively-run agent**, which is not in that network and
+reaches both over loopback. [`docker-compose.hostports.yml`](docker-compose.hostports.yml)
+is the opt-in for that: add it as a second `-f` (or use `make up-hostports`) and Postgres
+and Tika appear on `127.0.0.1:5432` and `127.0.0.1:9998` — loopback explicitly, not
+`0.0.0.0`, so they stay off the LAN. `make agent-docker` and `make infra` include it
+already; `make dev` needs it, since a server running on your host has the same problem.
+
+Nothing here puts the server behind TLS or asks for a password by default, which is right
+for a localhost app and wrong the moment 8000 is reachable from elsewhere — set
+`SERVER_PASSWORD` and put a TLS terminator in front if you expose it.
 
 ## Configuration
 

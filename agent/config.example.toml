@@ -6,7 +6,14 @@
 # web app reads.
 
 # The agent owns the mail pipeline, so it writes to Postgres directly and calls
-# Tika itself. Both are published on loopback by docker-compose.
+# Tika itself. The base docker-compose keeps both on Docker's internal network
+# with no host port; the addresses below are the ones the hostports overlay
+# publishes, so bring the stack up with it:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.hostports.yml up -d
+#
+# (If you instead put the agent on the compose network, use db:5432 and
+# tika:9998 here and skip that overlay.)
 database_url  = "postgresql+psycopg://meerail:meerail@127.0.0.1:5432/meerail"
 tika_url      = "http://127.0.0.1:9998"
 poll_interval = 30                         # seconds between IDLE cycles

@@ -1,11 +1,26 @@
-# meerail-agent in Docker — LINUX ONLY. Use alongside the base file:
+# meerail-agent in Docker — LINUX ONLY. Use alongside the base file *and* the
+# host-ports overlay:
 #
-#   docker compose -f docker-compose.yml -f docker-compose.agent.yml up -d
+#   docker compose -f docker-compose.yml -f docker-compose.hostports.yml \
+#                  -f docker-compose.agent.yml up -d
 #
 # `network_mode: host` hands the container the host's network namespace, which
 # is the entire point: the agent speaks to Proton Bridge, Postgres and Tika over
 # 127.0.0.1, so every address in agent/config.toml keeps working unchanged — no
 # host.docker.internal, no rewriting hosts to compose service names.
+#
+# That namespace is also why docker-compose.hostports.yml is not optional here.
+# A host-network container is not on the `meerail` network, so `db` and `tika`
+# do not resolve for it and their container ports are not reachable; the overlay
+# republishes both on 127.0.0.1, where this container is looking for them.
+#
+# Bridge is what forces this shape. It listens on 127.0.0.1 only, so an agent on
+# the compose network could not reach it at any address — not even
+# host.docker.internal, which resolves to the docker0 gateway rather than the
+# host's loopback. If you sync a *remote* mailbox instead (Gmail, Fastmail, any
+# ordinary IMAP host) none of that applies: drop `network_mode: host`, add
+# `networks: [meerail]`, point database_url/tika_url at `db`/`tika` and skip the
+# hostports overlay entirely.
 #
 # It does NOT work on Docker Desktop (macOS/Windows): host mode there joins the
 # Desktop VM's namespace, not your machine's, so Bridge is not on that loopback.

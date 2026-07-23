@@ -35,8 +35,9 @@ Default credentials, from `.env.example`:
 These are overridden by `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB`
 in the user's `.env` — read that file first if the defaults are rejected.
 
-**If the port is published** (the user added `ports: ["5432:5432"]` to the `db`
-service), you can connect directly instead:
+**If the port is published** (the stack was brought up with the
+`docker-compose.hostports.yml` overlay, which a natively-run agent needs), you
+can connect directly instead:
 
 ```bash
 PGPASSWORD=meerail psql -h localhost -p 5432 -U meerail -d meerail -c "..."

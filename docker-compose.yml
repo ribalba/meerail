@@ -55,10 +55,12 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-meerail}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-meerail}
       POSTGRES_DB: ${POSTGRES_DB:-meerail}
-    ports:
-      # The agent writes mail straight into the database, so it needs a port.
-      # Bound to loopback: reachable from the Bridge host, not from the network.
-      - "127.0.0.1:5432:5432"
+    # No published port: the database is reachable as `db:5432` from anything on
+    # the `meerail` network and from nowhere else — not from the host, not from
+    # the LAN. An agent running *outside* that network (natively, or in the
+    # host-network container) still needs a loopback port; that is what the
+    # docker-compose.hostports.yml overlay adds back.
+    networks: [meerail]
     volumes:
       # Postgres 18+ expects a single mount at /var/lib/postgresql (not .../data);
       # this layout enables in-place pg_upgrade --link on future upgrades.
@@ -80,9 +82,11 @@ services:
     # for why the stock image cannot ship them.
     image: meerail-tika
     build: ./tika
-    ports:
-      # The agent extracts attachment text itself; loopback only, as above.
-      - "127.0.0.1:9998:9998"
+    # Same as db: reachable as `tika:9998` on the `meerail` network only. Tika
+    # will happily extract whatever is POSTed to it by anyone who can reach it,
+    # so there is no reason to put it on the host's loopback either — see
+    # docker-compose.hostports.yml if a native agent needs it there.
+    networks: [meerail]
     environment:
       # This image's entrypoint is `exec java -cp ... ` with no $JAVA_OPTS, so
       # that variable is silently ignored here. JAVA_TOOL_OPTIONS is read by the
@@ -109,8 +113,10 @@ services:
       db:
         condition: service_healthy
     ports:
-      # Your browser / Electron. The agent no longer talks to the server at all.
+      # The only published port in the stack. Your browser / Electron talk to
+      # this; the agent no longer talks to the server at all.
       - "8000:8000"
+    networks: [meerail]
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-meerail}:${POSTGRES_PASSWORD:-meerail}@db:5432/${POSTGRES_DB:-meerail}
       SECRET_KEY: ${SECRET_KEY:-dev-insecure-secret-change-me}
@@ -135,6 +141,13 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+
+# One network for the whole stack. Compose would create a default one anyway;
+# naming it makes the boundary explicit — services address each other by service
+# name (`db`, `tika`, `server`) over it, and only `server` crosses it outwards.
+networks:
+  meerail:
+    driver: bridge
 
 volumes:
   pg-data:
