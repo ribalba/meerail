@@ -5,6 +5,7 @@ App.reader = (function () {
   let openRequest = 0;
   let collapsed = new Set();    // message ids folded shut; everything else is open
   let imagesFor = new Set();    // message ids with remote images loaded
+  let plainFor = new Set();     // message ids switched to their plain-text part
   let keyFocus = false;         // are the arrow keys scrolling this pane?
   // The search that led here, captured when the thread opened. Held rather than
   // read live off the search box so a rerender mid-typing keeps marking the
@@ -138,6 +139,11 @@ App.reader = (function () {
   // one" — it is how you reply to something halfway up a long thread without
   // the reply silently going to the last mail instead.
   function msgToolbar(m) {
+    // Only worth offering when the mail carries both parts: HTML that renders
+    // badly is the reason to reach for it, and a text-only mail is already
+    // showing the very thing the button would switch to.
+    const plain = !!(m.body_html && m.body_text);
+    const on = plainFor.has(m.id);
     return `<div class="msg-toolbar" data-msg="${m.id}">
       <button class="tb-btn" data-act="reply" title="Reply">${App.icon("reply", 16)} Reply</button>
       <button class="tb-btn" data-act="replyall" title="Reply All">${App.icon("replyAll", 16)} Reply All</button>
@@ -145,6 +151,9 @@ App.reader = (function () {
       ${tasksOn() ? `<button class="tb-btn" data-act="task" title="Add Task"
         >${App.icon("task", 16)} Add Task</button>` : ""}
       <span class="tb-spacer"></span>
+      ${plain ? `<button class="tb-btn${on ? " on" : ""}" data-act="plain"
+        aria-pressed="${on}" title="${on ? "Show the formatted message" : "Show the plain text version"}"
+        >${App.icon("plaintext", 16)}</button>` : ""}
       <button class="tb-btn ${m.flagged ? "on" : ""}" data-act="flag" title="Flag">${App.icon("flag", 16, m.flagged)}</button>
       <button class="tb-btn" data-act="move" title="Move to folder">${App.icon("move", 16)}</button>
       <button class="tb-btn" data-act="archive" title="Archive">${App.icon("archive", 16)}</button>
@@ -316,6 +325,10 @@ App.reader = (function () {
       if (act === "reply") return App.compose.openReply(m.id, "reply");
       if (act === "replyall") return App.compose.openReply(m.id, "replyall");
       if (act === "forward") return App.compose.openReply(m.id, "forward");
+      if (act === "plain") {
+        if (plainFor.has(m.id)) plainFor.delete(m.id); else plainFor.add(m.id);
+        return rerender();
+      }
       if (act === "flag") { m.flagged = !m.flagged; await App.api.flagMsg(m.id, m.flagged); return rerender(); }
       if (act === "unread") { m.seen = false; await App.api.markSeen(m.id, false); return; }
       if (act === "archive" || act === "trash") return removeThread(act);
@@ -403,7 +416,8 @@ App.reader = (function () {
       if (btn) handleAction(btn.dataset.act, m, btn);
     });
 
-    if (m.remote_blocked && !showImages) {
+    // Remote images only exist in the HTML part, so the banner goes with it.
+    if (m.remote_blocked && !showImages && !plainFor.has(m.id)) {
       const banner = document.createElement("div");
       banner.className = "remote-banner";
       banner.innerHTML = `<span>${m.remote_blocked} remote image(s) blocked to protect your privacy.</span>
@@ -418,9 +432,10 @@ App.reader = (function () {
     }
 
     const body = document.createElement("div");
-    if (m.body_html) {
+    if (m.body_html && !plainFor.has(m.id)) {
       mountFrame(body, m.body_html, () => wrap.classList.add("has-hit"));
     } else if (m.body_text) {
+      // Both text-only mail and the plain-text toggle land here.
       // Plain-text mail is rendered as markdown: headings, lists, emphasis and
       // `>` quote levels all read better, and text that uses none of it comes
       // out looking exactly as it did before. No iframe needed — the parser
@@ -528,6 +543,7 @@ App.reader = (function () {
     marks = search ? App.highlight.patterns(search.q, search.mode) : [];
     currentThread = data;
     imagesFor = new Set();
+    plainFor = new Set();
     // Whole conversation open, oldest to newest — folding is something you ask
     // for per message, not a state a thread arrives in.
     collapsed = new Set();

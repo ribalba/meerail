@@ -6,12 +6,20 @@
  *
  * Point it at a non-default server with MEERAIL_URL:
  *   MEERAIL_URL=http://localhost:8000 npm start
+ *
+ * Override the spellchecker languages with MEERAIL_SPELLCHECK_LANGS:
+ *   MEERAIL_SPELLCHECK_LANGS=en-GB,fr npm start
  */
-const { app, BrowserWindow, shell, Menu } = require("electron");
+const { app, BrowserWindow, shell, Menu, MenuItem } = require("electron");
 const path = require("path");
 
 const APP_URL = (process.env.MEERAIL_URL || "http://localhost:8000").replace(/\/+$/, "");
 const APP_ORIGIN = new URL(APP_URL).origin;
+
+// Chromium checks every language in this list at once, so a mail written in
+// German and one written in English are both checked without a manual switch.
+const SPELLCHECK_LANGS = (process.env.MEERAIL_SPELLCHECK_LANGS || "en-US,de-DE")
+  .split(",").map((l) => l.trim()).filter(Boolean);
 
 let mainWindow = null;
 
@@ -36,8 +44,11 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       partition: "persist:meerail",
+      spellcheck: true,
     },
   });
+
+  setUpSpellCheck(mainWindow);
 
   // The window's session is persistent, so its HTTP cache outlives a restart:
   // an asset cached before the server started sending Cache-Control stays put
@@ -67,6 +78,59 @@ function createWindow() {
   });
 
   mainWindow.on("closed", () => { mainWindow = null; });
+}
+
+/* Spell checking for the compose fields.
+ *
+ * Chromium fetches the Hunspell dictionary for each language on first use and
+ * caches it under the user data dir, so the first run needs network access; a
+ * language whose dictionary hasn't arrived yet simply isn't checked. macOS uses
+ * the OS spellchecker instead, which manages its own languages -- setting the
+ * list there is a no-op, so we skip it.
+ *
+ * Chromium marks misspellings but leaves the correction UI to the app, hence
+ * the context menu below.
+ */
+function setUpSpellCheck(win) {
+  const session = win.webContents.session;
+
+  if (process.platform !== "darwin") {
+    const available = session.availableSpellCheckerLanguages;
+    const langs = SPELLCHECK_LANGS.filter((l) => available.includes(l));
+    const unknown = SPELLCHECK_LANGS.filter((l) => !available.includes(l));
+    if (unknown.length) {
+      console.warn(`spellcheck: ignoring unsupported language(s) ${unknown.join(", ")}`);
+    }
+    if (langs.length) session.setSpellCheckerLanguages(langs);
+  }
+
+  win.webContents.on("context-menu", (_e, params) => {
+    const menu = new Menu();
+
+    for (const suggestion of params.dictionarySuggestions) {
+      menu.append(new MenuItem({
+        label: suggestion,
+        click: () => win.webContents.replaceMisspelling(suggestion),
+      }));
+    }
+    if (params.misspelledWord) {
+      if (params.dictionarySuggestions.length) menu.append(new MenuItem({ type: "separator" }));
+      menu.append(new MenuItem({
+        label: "Add to Dictionary",
+        click: () => session.addWordToSpellCheckerDictionary(params.misspelledWord),
+      }));
+      menu.append(new MenuItem({ type: "separator" }));
+    }
+
+    // Without a menu of our own the default one is gone, so keep the basics.
+    menu.append(new MenuItem({ role: "cut", enabled: params.editFlags.canCut }));
+    menu.append(new MenuItem({ role: "copy", enabled: params.editFlags.canCopy }));
+    menu.append(new MenuItem({ role: "paste", enabled: params.editFlags.canPaste }));
+    menu.append(new MenuItem({ type: "separator" }));
+    menu.append(new MenuItem({ role: "selectAll" }));
+
+    menu.popup({ window: win });
+  });
 }
 
 function errorPage() {

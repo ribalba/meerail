@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import ssl
 import threading  # noqa: F401  (type annotation on Bridge.idle_wait)
+import time
 
 import imaplib_compat  # noqa: F401  (patches imaplib for imapclient on 3.14+)
 from imapclient import IMAPClient, SocketTimeout
@@ -17,6 +18,22 @@ _MSGID_RE = re.compile(rb"<[^>]+>")
 # request. Short enough that refresh feels immediate, long enough that an idle
 # agent isn't spinning.
 _IDLE_SLICE = 5
+
+# If a single IDLE slice takes this much wall-clock time or more, the host was
+# almost certainly suspended mid-wait (laptop lid closed). A slice is only meant
+# to block for _IDLE_SLICE seconds; anything near this threshold means the clock
+# jumped while the thread was frozen. See Bridge.idle_wait / Suspended.
+_SUSPEND_GAP = 15
+
+
+class Suspended(Exception):
+    """Raised out of idle_wait when the host slept through the IDLE wait.
+
+    Not an error: the wait itself completed. It signals that the connection is
+    presumed dead (the TCP session went stale while the machine was suspended)
+    and the caller should reconnect and re-sync immediately rather than trust
+    the socket or back off. Mail may have arrived while asleep, so the sooner
+    the reconnect the better."""
 
 # IMAP SPECIAL-USE flags we care about for role hints.
 _SPECIAL = {b"\\sent", b"\\drafts", b"\\junk", b"\\trash", b"\\archive", b"\\all", b"\\flagged"}
@@ -78,6 +95,20 @@ class Bridge:
         if self.client:
             try:
                 self.client.logout()
+            except Exception:
+                pass
+            self.client = None
+
+    def abort(self) -> None:
+        """Drop the connection without the LOGOUT handshake.
+
+        Use this when the socket is presumed dead (e.g. after a host suspend): a
+        clean logout() would send BYE and wait for a reply that never comes,
+        blocking until imap_read_timeout. shutdown() just closes the socket.
+        """
+        if self.client:
+            try:
+                self.client.shutdown()
             except Exception:
                 pass
             self.client = None
@@ -160,18 +191,37 @@ class Bridge:
         between them, so a refresh requested from the UI is picked up within a
         few seconds instead of after the full ``poll_interval``. The event stays
         set for the caller to see and clear.
+
+        Raises ``Suspended`` if a slice is seen to take far longer in wall-clock
+        time than it asked for: the host slept mid-wait and the socket is stale.
+        In that case DONE is deliberately *not* sent — it would block on the dead
+        socket until the read timeout — and the caller reconnects instead.
         """
         self.client.idle()
-        try:
-            if wake is None:
+        if wake is None:
+            try:
                 return bool(self.client.idle_check(timeout=seconds))
-            remaining = seconds
-            while remaining > 0:
-                if self.client.idle_check(timeout=min(_IDLE_SLICE, remaining)):
+            finally:
+                self.client.idle_done()
+        # Drive the wait off the monotonic clock rather than counting fixed-size
+        # slices: it stays accurate if a slice returns early, and pairs with the
+        # wall-clock reading below to tell a normal slice apart from a suspend.
+        deadline = time.monotonic() + seconds
+        clean = True
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                before = time.time()
+                changed = self.client.idle_check(timeout=min(_IDLE_SLICE, remaining))
+                if time.time() - before >= _SUSPEND_GAP:
+                    # Frozen mid-slice: the connection did not survive the sleep.
+                    # Leave IDLE hanging and let the caller abort() the socket.
+                    clean = False
+                    raise Suspended
+                if changed or wake.is_set():
                     return True
-                if wake.is_set():
-                    return True
-                remaining -= _IDLE_SLICE
-            return False
         finally:
-            self.client.idle_done()
+            if clean:
+                self.client.idle_done()

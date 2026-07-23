@@ -18,7 +18,7 @@ import commands
 import log
 from actions import drain_actions
 from config import AccountConfig, AgentConfig
-from imap import Bridge
+from imap import Bridge, Suspended
 
 
 def _chunks(seq, n):
@@ -380,7 +380,17 @@ def run_account_forever(account: AccountConfig, cfg: AgentConfig) -> None:
             try:
                 while True:
                     bridge.select("INBOX")
-                    bridge.idle_wait(cfg.poll_interval, wake=wake)
+                    try:
+                        bridge.idle_wait(cfg.poll_interval, wake=wake)
+                    except Suspended:
+                        # The host slept through the IDLE wait; the socket is
+                        # stale. Drop it without a blocking logout and break to
+                        # the top for a fresh connect + sync, so mail that
+                        # arrived while suspended lands seconds after wake rather
+                        # than after the read timeout expires on the dead socket.
+                        log.info("woke from suspend — reconnecting", account.email)
+                        bridge.abort()
+                        break
                     # Cleared before the pass, not after: a request arriving
                     # mid-sync then earns its own pass rather than being
                     # swallowed by the one already in flight.
@@ -407,4 +417,10 @@ def run_account_forever(account: AccountConfig, cfg: AgentConfig) -> None:
             log.info(f"retrying in {delay:.0f}s", account.email)
             _report_error(account.email, f"{e!r}")
             time.sleep(delay)
-            backoff = min(backoff * 2, 300)
+            # Capped at the poll interval, not minutes: new mail matters more
+            # than sparing Bridge a retry, and after a suspend/resume the first
+            # few passes routinely fail while Bridge reconnects upstream — a
+            # long backoff there would leave the agent asleep well after the
+            # host (and Bridge) are ready. The jitter above still staggers the
+            # accounts so they don't retry Bridge in one burst.
+            backoff = min(backoff * 2, cfg.poll_interval)

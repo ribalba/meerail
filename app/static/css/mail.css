@@ -456,6 +456,10 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
   font-size: .82rem; }
 .tb-btn:hover:not(:disabled) { background: var(--bg-elev); color: var(--text); }
 .tb-btn.on { color: var(--flag); }
+/* The plain-text switch is a view mode, not a flag — it borrows the accent and
+   keeps a tint while it is on, so an unstyled message still reads as a choice
+   you made rather than as mail that arrived broken. */
+.tb-btn[data-act="plain"].on { color: var(--accent); background: var(--bg-elev); }
 .tb-btn:disabled { opacity: .35; cursor: default; }
 /* The two Back buttons and the bar holding the second one. Off at desktop
    widths, where all three panes are on screen at once and there is nowhere to
