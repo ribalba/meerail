@@ -65,6 +65,29 @@ def ingest_raw_message(email: str, raw: bytes, uid: int = 1, folder: str = "INBO
         ingest.advance_cursor(db, mailbox, uid)
 
 
+def ingest_header_block(email: str, header_bytes: bytes, uid: int = 1, folder: str = "INBOX",
+                        flags: dict | None = None, size_bytes: int | None = None) -> None:
+    """Ingest a message's headers with no content, as the agent does for mail
+    that falls outside the content window."""
+    with session() as db:
+        account = ingest.get_or_create_account(db, email)
+        mailbox = _mailbox(db, account, folder)
+        ingest.store_headers(db, account, mailbox, uid, flags or {}, header_bytes, size_bytes)
+        ingest.advance_cursor(db, mailbox, uid)
+
+
+def prune_content(cutoff) -> int:
+    """Run one prune batch, as the agent's indexer thread does."""
+    with session() as db:
+        return ingest.prune_expired_content(db, cutoff)
+
+
+def set_content_window(months: int) -> None:
+    """Publish a content window the way a sync pass does."""
+    with session() as db:
+        ingest.record_content_window(db, months)
+
+
 def create_folder(email: str, name: str, role_hint: str = "") -> int:
     """Register a folder the way a sync pass's LIST would. Returns its id."""
     with session() as db:
@@ -174,6 +197,16 @@ def outbound_mime(outbound_id: int) -> str:
     with session() as db:
         ob = db.get(Outbound, outbound_id)
         return ob.raw_mime if ob else ""
+
+
+def stored_raw_mime(email: str, message_id: str) -> bytes | None:
+    """The original bytes kept for a message — None when store_raw_mime is off."""
+    with session() as db:
+        account = db.query(Account).filter(Account.email == email.lower()).one()
+        return (db.query(Message)
+                .filter(Message.account_id == account.id,
+                        Message.message_id == message_id)
+                .one().raw_mime)
 
 
 def message_count(email: str) -> int:

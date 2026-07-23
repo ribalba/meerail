@@ -161,6 +161,17 @@ def init_db() -> None:
             "thumb_status VARCHAR(16) NOT NULL DEFAULT 'skipped'",
             "CREATE INDEX IF NOT EXISTS ix_attachments_thumb_pending "
             "ON attachments (id) WHERE thumb_status = 'pending'",
+            # Content window (agent: content_window_months). Existing rows are
+            # 'full' — anything already stored was stored in full, and the
+            # agent's prune pass is what walks them back if a window is set.
+            "ALTER TABLE messages ADD COLUMN IF NOT EXISTS "
+            "content_status VARCHAR(16) NOT NULL DEFAULT 'full'",
+            # Partial: the prune pass asks "what is still full and now too old",
+            # which over a whole mailbox is a seq scan every time it runs, and it
+            # runs on a timer. The index only covers rows that can still match,
+            # so it shrinks as the window walks forward.
+            "CREATE INDEX IF NOT EXISTS ix_messages_prunable "
+            "ON messages (date_sent) WHERE content_status = 'full'",
             # Agent health, surfaced in the UI's agent-status modal.
             "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS last_error TEXT",
             "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS last_error_at TIMESTAMP",

@@ -6,6 +6,8 @@ import re
 import ssl
 import threading  # noqa: F401  (type annotation on Bridge.idle_wait)
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 import imaplib_compat  # noqa: F401  (patches imaplib for imapclient on 3.14+)
 from imapclient import IMAPClient, SocketTimeout
@@ -13,6 +15,9 @@ from imapclient import IMAPClient, SocketTimeout
 from config import AccountConfig
 
 _MSGID_RE = re.compile(rb"<[^>]+>")
+# The Date line out of a header block. Unfolded values only: a Date split across
+# lines is malformed, and _sent_date has INTERNALDATE to fall back on.
+_DATE_RE = re.compile(rb"^Date:[ \t]*(.+?)\r?$", re.IGNORECASE | re.MULTILINE)
 
 # How long a single interruptible IDLE poll blocks before checking for a wake
 # request. Short enough that refresh feels immediate, long enough that an idle
@@ -60,6 +65,30 @@ def flags_to_dict(flags: tuple) -> dict:
             keywords.append(f.decode() if isinstance(f, bytes) else str(f))
     out["keywords"] = keywords
     return out
+
+
+def _sent_date(hdr: bytes, internal) -> "datetime | None":
+    """When a message was sent, as naive UTC, from the cheap header pass.
+
+    The Date header first, because that is what the rest of meerail sorts and
+    filters on (Message.date_sent), and a window decided on a different clock
+    than the one the reader sees would strip content off mail that still looks
+    in-window in the list. INTERNALDATE is the fallback for the mail that has no
+    parseable Date at all — better a server timestamp than no age to judge by.
+    """
+    m = _DATE_RE.search(hdr or b"")
+    if m:
+        try:
+            return _to_naive_utc(parsedate_to_datetime(m.group(1).decode(errors="replace").strip()))
+        except (TypeError, ValueError, IndexError):
+            pass
+    return _to_naive_utc(internal) if isinstance(internal, datetime) else None
+
+
+def _to_naive_utc(dt: "datetime | None") -> "datetime | None":
+    if dt is not None and dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
 
 
 def _body_bytes(data: dict) -> bytes:
@@ -163,15 +192,45 @@ class Bridge:
         return sorted(self.client.search(["ALL"]))
 
     def fetch_headers(self, uids: list[int]) -> dict[int, dict]:
-        """Cheap pass: FLAGS + Message-ID header only (no body)."""
-        resp = self.client.fetch(uids, [b"FLAGS", b"BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)]"])
+        """Cheap pass: FLAGS, Message-ID, Date and size — no body.
+
+        The date is here because the content window is decided before the body
+        is ever asked for, and this pass already runs over every new UID: two
+        more header fields cost nothing next to a second round trip. RFC822.SIZE
+        comes along for the same reason — for a message we only take the headers
+        of, it is the only place the real size can come from.
+        """
+        resp = self.client.fetch(
+            uids,
+            [b"FLAGS", b"INTERNALDATE", b"RFC822.SIZE",
+             b"BODY.PEEK[HEADER.FIELDS (MESSAGE-ID DATE)]"],
+        )
         out = {}
         for uid, data in resp.items():
             hdr = _body_bytes(data)
             m = _MSGID_RE.search(hdr or b"")
             message_id = m.group(0)[1:-1].decode(errors="replace") if m else None
-            out[uid] = {"message_id": message_id, "flags": flags_to_dict(data.get(b"FLAGS", ()))}
+            out[uid] = {
+                "message_id": message_id,
+                "flags": flags_to_dict(data.get(b"FLAGS", ())),
+                "date": _sent_date(hdr, data.get(b"INTERNALDATE")),
+                "size": int(data.get(b"RFC822.SIZE") or 0),
+            }
         return out
+
+    def fetch_header_block(self, uids: list[int]) -> dict[int, dict]:
+        """Every header, still no body — what mail outside the window gets.
+
+        BODY.PEEK[HEADER] is a few KB against a message that may be megabytes,
+        which is the entire point of the window: the row that lands lists,
+        threads and searches by subject and correspondent without the body
+        having crossed the wire at all.
+        """
+        resp = self.client.fetch(uids, [b"FLAGS", b"BODY.PEEK[HEADER]"])
+        return {
+            uid: {"raw": _body_bytes(data), "flags": flags_to_dict(data.get(b"FLAGS", ()))}
+            for uid, data in resp.items()
+        }
 
     def fetch_flags(self, uids: list[int]) -> dict[int, dict]:
         resp = self.client.fetch(uids, [b"FLAGS"])

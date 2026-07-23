@@ -70,7 +70,7 @@ that shaped the architecture.
 | **Python** | 3.11 or newer on the host — only for the agent, and only outside Docker. 3.11 is the floor (`tomllib`); 3.13/3.14 are tested. |
 | **Node** | 20+, only if you want the Electron desktop app rather than the browser. |
 | **RAM** | ~6 GB free for the stack as shipped. Postgres is capped at 10 GB and Tika at 3 GB in `docker-compose.yml`, tuned for a ~32 GB host — lower `shared_buffers` and the `deploy.resources.limits` if your machine is smaller. |
-| **Disk** | Sized to your mailbox. Raw MIME plus attachment bytes plus the trigram index runs to tens of GB for a large account. |
+| **Disk** | Sized to your mailbox. Raw MIME plus attachment bytes plus the trigram index runs to tens of GB for a large account — [the content window](#the-content-window) and `STORE_RAW_MIME` are the two knobs that bound it. |
 | **Mail access** | Proton Mail Bridge running and unlocked, **or** any IMAP+SMTP account. Gmail needs 2-Step Verification, an App Password and IMAP enabled — your normal password will not work. |
 
 Tika's `latest-full` image bundles Tesseract and is a multi-GB pull; it is what OCRs
@@ -258,19 +258,50 @@ untouched copy runs.
 | `TIKA_URL` | `http://127.0.0.1:9998` | Attachment text extraction endpoint, called by the agent. |
 | `DEFAULT_SEARCH_YEARS` | `0` | Default search window; `0` searches everything. The UI can override per query. |
 | `CONTACTS_SCAN_YEARS` | `1` | How far back to scan addresses for compose autocomplete; `0` is all time. |
+| `STORE_RAW_MIME` | `true` | Keep each message's original RFC822 bytes in `messages.raw_mime` — held for future features, and roughly half the database. `false` ingests without them. Read by the ingesting process: the containerised agent via [`docker-compose.agent.yml`](docker-compose.agent.yml), a native one via `store_raw_mime` in `agent/config.toml` (which wins if set). |
+| `CONTENT_WINDOW_MONTHS` | `0` | Keep the *content* of mail sent within this many months; `0` keeps everything. See [The content window](#the-content-window). Same two homes as `STORE_RAW_MIME`. |
 
 ### `agent/config.toml` — mail accounts
 
 Copy from [`agent/config.example.toml`](agent/config.example.toml) and `chmod 600` it — it
 holds your mail password in plaintext, and `--test` will warn you if the permissions are
 loose. Top-level keys set `database_url`, `tika_url`, `poll_interval` (seconds between IDLE
-cycles), `reconcile_interval` (full flag/prune sweep) and `batch_size`.
+cycles), `reconcile_interval` (full flag/prune sweep), `batch_size`, `store_raw_mime`
+(`false` stops keeping each message's original bytes — see `STORE_RAW_MIME` above; it takes
+effect for mail synced from then on, and existing rows keep their copy) and
+`content_window_months` (below).
 
 Then one `[[account]]` block per address — IMAP and SMTP host/port/security, username,
 password, `verify_cert` (`false` for Bridge's self-signed cert, `true` for a real one), and
 an optional `addresses = [...]` list of aliases to offer in the composer's *From*. Accounts
 register themselves in the app on first sync; there is nothing to add in the UI. The example
 file carries a commented-out Gmail block alongside the Proton one.
+
+### The content window
+
+A full mailbox is tens of GB, and most of it is mail nobody will open again. Set
+`content_window_months` (or `CONTENT_WINDOW_MONTHS`) to keep the *content* of recent mail
+only:
+
+```toml
+content_window_months = 24   # bodies and attachments for the last two years
+```
+
+Older mail is still synced — it just arrives as headers alone. It lists, sorts, threads,
+counts towards the folder totals and turns up in a search for its subject or correspondent;
+it has no body to open, and the reader says so instead of showing a blank message. The body
+never crosses the wire: the agent reads each message's date in the header pass it already
+makes, and never asks for the rest.
+
+The window **slides**, which is what makes it a ceiling rather than a one-off tidy-up. Mail
+already stored is stripped back to headers once it falls out of the window — body, HTML,
+attachment payloads, previews and extracted text all go, and the attachment names and sizes
+stay. That runs on the agent's indexer thread, so it keeps happening on a mailbox where no
+new mail is arriving.
+
+Nothing is deleted from your mail server. Widening the window applies to new mail
+immediately; to pull back content for mail that was already skipped, widen it and then run a
+full recheck from the UI's agent-status panel, which re-walks every folder.
 
 ### Running the agent
 

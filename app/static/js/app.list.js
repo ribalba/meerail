@@ -152,6 +152,9 @@ App.list = (function () {
     const badge = r.thread_count > 1
       ? `<span class="thread-badge" title="${r.thread_count} messages in this thread">` +
         `${App.icon("thread", 11)}${r.thread_count}</span>` : "";
+    // No snippet because there is no body: this mail is outside the content
+    // window the agent keeps. Blank there reads as a broken row.
+    const absent = r.content_status && r.content_status !== "full";
 
     el.innerHTML = `
       ${stripe}
@@ -162,7 +165,8 @@ App.list = (function () {
           <span class="msg-date">${App.esc(App.fmtDate(r.date))}</span>
         </div>
         <div class="msg-subject">${App.esc(r.subject)}</div>
-        <div class="msg-snippet">${App.esc(r.snippet || "")}</div>
+        <div class="msg-snippet${absent ? " is-absent" : ""}">${
+          absent ? "Outside the sync window — headers only" : App.esc(r.snippet || "")}</div>
         <div class="msg-meta">${badge}${flag}${attach}</div>
       </div>`;
 

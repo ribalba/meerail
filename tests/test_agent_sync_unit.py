@@ -20,7 +20,7 @@ class Bridge:
         return [1, 2]
 
     def fetch_headers(self, _uids):
-        return {1: {"message_id": "one", "flags": {}}}
+        return {1: {"message_id": "one", "flags": {}, "date": None, "size": 0}}
 
 
 class Mailbox:
@@ -140,11 +140,14 @@ class RecheckIngest:
     def extract_pending(self, _db): return 0
     def thumb_pending(self, _db): return 0
     def record_sync(self, *_a, **_kw): pass
+    def content_cutoff(self, _months): return None
+    def record_content_window(self, _db, months): self.window = months
 
 
 class Cfg:
     batch_size = 100
     poll_interval = 30
+    content_window_months = 0
 
 
 class AccountCfg:

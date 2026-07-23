@@ -69,7 +69,8 @@ SQL
 | `body_text`, `body_html` | full body |
 | `search_text` | subject + participants + body **plus extracted attachment text** — search this |
 | `has_attachments`, `size_bytes` | |
-| `raw_mime` | the original `.eml` bytes (`bytea`) — select it only when you need the raw message |
+| `raw_mime` | the original `.eml` bytes (`bytea`) — select it only when you need the raw message; `NULL` if raw storage was turned off when the mail was synced |
+| `content_status` | `full`, or `skipped`/`pruned` for mail outside the content window — those rows have headers but no body, attachments or search text beyond the headers. Filter on `content_status = 'full'` when a query assumes a body exists |
 
 **`accounts`** — `id`, `email`, `label`, `color`, `active`.
 

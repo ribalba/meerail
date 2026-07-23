@@ -12,6 +12,7 @@ import pytest
 
 import dbfixture
 from core import ingest
+from core.config import get_settings
 from conftest import status_for
 from helpers import api, api_bytes, make_message
 
@@ -357,3 +358,32 @@ def test_an_unread_placement_stays_unread(account):
     assert _mb(email, "AllMail2")["unread"] == 1
     assert not [a for a in dbfixture.pending_actions(email, "setflags")
                 if a["payload"].get("uid") == 901]
+
+
+def test_raw_mime_is_stored_by_default(account):
+    email = account["email"]
+    mid = f"kept-{uuid.uuid4().hex}@t"
+    raw = make_message(f"<{mid}>", "Keeps its original", "x@y.com", email, "body", T0)
+    dbfixture.ingest_raw_message(email, raw, uid=3)
+
+    assert dbfixture.stored_raw_mime(email, mid) == raw
+
+
+def test_store_raw_mime_off_drops_only_the_original_bytes(account, monkeypatch):
+    """Everything the app reads is derived at ingest, so turning the copy off
+    costs nothing but the copy — the message still lists, reads and searches."""
+    email = account["email"]
+    monkeypatch.setattr(get_settings(), "store_raw_mime", False)
+
+    mid = f"lean-{uuid.uuid4().hex}@t"
+    needle = f"haystack{uuid.uuid4().hex}"
+    raw = make_message(f"<{mid}>", "No original kept", "x@y.com", email,
+                       f"a body with {needle} in it", T0)
+    dbfixture.ingest_raw_message(email, raw, uid=4)
+
+    assert dbfixture.stored_raw_mime(email, mid) is None
+
+    detail = _detail_by_subject(account["id"], "No original kept")
+    assert needle in detail["body_text"]
+    _, found = api("GET", f"/api/search?q={needle}&account_id={account['id']}")
+    assert [r["subject"] for r in found["rows"]] == ["No original kept"]

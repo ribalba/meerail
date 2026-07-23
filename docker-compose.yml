@@ -25,7 +25,9 @@ services:
       - -c
       - wal_compression=lz4
       # --- TOAST: raw_mime/body_html/search_text all live in TOAST. lz4 is
-      #     several times faster than the pglz default at similar ratios. ---
+      #     several times faster than the pglz default at similar ratios.
+      #     raw_mime is the bulk of it and nothing reads it yet; STORE_RAW_MIME
+      #     (see .env.example / docker-compose.agent.yml) stops storing it. ---
       - -c
       - default_toast_compression=lz4
       # --- NVMe: the default costs assume spinning rust ---

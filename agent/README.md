@@ -281,6 +281,11 @@ reconcile was due. Re-ingesting is idempotent — messages dedupe on
 `(account, dedup_key)` and content already stored only gains a placement row — so
 it fills gaps without duplicating anything that survived.
 
+It is also how you widen a content window after the fact: `content_window_months`
+decides what gets fetched as the agent walks past a UID, so mail already stored
+as headers only is filled in the next time the pass re-walks it — which is what
+a recheck makes it do.
+
 Unlike the refresh command this is a **column** on `accounts`
 (`recheck_requested`), not a notification. It is the button you reach for when
 the agent looks unhealthy, so the request has to keep until an agent is actually

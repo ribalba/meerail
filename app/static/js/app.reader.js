@@ -352,6 +352,32 @@ App.reader = (function () {
   // Every message in the thread is drawn in full — no "N earlier messages" to
   // unfold. The head stays a toggle so a long quoted chain can still be folded
   // away one card at a time.
+  // What the reader shows instead of a body for mail outside the content
+  // window. The two states differ in one clause — whether the body was ever
+  // here — because that is the only thing the reader can act on differently:
+  // widening the window brings back mail that was never fetched, while mail
+  // that was pruned is equally gone from here either way. Both end on the same
+  // reassurance: nothing was deleted from the mail server.
+  function contentNotice(m) {
+    const months = m.content_window_months;
+    const window = months
+      ? `mail sent in the last ${months === 1 ? "month" : months + " months"}`
+      : "recent mail only";
+    const what = m.content_status === "pruned"
+      ? "Its content was here and has been cleared as it aged out of that window."
+      : "Its content was never downloaded.";
+    return `<div class="omitted-card">
+        <span class="omitted-glyph">${App.icon("clock", 20)}</span>
+        <div>
+          <p class="omitted-title">This message is outside the sync window</p>
+          <p>meerail is set to keep ${App.esc(window)}. ${App.esc(what)}
+             The headers stay, so it still lists, threads and turns up in a search
+             for its subject or sender — and the full message is untouched on your
+             mail server.</p>
+        </div>
+      </div>`;
+  }
+
   function renderMsg(m) {
     const shut = collapsed.has(m.id);
     const wrap = document.createElement("div");
@@ -364,7 +390,11 @@ App.reader = (function () {
     // behind a details toggle — a recipient you cannot see is one you cannot
     // decide to keep on a reply.
     const cc = names("cc");
-    const snippet = m.body_text ? m.body_text.slice(0, 140) : "";
+    // Collapsed, the body's first line is the whole preview. Mail outside the
+    // content window has no first line, so it says why instead of nothing.
+    const snippet = m.body_text ? m.body_text.slice(0, 140)
+      : (m.content_status && m.content_status !== "full"
+          ? "Outside the sync window — headers only" : "");
 
     wrap.innerHTML = `
       <div class="msg-head" role="button" tabindex="0"
@@ -432,7 +462,13 @@ App.reader = (function () {
     }
 
     const body = document.createElement("div");
-    if (m.body_html && !plainFor.has(m.id)) {
+    if (m.content_status && m.content_status !== "full") {
+      // Outside the content window: the headers are all there ever was here (or
+      // all that is left). Said plainly, because "(no content)" on a message
+      // that visibly has a subject and a sender reads as a bug.
+      body.className = "msg-body-omitted";
+      body.innerHTML = contentNotice(m);
+    } else if (m.body_html && !plainFor.has(m.id)) {
       mountFrame(body, m.body_html, () => wrap.classList.add("has-hit"));
     } else if (m.body_text) {
       // Both text-only mail and the plain-text toggle land here.
@@ -454,6 +490,19 @@ App.reader = (function () {
       const at = document.createElement("div");
       at.className = "attachments";
       at.innerHTML = m.attachments.map((a) => {
+        // A pruned message keeps its attachment rows for the names and sizes,
+        // but the bytes are gone — so the chip stops being a link rather than
+        // offering a download that would 404.
+        if (a.stored === false) {
+          return `<span class="attachment-chip is-absent"
+              title="${App.esc(a.filename)} — not stored (outside the sync window)">
+            ${App.icon("paperclip", 15)}
+            <span class="att-meta">
+              <span class="att-name">${App.esc(a.filename)}</span>
+              <span class="att-size">${App.fmtSize(a.size)} · not stored</span>
+            </span>
+          </span>`;
+        }
         // Types the browser renders itself open in a tab; everything else keeps
         // downloading. `viewable` is the server's allowlist, not a guess here —
         // it decides what may be served with an inline disposition.

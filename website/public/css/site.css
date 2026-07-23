@@ -299,6 +299,33 @@ html, body {
 .landing-md-h { font-size: 1.15em; }
 .landing-md-link { color: #2185d0; text-decoration: underline; }
 
+/* The two halves of a content window, on the storage card: what is kept whole
+   and what is kept as headers. The second row is deliberately not greyed out to
+   the point of looking disabled — that mail is still there and still searchable. */
+.landing-window {
+  margin-top: 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: .35rem;
+}
+.landing-window-row {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  padding: .45rem .65rem;
+  border: 1px dashed #d7dade;
+  border-radius: 8px;
+  font-size: .8rem;
+  color: #5b5e63;
+  background: #fbfcfd;
+}
+.landing-window-row.is-full {
+  border-style: solid;
+  border-color: #c6e0f5;
+  background: #f4f9fe;
+  color: #1b1c1d;
+}
+
 /* Miniature message rows showing the age tint ramping up. --t mirrors the
    --age-t the app sets per row, and the rgb/alpha match mail.css's light theme
    so the card shows the real colour rather than an approximation of it. */

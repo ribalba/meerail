@@ -14,6 +14,7 @@ work does not run inside a transaction; see _release_before_slow_work.
 
 from __future__ import annotations
 
+import calendar
 from datetime import datetime
 
 from sqlalchemy import func, or_, select, update
@@ -26,8 +27,9 @@ from .mail.store import (
     ingest_raw,
     rebuild_search_text,
     recompute_counts,
+    strip_content,
 )
-from .models import Account, Attachment, Mailbox, Message, MessageLocation, utcnow
+from .models import Account, Attachment, Mailbox, Message, MessageLocation, Setting, utcnow
 
 # Map an IMAP SPECIAL-USE flag / folder name to a meerail mailbox role.
 _ROLE_BY_FLAG = {
@@ -45,6 +47,13 @@ EXTRACT_BATCH = 8
 # Smaller than EXTRACT_BATCH: rendering is CPU-bound and in-process, where Tika
 # calls are network waits on another container.
 THUMB_BATCH = 4
+
+# Larger than either: this is SQL only — no Tika, no rendering — and the first
+# run after a window is configured has a whole mailbox's backlog to walk.
+PRUNE_BATCH = 200
+
+# Where the agent publishes its content window for the app to read.
+CONTENT_WINDOW_KEY = "content_window_months"
 
 
 def derive_role(imap_name: str, role_hint: str = "") -> str:
@@ -157,6 +166,81 @@ def store_message(db, account: Account, mailbox: Mailbox, uid: int, flags: dict,
     """Parse and store raw MIME. Returns True if this created new content."""
     _msg, created = ingest_raw(db, account, mailbox, uid, flags, raw)
     return created
+
+
+def store_headers(db, account: Account, mailbox: Mailbox, uid: int, flags: dict,
+                  header_bytes: bytes, size_bytes: int | None = None) -> bool:
+    """Store a message's headers with no content, for mail outside the window.
+
+    The caller has decided (from the Date header, before spending a fetch on the
+    body) that this message is too old to hold content for. What lands still
+    lists, threads, sorts and answers a search for its subject or sender — it
+    simply has no body to open. Returns True if this created new content.
+    """
+    _msg, created = ingest_raw(db, account, mailbox, uid, flags, header_bytes,
+                               headers_only=True, size_bytes=size_bytes)
+    return created
+
+
+def content_cutoff(months: int) -> datetime | None:
+    """The oldest date whose content is still kept, or None for "keep it all".
+
+    Calendar months rather than a fixed number of days, because that is what
+    "keep two years" means to the person who typed 24 — and a day-count answer
+    drifts against the calendar by nearly a week a year.
+    """
+    if months <= 0:
+        return None
+    now = utcnow()
+    total = now.year * 12 + (now.month - 1) - months
+    year, month = divmod(total, 12)
+    month += 1
+    # Clamp: the 31st of a month the target does not have (31 Mar, 6 months back).
+    day = min(now.day, calendar.monthrange(year, month)[1])
+    return now.replace(year=year, month=month, day=day)
+
+
+def prune_expired_content(db, cutoff: datetime, limit: int = PRUNE_BATCH) -> int:
+    """Strip the content of stored messages that have aged out of the window.
+
+    Returns how many were stripped, so callers can loop until it returns 0. The
+    window slides, so this has to keep running — it is not a one-off migration:
+    every day moves the cutoff forward over another day's worth of mail.
+
+    Messages with no parseable Date are left alone. Their age is unknown, and
+    the safe reading of "unknown" is to keep what we already have rather than
+    throw away content on a guess.
+    """
+    stale = db.execute(
+        select(Message)
+        .where(
+            Message.content_status == "full",
+            Message.date_sent.is_not(None),
+            Message.date_sent < cutoff,
+        )
+        .limit(limit)
+    ).scalars().all()
+    for msg in stale:
+        strip_content(db, msg)
+    if stale:
+        events.publish({"type": "pruned", "messages": len(stale)})
+    return len(stale)
+
+
+def record_content_window(db, months: int) -> None:
+    """Publish the agent's window setting for the web app to read.
+
+    The app has no access to agent/config.toml — the two share nothing but the
+    database — and it needs the number to tell someone *why* a body is missing.
+    Writing it here keeps one source of truth: the agent's config, echoed into
+    the database by the process that actually applies it.
+    """
+    value = str(max(0, int(months)))
+    row = db.get(Setting, CONTENT_WINDOW_KEY)
+    if row is None:
+        db.add(Setting(key=CONTENT_WINDOW_KEY, value=value))
+    elif row.value != value:
+        row.value = value
 
 
 def note_ingested(account: Account, mailbox: Mailbox, stored: int) -> None:

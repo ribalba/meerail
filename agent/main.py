@@ -63,6 +63,11 @@ def main() -> int:
     # without) the web app ever having started.
     init_db()
 
+    # Only worth a line when it is off: this is the one setting that quietly
+    # discards something, so say so rather than let a later export find gaps.
+    if not cfg.store_raw_mime:
+        log.info("store_raw_mime is off — new mail is stored without its original bytes.")
+
     if args.backfill_previews:
         from sync import backfill_previews
         return backfill_previews()
@@ -83,8 +88,9 @@ def main() -> int:
                     log.warn(advice, account.email)
         # Extraction is a thread of its own in continuous mode, which --once
         # never starts. Drain it inline instead, or a one-shot run would fetch
-        # the mail and leave every attachment unindexed and unsearchable.
-        index_once()
+        # the mail and leave every attachment unindexed and unsearchable. The
+        # window prune rides the same call, for the same reason.
+        index_once(cfg.content_window_months)
         return 1 if failed else 0
 
     # Only for the continuous mode: --once has no wait for a refresh to cut short.

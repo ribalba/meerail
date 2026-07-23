@@ -33,6 +33,21 @@ services:
       # Read-only — the agent never writes its config. The 0600 permission check
       # in preflight.py reads the host file's mode straight through the mount.
       - ./agent/config.toml:/app/agent/config.toml:ro
+    environment:
+      # Keep the original RFC822 bytes of every message in messages.raw_mime.
+      # Nothing reads them yet — they are stored for future features — and they
+      # are roughly half of what the database holds, so set STORE_RAW_MIME=false
+      # in .env to ingest without them. Only affects mail synced from then on.
+      #
+      # store_raw_mime in agent/config.toml overrides this, so the file stays
+      # the single source of truth for anyone who set it there.
+      STORE_RAW_MIME: ${STORE_RAW_MIME:-true}
+      # Only keep the content of mail sent within this many months (0 = all of
+      # it). Older mail is stored as headers alone, and stored mail is stripped
+      # back to headers as the window slides past it — the sliding is why this
+      # keeps working after the first pass. Nothing is deleted upstream.
+      # content_window_months in agent/config.toml overrides this.
+      CONTENT_WINDOW_MONTHS: ${CONTENT_WINDOW_MONTHS:-0}
     # The peak here is sync.py's `raws = bridge.fetch_raw(need_raw)`, which holds
     # a whole chunk of complete raw MIME messages in memory at once — batch_size
     # messages, with no cap on how big any of them is. A chunk that happens to

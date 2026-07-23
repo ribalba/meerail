@@ -47,6 +47,12 @@ class AccountConfig:
     # Bridge pausing mid-fetch while it pulls and decrypts a large message.
     imap_connect_timeout: int = 10
     imap_read_timeout: int = 60
+    # UIDs per fetch/ingest batch for this account, overriding the global
+    # batch_size. None means "use the global". Servers differ in how large an
+    # ask they will actually answer: Gmail meets a big BODY.PEEK[] fetch with a
+    # partial response or an outright disconnect often enough that a backfill
+    # spends its time restarting, and asking for less is what gets it finished.
+    batch_size: int | None = None
     # Extra "send as" addresses this account owns (Proton aliases / additional
     # addresses). The primary `email` is always sendable and need not be listed.
     addresses: list[str] = field(default_factory=list)
@@ -65,6 +71,8 @@ class AccountConfig:
                     f"use one of {', '.join(SECURITY_MODES)}"
                 )
             setattr(self, attr, value)
+        if self.batch_size is not None and self.batch_size < 1:
+            raise ValueError(f"batch_size = {self.batch_size!r} must be at least 1")
 
     def send_addresses(self) -> list[str]:
         """Every address the account may send from — primary first, deduped."""
@@ -88,9 +96,36 @@ class AgentConfig:
     # mail does not wait on it.
     reconcile_interval: int = 900
     batch_size: int = 200
+    # Keep each message's original RFC822 bytes in messages.raw_mime. Nothing
+    # reads them yet — they are kept for future features — and they are roughly
+    # half the database, so a tight disk can turn them off. Only applies to mail
+    # ingested from then on; existing rows keep theirs.
+    store_raw_mime: bool = True
+    # Only fetch and keep the *content* of mail sent within this many months;
+    # 0 keeps everything. Older messages are stored as headers alone — they
+    # still list, thread and answer a search by subject or correspondent — and
+    # stored mail is stripped back to headers as the window slides past it.
+    content_window_months: int = 0
     accounts: list[AccountConfig] = field(default_factory=list)
     # Where this was loaded from, so --test can check its permissions.
     config_path: Path | None = None
+
+
+def _as_bool(value: object, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _as_int(value: object, default: int) -> int:
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def load_config(path: str | None = None) -> AgentConfig:
@@ -115,6 +150,17 @@ def load_config(path: str | None = None) -> AgentConfig:
         poll_interval=int(data.get("poll_interval", 30)),
         reconcile_interval=int(data.get("reconcile_interval", 900)),
         batch_size=int(data.get("batch_size", 200)),
+        # The one setting with two homes: config.toml for a native agent, and
+        # $STORE_RAW_MIME for the containerised one, which docker-compose passes
+        # through. The file wins where it says anything, so a container that has
+        # both does not quietly ignore the config the user edited.
+        store_raw_mime=_as_bool(
+            data.get("store_raw_mime", os.environ.get("STORE_RAW_MIME")), True
+        ),
+        # Same two homes, same precedence — see store_raw_mime above.
+        content_window_months=_as_int(
+            data.get("content_window_months", os.environ.get("CONTENT_WINDOW_MONTHS")), 0
+        ),
         accounts=accounts,
         config_path=cfg_path,
     )
@@ -123,4 +169,8 @@ def load_config(path: str | None = None) -> AgentConfig:
     # environment still wins, which keeps `make dev` and tests overridable.
     os.environ.setdefault("DATABASE_URL", cfg.database_url)
     os.environ.setdefault("TIKA_URL", cfg.tika_url)
+    # Not setdefault: the value above already folded in whatever the environment
+    # said, and core.config must see the resolved answer, not the raw input.
+    os.environ["STORE_RAW_MIME"] = "true" if cfg.store_raw_mime else "false"
+    os.environ["CONTENT_WINDOW_MONTHS"] = str(cfg.content_window_months)
     return cfg

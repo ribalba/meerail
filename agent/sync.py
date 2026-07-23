@@ -26,6 +26,51 @@ def _chunks(seq, n):
         yield seq[i:i + n]
 
 
+# How hard to push a server that answers a FETCH without every UID in it. See
+# _fetch_all: rounds of re-asking, and the seconds waited before each one.
+_FETCH_ROUNDS = 3
+_FETCH_BACKOFF = 2.0
+
+
+def _fetch_all(fetch, uids: list[int], what: str, email: str | None = None,
+               *, needs_body: bool = True) -> dict[int, dict]:
+    """``fetch(uids)``, but insisting on the UIDs the server leaves out.
+
+    A partial FETCH response is how Gmail says "not right now": it answers a
+    large request with some UIDs simply absent rather than with an error. The
+    size of the ask is the problem, so the ones that went missing are asked for
+    again one at a time, after a pause.
+
+    Anything still absent after ``_FETCH_ROUNDS`` raises, exactly as a partial
+    fetch always did — the cursor must never step over mail that was not
+    fetched. What changes is that a hiccup no longer throws away the pass: a
+    multi-hour backfill used to restart from its last committed cursor because
+    one UID out of tens of thousands came back empty.
+    """
+    got = fetch(uids)
+    for round_no in range(1, _FETCH_ROUNDS + 1):
+        missing = _missing(uids, got, needs_body)
+        if not missing:
+            return got
+        log.warn(f"{what} omitted {len(missing)} of {len(uids)} UID(s) "
+                 f"{missing[:5]}{'…' if len(missing) > 5 else ''} — "
+                 f"refetching individually ({round_no}/{_FETCH_ROUNDS})", email)
+        time.sleep(_FETCH_BACKOFF * round_no)
+        for uid in missing:
+            got.update(fetch([uid]))
+    missing = _missing(uids, got, needs_body)
+    if missing:
+        raise RuntimeError(f"IMAP {what} omitted UIDs: {missing}")
+    return got
+
+
+def _missing(uids: list[int], got: dict[int, dict], needs_body: bool) -> list[int]:
+    """UIDs the response left out — or answered with an empty body, which for a
+    fetch that asked for one is the same thing."""
+    return sorted(u for u in uids
+                  if u not in got or (needs_body and not got[u].get("raw")))
+
+
 class PassProgress:
     """Where this pass has got to, as a JSON blob for the status panel.
 
@@ -89,11 +134,15 @@ class PassProgress:
 
 
 def _sync_new(db, bridge: Bridge, account, mailbox, batch: int,
-              progress: PassProgress | None = None) -> int:
+              progress: PassProgress | None = None, cutoff=None) -> int:
     """Ingest UIDs above the folder's cursor. Returns how many were stored.
 
     The cursor only advances once a chunk is fully ingested, so an interrupted or
     partial IMAP fetch is retried next pass rather than silently skipped.
+
+    ``cutoff`` is the content window's oldest date, or None to fetch everything.
+    Mail sent before it gets its headers fetched and nothing else — the decision
+    is made from the cheap header pass, so the body never crosses the wire.
     """
     new = bridge.new_uids(mailbox.last_uid)
     if progress is not None:
@@ -101,28 +150,40 @@ def _sync_new(db, bridge: Bridge, account, mailbox, batch: int,
     if not new:
         return 0
     stored = 0
+    email = getattr(account, "email", None)
     for chunk in _chunks(new, batch):
-        headers = bridge.fetch_headers(chunk)
-        missing_headers = set(chunk) - set(headers)
-        if missing_headers:
-            raise RuntimeError(f"IMAP header fetch omitted UIDs: {sorted(missing_headers)}")
+        headers = _fetch_all(bridge.fetch_headers, chunk, "header fetch", email,
+                             needs_body=False)
 
         # Content we already hold (same Message-ID under another Proton label)
-        # only needs a placement row; everything else needs the raw bytes.
-        need_raw = []
+        # only needs a placement row; everything else needs fetching — in full,
+        # or headers alone if it is older than the content window. A message
+        # with no date at all is fetched in full: unknown age is not evidence
+        # that mail is old, and guessing wrong here silently drops a body.
+        need_raw, need_headers = [], []
         for uid, h in headers.items():
-            if not ingest.record_known(db, account, mailbox, uid, h["flags"], h["message_id"]):
+            if ingest.record_known(db, account, mailbox, uid, h["flags"], h["message_id"]):
+                continue
+            if cutoff is not None and h["date"] is not None and h["date"] < cutoff:
+                need_headers.append(uid)
+            else:
                 need_raw.append(uid)
 
         chunk_stored = 0
         if need_raw:
-            raws = bridge.fetch_raw(need_raw)
-            missing_raw = set(need_raw) - {u for u, r in raws.items() if r.get("raw")}
-            if missing_raw:
-                raise RuntimeError(f"IMAP raw fetch omitted UIDs: {sorted(missing_raw)}")
+            raws = _fetch_all(bridge.fetch_raw, need_raw, "raw fetch", email)
             for uid, r in raws.items():
                 if r["raw"]:
                     ingest.store_message(db, account, mailbox, uid, r["flags"], r["raw"])
+                    chunk_stored += 1
+
+        if need_headers:
+            blocks = _fetch_all(bridge.fetch_header_block, need_headers,
+                                "header fetch", email)
+            for uid, r in blocks.items():
+                if r["raw"]:
+                    ingest.store_headers(db, account, mailbox, uid, r["flags"], r["raw"],
+                                         size_bytes=headers[uid]["size"])
                     chunk_stored += 1
 
         ingest.advance_cursor(db, mailbox, max(chunk))
@@ -174,11 +235,26 @@ def _thumb_all(db, limit_batches: int = 200) -> int:
     return total
 
 
-def index_once() -> tuple[int, int]:
-    """Drain the attachment queues once. Returns (extracted, previews)."""
+def _prune_all(db, months: int, limit_batches: int = 200) -> int:
+    """Strip content from stored mail that has slid out of the content window."""
+    cutoff = ingest.content_cutoff(months)
+    if cutoff is None:
+        return 0
+    total = 0
+    for _ in range(limit_batches):
+        n = ingest.prune_expired_content(db, cutoff)
+        db.commit()
+        if not n:
+            break
+        total += n
+    return total
+
+
+def index_once(months: int = 0) -> tuple[int, int, int]:
+    """Drain the attachment queues once. Returns (extracted, previews, pruned)."""
     db = SessionLocal()
     try:
-        return _extract_all(db), _thumb_all(db)
+        return _extract_all(db), _thumb_all(db), _prune_all(db, months)
     finally:
         db.close()
 
@@ -194,13 +270,21 @@ def run_indexer_forever(cfg: AgentConfig) -> None:
     """
     idle = 0
     log.info("indexer started", "indexer")
+    if cfg.content_window_months:
+        log.info(f"content window: {cfg.content_window_months} month(s) — older mail is "
+                 "kept as headers only", "indexer")
     while True:
         try:
-            extracted, thumbed = index_once()
-            if extracted or thumbed:
+            # The window prune rides this thread rather than the sync pass: it
+            # is database-only work over every account at once, and it has to
+            # keep happening on a mailbox where no new mail is arriving — the
+            # cutoff moves whether or not anything is being fetched.
+            extracted, thumbed, pruned = index_once(cfg.content_window_months)
+            if extracted or thumbed or pruned:
                 idle = 0
                 log.ok(f"{extracted} attachment(s) extracted, "
-                       f"{thumbed} preview(s) rendered", "indexer")
+                       f"{thumbed} preview(s) rendered, "
+                       f"{pruned} message(s) pruned to headers", "indexer")
             else:
                 # Nothing queued. Back off to the poll interval rather than
                 # spinning on an empty queue; new attachments arrive with new
@@ -266,6 +350,9 @@ def sync_once(account: AccountConfig, cfg: AgentConfig, reconcile: bool = True) 
     cursor would otherwise skip past.
     """
     started = time.monotonic()
+    # Per-account batch size wins where it is set: what one server answers
+    # comfortably, another truncates or drops the connection over.
+    batch = getattr(account, "batch_size", None) or cfg.batch_size
     bridge = Bridge(account)
     bridge.connect()
     log.info(f"connected to {account.imap_host}:{account.imap_port} "
@@ -293,6 +380,12 @@ def sync_once(account: AccountConfig, cfg: AgentConfig, reconcile: bool = True) 
         if drained:
             log.info(f"applied {drained} queued action(s)", account.email)
 
+        # Recomputed per pass, not per process: the window slides, and an agent
+        # that has been up for weeks would otherwise still be fetching against
+        # the cutoff it worked out at startup.
+        cutoff = ingest.content_cutoff(cfg.content_window_months)
+        ingest.record_content_window(db, cfg.content_window_months)
+
         folders = bridge.list_folders()
         progress = PassProgress(len(folders))
         for i, f in enumerate(folders):
@@ -305,11 +398,11 @@ def sync_once(account: AccountConfig, cfg: AgentConfig, reconcile: bool = True) 
             progress.enter_folder(f["name"], i)
             ingest.set_progress(db, account_row, progress.snapshot())
             db.commit()
-            _sync_new(db, bridge, account_row, mailbox, cfg.batch_size, progress)
+            _sync_new(db, bridge, account_row, mailbox, batch, progress, cutoff)
             # A recheck reconciles unconditionally: flags and vanished messages
             # are as much a part of "is everything still right" as the bodies.
             if reconcile or recheck_at:
-                _reconcile(db, bridge, mailbox, cfg.batch_size)
+                _reconcile(db, bridge, mailbox, batch)
 
         # LIST completed and every returned folder synced successfully, so it
         # is now safe to treat absent rows as folders removed/renamed upstream.

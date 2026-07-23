@@ -9,11 +9,14 @@ from sqlalchemy import func, or_, select, tuple_
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session as DBSession
 
+from core import ingest
 from core.database import get_db
 from .. import searchquery
 from ..deps import require_ui_auth
 from ..mail.render import sanitize_html
-from core.models import Account, Attachment, Mailbox, Message, MessageLocation, Recipient
+from core.models import (
+    Account, Attachment, Mailbox, Message, MessageLocation, Recipient, Setting,
+)
 
 router = APIRouter(prefix="/api", tags=["messages"], dependencies=[Depends(require_ui_auth)])
 
@@ -76,7 +79,7 @@ def list_messages(
 
     j = select(
         Message.id, Message.thread_id, Message.subject, Message.from_name, Message.from_addr,
-        Message.date_sent, Message.snippet, Message.has_attachments,
+        Message.date_sent, Message.snippet, Message.has_attachments, Message.content_status,
         MessageLocation.seen, MessageLocation.flagged, MessageLocation.answered,
         Message.account_id, Account.color, MessageLocation.mailbox_id, Mailbox.role,
         thread_key,
@@ -137,6 +140,9 @@ def list_messages(
                 "from_name": r.from_name, "from_addr": r.from_addr,
                 "date": r.date_sent.isoformat() if r.date_sent else None,
                 "snippet": r.snippet, "has_attachments": r.has_attachments,
+                # A row with no snippet because there is no body to take one
+                # from; the list says so rather than showing a blank line.
+                "content_status": r.content_status,
                 "seen": not rollup.get((r.account_id, r.thread_key), (not r.seen, r.flagged))[0],
                 "flagged": rollup.get((r.account_id, r.thread_key), (not r.seen, r.flagged))[1],
                 "answered": r.answered,
@@ -160,7 +166,23 @@ def _recipients(db: DBSession, message_pk: int) -> dict[str, list[dict]]:
     return out
 
 
-def _message_detail(db: DBSession, msg: Message, load_remote: bool) -> dict:
+def content_window_months(db: DBSession) -> int:
+    """The agent's content window, as it last published it. 0 = keep everything.
+
+    The app cannot read agent/config.toml — the two share nothing but the
+    database — so the agent writes the number there each pass and this reads it
+    back. Used only to explain a missing body, so an unset or unparseable value
+    is not an error: the reader just says less.
+    """
+    row = db.get(Setting, ingest.CONTENT_WINDOW_KEY)
+    try:
+        return max(0, int(row.value)) if row else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def _message_detail(db: DBSession, msg: Message, load_remote: bool,
+                    window_months: int | None = None) -> dict:
     safe_html, blocked = sanitize_html(msg.body_html, msg.id, load_remote) if msg.body_html else ("", 0)
     # Columns, not entities: selecting Attachment would load `content` — the whole
     # payload — for every attachment just to render a filename chip, and a thread
@@ -171,6 +193,9 @@ def _message_detail(db: DBSession, msg: Message, load_remote: bool) -> dict:
             Attachment.id, Attachment.filename, Attachment.content_type,
             Attachment.size_bytes, Attachment.is_inline,
             Attachment.thumb.is_not(None).label("has_thumb"),
+            # Pruning empties the payload but keeps the row, so the reader can
+            # still name what was attached — as a chip it will not offer to open.
+            Attachment.content.is_not(None).label("stored"),
         )
         .where(Attachment.message_pk == msg.id, Attachment.is_inline.is_(False))
         .order_by(Attachment.id)
@@ -188,6 +213,14 @@ def _message_detail(db: DBSession, msg: Message, load_remote: bool) -> dict:
         "body_html": safe_html, "body_text": msg.body_text,
         "remote_blocked": blocked, "images_loaded": load_remote,
         "has_attachments": msg.has_attachments,
+        # full | skipped | pruned, plus the window that explains the last two.
+        # Looked up only when there is something to explain — normal mail must
+        # not pay a settings read per message, and a thread is many messages.
+        "content_status": msg.content_status,
+        "content_window_months": (
+            (content_window_months(db) if window_months is None else window_months)
+            if msg.content_status != "full" else 0
+        ),
         "seen": any(l.seen for l in locs), "flagged": any(l.flagged for l in locs),
         "answered": any(l.answered for l in locs),
         "locations": [
@@ -196,7 +229,7 @@ def _message_detail(db: DBSession, msg: Message, load_remote: bool) -> dict:
         ],
         "attachments": [
             {"id": a.id, "filename": a.filename, "content_type": a.content_type,
-             "size": a.size_bytes, "is_inline": a.is_inline,
+             "size": a.size_bytes, "is_inline": a.is_inline, "stored": a.stored,
              "has_thumb": a.has_thumb, "viewable": _inline_safe(a.content_type)}
             for a in atts
         ],
@@ -320,7 +353,9 @@ def get_thread(
     ).scalars().all()
     if not msgs:
         raise HTTPException(status_code=404, detail="Thread not found")
-    details = [_message_detail(db, m, load_remote=images) for m in msgs]
+    # One settings read for the whole thread, not one per message in it.
+    window = content_window_months(db) if any(m.content_status != "full" for m in msgs) else 0
+    details = [_message_detail(db, m, load_remote=images, window_months=window) for m in msgs]
     pats = match_patterns(q, mode)
     if pats:
         try:

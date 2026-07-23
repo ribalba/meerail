@@ -229,6 +229,16 @@ class Message(Base):
     # Rollup of attachment text extraction: none | pending | done | error
     extract_status: Mapped[str] = mapped_column(String(16), default="none", nullable=False)
 
+    # Whether this row's content is here at all, and if not, why:
+    #   full     the body, attachments and (optionally) raw MIME are stored
+    #   skipped  older than the content window when it was first seen, so only
+    #            the headers were ever fetched
+    #   pruned   fetched in full, then stripped back to headers when it aged out
+    # The two absent states are kept apart for the operator, not the reader: the
+    # UI says the same thing for both, but "did we ever have this?" is the first
+    # question anyone asks of a mailbox with holes in it.
+    content_status: Mapped[str] = mapped_column(String(16), default="full", nullable=False)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 

@@ -7,13 +7,19 @@ ingesting process and the serving web app need no shared filesystem.
 Attachment text extraction is deferred: attachments land with
 extract_status='pending' and the agent's extraction pass fills them in, then
 rebuilds the message's search_text.
+
+Content is optional. A message can be stored as headers alone — never fetched
+(outside the content window when it was seen) or fetched and later stripped as
+the window slid past it. Message.content_status says which; see ingest_raw and
+strip_content.
 """
 
 from __future__ import annotations
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
+from ..config import get_settings
 from ..models import (
     Account,
     Attachment,
@@ -145,10 +151,66 @@ def find_message_by_message_id(db: Session, account_id: int, message_id: str) ->
     ).scalars().first()
 
 
+def _store_content(db: Session, msg: Message, parsed: ParsedEmail, raw: bytes) -> None:
+    """Fill in everything that comes from the body: text, attachments, search."""
+    msg.size_bytes = parsed.size_bytes
+    msg.snippet = parsed.snippet
+    msg.has_attachments = bool(parsed.attachments)
+    msg.body_text = parsed.body_text
+    msg.body_html = parsed.body_html
+    msg.search_text = build_search_text(parsed)
+    msg.content_status = "full"
+    # size_bytes, the body, the attachments and search_text are all derived
+    # above, so the raw copy is purely for future features — and it is the
+    # bulk of the database. settings.store_raw_mime (STORE_RAW_MIME /
+    # store_raw_mime in the agent config) leaves the column NULL instead.
+    msg.raw_mime = raw if get_settings().store_raw_mime else None
+
+    needs_extract = any(
+        should_extract(a.content_type, a.filename) and a.payload for a in parsed.attachments
+    )
+    msg.extract_status = "pending" if needs_extract else "none"
+
+    for att in parsed.attachments:
+        extractable = should_extract(att.content_type, att.filename) and bool(att.payload)
+        # Inline parts are the signature logos and tracking pixels embedded in
+        # the body; they are never listed as attachments, so a preview of one
+        # would only ever be rendering nobody looks at.
+        thumbable = (
+            should_thumb(att.content_type) and bool(att.payload) and not att.is_inline
+        )
+        db.add(
+            Attachment(
+                message_pk=msg.id,
+                filename=att.filename,
+                content_type=att.content_type,
+                size_bytes=len(att.payload),
+                content_id=att.content_id,
+                is_inline=att.is_inline,
+                content=att.payload,
+                extract_status="pending" if extractable else "skipped",
+                thumb_status="pending" if thumbable else "skipped",
+            )
+        )
+
+
 def ingest_raw(
-    db: Session, account: Account, mailbox: Mailbox, uid: int, flags: dict, raw: bytes
+    db: Session, account: Account, mailbox: Mailbox, uid: int, flags: dict, raw: bytes,
+    headers_only: bool = False, size_bytes: int | None = None,
 ) -> tuple[Message, bool]:
-    """Parse + store raw bytes. Returns (message, created_new_content)."""
+    """Parse + store raw bytes. Returns (message, created_new_content).
+
+    With ``headers_only``, ``raw`` is just the message's header block — what the
+    agent fetches for mail that falls outside the content window. The row that
+    lands carries every header (so it lists, threads and shows in search by
+    subject and correspondent) with content_status='skipped' and no body,
+    attachments or raw MIME. ``size_bytes`` then has to come from the server's
+    RFC822.SIZE, since the headers are not the message's size.
+
+    A later full fetch of a message stored that way fills the content in — that
+    is what makes widening the window plus a full recheck a way to get old mail
+    back, rather than a one-way door.
+    """
     parsed = parse_email(raw)
     msg = db.execute(
         select(Message).where(
@@ -158,7 +220,6 @@ def ingest_raw(
 
     created = msg is None
     if created:
-        needs_extract = any(should_extract(a.content_type, a.filename) and a.payload for a in parsed.attachments)
         msg = Message(
             account_id=account.id,
             message_id=parsed.message_id,
@@ -172,15 +233,13 @@ def ingest_raw(
             from_addr=parsed.from_addr,
             date_sent=parsed.date_sent,
             date_received=utcnow(),
-            size_bytes=parsed.size_bytes,
-            snippet=parsed.snippet,
-            has_attachments=bool(parsed.attachments),
-            body_text=parsed.body_text,
-            body_html=parsed.body_html,
+            # Headers only: the body is not here to be measured, so take the
+            # size the server reported. Everything else is header-derived and
+            # therefore already correct.
+            size_bytes=size_bytes if size_bytes is not None else parsed.size_bytes,
             search_text=build_search_text(parsed),
-            extract_status="pending" if needs_extract else "none",
+            content_status="skipped" if headers_only else "full",
         )
-        msg.raw_mime = raw
         db.add(msg)
         db.flush()  # assign msg.id
 
@@ -188,30 +247,41 @@ def ingest_raw(
             for name, addr in pairs:
                 db.add(Recipient(message_pk=msg.id, kind=kind, name=name, address=addr))
 
-        for att in parsed.attachments:
-            extractable = should_extract(att.content_type, att.filename) and bool(att.payload)
-            # Inline parts are the signature logos and tracking pixels embedded in
-            # the body; they are never listed as attachments, so a preview of one
-            # would only ever be rendering nobody looks at.
-            thumbable = (
-                should_thumb(att.content_type) and bool(att.payload) and not att.is_inline
-            )
-            db.add(
-                Attachment(
-                    message_pk=msg.id,
-                    filename=att.filename,
-                    content_type=att.content_type,
-                    size_bytes=len(att.payload),
-                    content_id=att.content_id,
-                    is_inline=att.is_inline,
-                    content=att.payload,
-                    extract_status="pending" if extractable else "skipped",
-                    thumb_status="pending" if thumbable else "skipped",
-                )
-            )
+        if not headers_only:
+            _store_content(db, msg, parsed, raw)
+    elif not headers_only and msg.content_status == "skipped":
+        # We have the whole thing now and only had the headers before: the
+        # window was widened and a recheck re-walked this UID. Recipients and
+        # the header fields are already right; only content was ever missing.
+        _store_content(db, msg, parsed, raw)
 
     upsert_location(db, msg.id, mailbox.id, uid, flags)
     return msg, created
+
+
+def strip_content(db: Session, msg: Message) -> None:
+    """Walk a stored message back to its headers, as the window slides past it.
+
+    Attachment *rows* stay: the filename, type and size are header-scale data
+    the reader still shows (as chips it will not offer to open), and it is the
+    payloads, previews and extracted text that are worth the disk. Both queues
+    go to 'skipped' so the indexer does not pick the emptied rows back up.
+    """
+    msg.body_text = ""
+    msg.body_html = ""
+    msg.snippet = ""
+    msg.raw_mime = None
+    msg.extract_status = "none"
+    msg.content_status = "pruned"
+    db.execute(
+        update(Attachment)
+        .where(Attachment.message_pk == msg.id)
+        .values(content=None, thumb=None, extracted_text=None,
+                extract_status="skipped", thumb_status="skipped")
+    )
+    # Before the rebuild, which re-reads the attachment text it just cleared.
+    db.flush()
+    rebuild_search_text(db, msg)
 
 
 def ingest_location_only(
