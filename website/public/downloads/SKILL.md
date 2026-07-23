@@ -35,9 +35,8 @@ Default credentials, from `.env.example`:
 These are overridden by `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB`
 in the user's `.env` — read that file first if the defaults are rejected.
 
-**If the port is published** (the stack was brought up with the
-`docker-compose.hostports.yml` overlay, which a natively-run agent needs), you
-can connect directly instead:
+The stack also publishes Postgres on the host's loopback, so you can connect
+directly instead:
 
 ```bash
 PGPASSWORD=meerail psql -h localhost -p 5432 -U meerail -d meerail -c "..."

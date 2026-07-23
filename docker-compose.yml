@@ -55,12 +55,19 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-meerail}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-meerail}
       POSTGRES_DB: ${POSTGRES_DB:-meerail}
-    # No published port: the database is reachable as `db:5432` from anything on
-    # the `meerail` network and from nowhere else — not from the host, not from
-    # the LAN. An agent running *outside* that network (natively, or in the
-    # host-network container) still needs a loopback port; that is what the
-    # docker-compose.hostports.yml overlay adds back.
     networks: [meerail]
+    ports:
+      # Reachable as `db:5432` from anything on the `meerail` network, and on the
+      # host's loopback for everything that is *not* on that network — the agent
+      # run natively next to Proton Bridge (macOS and Windows always; Linux if
+      # you prefer it to the container), the host-network container of
+      # docker-compose.agent.yml, and `make dev`. The agent owns the write path,
+      # so that is the common case rather than the exception.
+      #
+      # The 127.0.0.1 prefix is load-bearing: drop it and Docker publishes on
+      # 0.0.0.0, punching straight through the host firewall to a database with
+      # the default password.
+      - "127.0.0.1:5432:5432"
     volumes:
       # Postgres 18+ expects a single mount at /var/lib/postgresql (not .../data);
       # this layout enables in-place pg_upgrade --link on future upgrades.
@@ -82,11 +89,13 @@ services:
     # for why the stock image cannot ship them.
     image: meerail-tika
     build: ./tika
-    # Same as db: reachable as `tika:9998` on the `meerail` network only. Tika
-    # will happily extract whatever is POSTed to it by anyone who can reach it,
-    # so there is no reason to put it on the host's loopback either — see
-    # docker-compose.hostports.yml if a native agent needs it there.
     networks: [meerail]
+    ports:
+      # Same as db: `tika:9998` on the compose network, plus loopback for an
+      # agent outside it. Tika will extract whatever is POSTed to it by anyone
+      # who can reach it and has no auth of its own, so the 127.0.0.1 prefix
+      # matters here even more than it does for Postgres.
+      - "127.0.0.1:9998:9998"
     environment:
       # This image's entrypoint is `exec java -cp ... ` with no $JAVA_OPTS, so
       # that variable is silently ignored here. JAVA_TOOL_OPTIONS is read by the

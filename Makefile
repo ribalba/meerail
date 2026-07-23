@@ -5,17 +5,9 @@
 
 COMPOSE ?= docker compose
 
-# The base stack keeps Postgres and Tika on the internal `meerail` network with
-# no published ports — only the server is reachable from the host. Anything that
-# talks to them from *outside* Docker (a native agent, `make dev`) needs the
-# hostports overlay, which republishes both on 127.0.0.1.
-HOST_FILES = -f docker-compose.yml -f docker-compose.hostports.yml
-
 # The agent overlay needs the host network namespace, so it is Linux-only and
-# lives in its own file rather than the base one. Host networking puts it
-# outside the compose network too, hence the hostports overlay as well. See
-# agent/README.md.
-AGENT_FILES = $(HOST_FILES) -f docker-compose.agent.yml
+# lives in its own file rather than the base one. See agent/README.md.
+AGENT_FILES = -f docker-compose.yml -f docker-compose.agent.yml
 
 # The test stack is a separate compose project so it can never share a container,
 # network or volume with production. Ports are shifted (55432 / 18000).
@@ -25,12 +17,11 @@ TEST_MEERAIL_URL = http://127.0.0.1:18000
 TEST_TIKA_URL = http://127.0.0.1:59998
 PYTEST ?= .venv-test/bin/pytest
 
-.PHONY: help up up-hostports down logs build infra dev venv agent agent-docker agent-test agent-logs agent-service agent-service-status agent-service-stop desktop psql fmt test test-up test-down test-psql screenshots
+.PHONY: help up down logs build infra dev venv agent agent-docker agent-test agent-logs agent-service agent-service-status agent-service-stop desktop psql fmt test test-up test-down test-psql screenshots
 
 help:
 	@echo "meerail targets:"
 	@echo "  make up      - build + run the full server stack (server + postgres + tika)"
-	@echo "  make up-hostports - same, but also publish postgres/tika on 127.0.0.1 (native agent)"
 	@echo "  make down    - stop the stack"
 	@echo "  make logs    - tail server logs"
 	@echo "  make infra   - run only postgres + tika (for native server dev)"
@@ -54,12 +45,6 @@ help:
 up:
 	$(COMPOSE) up --build
 
-# Same stack with Postgres and Tika also published on 127.0.0.1. Needed when the
-# agent runs natively rather than in the compose network — which is always the
-# case on macOS and Windows.
-up-hostports:
-	$(COMPOSE) $(HOST_FILES) up --build
-
 down:
 	$(COMPOSE) down
 
@@ -67,9 +52,9 @@ logs:
 	$(COMPOSE) logs -f server
 
 # Only the backing services, so you can run the server natively with reload.
-# Uses the hostports overlay because `make dev` reaches them over loopback.
+# Both publish on 127.0.0.1, which is where `make dev` reaches them.
 infra:
-	$(COMPOSE) $(HOST_FILES) up -d db tika
+	$(COMPOSE) up -d db tika
 
 venv:
 	python3 -m venv .venv
@@ -87,8 +72,7 @@ agent:
 # and Tika on 127.0.0.1. On macOS/Windows run `make agent` instead.
 #
 # Brings up the whole stack, not just the agent: host networking only reaches
-# Postgres and Tika through the loopback ports the overlay publishes, so db and
-# tika have to be (re)created with those files in play.
+# Postgres and Tika through their loopback ports, so they have to be running.
 agent-docker:
 	$(COMPOSE) $(AGENT_FILES) up -d --build
 

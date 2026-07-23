@@ -14,19 +14,16 @@ agent isn't running, nothing new arrives.
    Bridge username/password** (Bridge app → your account → *Mailbox details*).
    These are Bridge-specific, not your Proton password.
 
-2. Make sure the backing services are up, **with the host-ports overlay** — a
-   natively-run agent reaches Postgres and Tika over loopback, and the base
-   stack keeps them on Docker's internal network with nothing published:
+2. Make sure the backing services are up:
 
    ```bash
-   docker compose -f docker-compose.yml -f docker-compose.hostports.yml up -d
-   # or, in the repo root: make up-hostports
+   docker compose up -d
+   # or, in the repo root: make up
    ```
 
    That puts Postgres on `127.0.0.1:5432` and Tika on `127.0.0.1:9998` — the
-   addresses `config.example.toml` already points at. Plain `docker compose up
-   -d` publishes only the server on 8000, and the agent's `--test` will report
-   both as "connection refused".
+   addresses `config.example.toml` already points at, and the ones a
+   natively-run agent needs, since it is not on the compose network.
 
 3. Configure and run:
 
@@ -122,8 +119,7 @@ only Linux lets a container share the host's loopback.
 ### Linux — Docker, host network
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.hostports.yml \
-               -f docker-compose.agent.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.agent.yml up -d
 # or: make agent-docker
 ```
 
@@ -132,15 +128,15 @@ docker compose -f docker-compose.yml -f docker-compose.hostports.yml \
 reachable and `config.toml` needs no changes. `restart: unless-stopped` brings
 the agent back after a reboot, which is the thing `run.sh` won't do for you.
 
-The host namespace is also why `docker-compose.hostports.yml` belongs on that
-line. Sharing the host's network means *not* being on the `meerail` network, so
-`db` and `tika` do not resolve and their ports are not reachable; the overlay
-republishes both on 127.0.0.1, where the container is already looking. Bridge is
+The host namespace is also why the base file publishes `db` and `tika` on
+loopback. Sharing the host's network means *not* being on the `meerail` network,
+so those names do not resolve and their container ports are not reachable;
+`127.0.0.1:5432` and `127.0.0.1:9998` are where this container looks. Bridge is
 what forces the whole arrangement — it listens on loopback only, so an agent
 sitting on the compose network could not reach it at any address. Syncing a
 remote mailbox instead (Gmail, Fastmail, plain IMAP)? Then none of this applies:
-put the agent on `networks: [meerail]`, point `database_url`/`tika_url` at `db`
-and `tika`, and drop the overlay.
+put the agent on `networks: [meerail]` and point `database_url`/`tika_url` at
+`db` and `tika`.
 
 `config.toml` must exist before the first `up` — it is bind-mounted read-only,
 and Docker silently creates a *directory* in its place if the file is missing.
@@ -149,8 +145,8 @@ It is never copied into the image; credentials stay on the host.
 The one-shot modes work the same way, as `run` instead of `up`:
 
 ```bash
-# All three -f flags every time; export it once to keep the lines short.
-export COMPOSE_FILE=docker-compose.yml:docker-compose.hostports.yml:docker-compose.agent.yml
+# Both -f flags every time; export it once to keep the lines short.
+export COMPOSE_FILE=docker-compose.yml:docker-compose.agent.yml
 
 docker compose run --rm agent --test               # or: make agent-test
 docker compose run --rm agent --once
