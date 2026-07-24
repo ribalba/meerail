@@ -60,7 +60,7 @@ services:
   # COOLIFY.md § "Log Bridge in".
   # ---------------------------------------------------------------------------
   bridge:
-    image: shenxn/protonmail-bridge:build
+    image: dancwilliams/protonmail-bridge
     volumes:
       # /root holds the Bridge session, the pass/GPG store and the cached
       # message keys. Named explicitly so the `init` command in COOLIFY.md can
