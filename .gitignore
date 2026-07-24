@@ -220,4 +220,8 @@ data/
 
 # Local Proton Bridge credentials (copy agent/config.example.toml to create it).
 /agent/config.toml
+# Written on the Coolify host from the `content:` block in
+# docker-compose.coolify.yml, inside the deployment checkout. Holds a Bridge
+# password, so it must never come back the other way.
+/coolify/agent-config.toml
 electron/.DS_Store

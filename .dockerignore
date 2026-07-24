@@ -8,6 +8,9 @@ electron
 # platform, ~190 MB) and its credentials, which are bind-mounted at runtime.
 agent/.venv
 agent/config.toml
+# Same, for the Coolify deployment: Coolify writes this into the checkout it
+# then builds from, so it would otherwise land in the image layer.
+coolify/agent-config.toml
 data
 *.md
 .env

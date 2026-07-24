@@ -1,0 +1,297 @@
+# meerail on Coolify — the whole stack in one file, Proton Bridge included.
+#
+# Point a Coolify "Docker Compose" resource at this repository and set the
+# compose path to `docker-compose.coolify.yml`. COOLIFY.md walks the whole
+# deploy, including the one interactive step Coolify cannot do for you (logging
+# Bridge into your Proton account).
+#
+# How this differs from docker-compose.yml, and why:
+#
+#   * Bridge runs here, in a container, instead of on your laptop. That is the
+#     whole point of this file and it is also the trade it makes: the design in
+#     the README keeps mail credentials on a machine you physically own, and a
+#     server you rent is not that. Your Proton password never leaves the Bridge
+#     container either way, but the Bridge session and the Bridge-issued
+#     IMAP/SMTP password now live on the host, and whoever controls the host
+#     controls your mail. Deploy this only to a machine you trust like a laptop.
+#
+#   * No `network_mode: host` and no loopback port publishing. Bridge only
+#     accepts connections that appear to come from 127.0.0.1, which on the
+#     laptop layout forces the agent into the host's network namespace. The
+#     Bridge image solves it differently: socat listens on 25/143 inside the
+#     container and forwards to Bridge's own 127.0.0.1:1025/1143, so the
+#     connection is loopback by the time Bridge sees it. That frees every
+#     service to sit on the ordinary compose network and address the others by
+#     name — `bridge`, `db`, `tika`.
+#
+#   * No `networks:` block. Coolify creates the project network itself and
+#     documents multi-network compose stacks as needing service names suffixed
+#     with the resource UUID. Service-name DNS works the same on its network.
+#
+#   * Nothing is published to the host. `server` is reached through Coolify's
+#     Traefik, which also terminates TLS — set the domain on the `server`
+#     service in the Coolify UI. `db`, `tika` and `bridge` have no host-facing
+#     address at all now, which they very much want: the Postgres password is
+#     whatever you set, Tika will extract anything anyone POSTs it, and Bridge
+#     hands out mail to anyone who reaches 143.
+#
+#   * Memory limits are sized for an 8 GB VPS rather than a 32 GB workstation.
+#     They are ceilings, not reservations. See COOLIFY.md if yours is smaller.
+#
+#   * SERVER_PASSWORD is required, not optional. This one is on the internet.
+#
+# Plain `docker compose` REJECTS this file: the agent's config mount uses
+# Coolify's `content:` extension, which is not a Compose key. Coolify strips it
+# and writes the file before Docker sees any of it, which is also what stops
+# Docker from creating a *directory* at that path on a first deploy. So do not
+# expect `docker compose -f docker-compose.coolify.yml config` to pass — this
+# file is for Coolify, and docker-compose.yml is what runs locally.
+
+services:
+  # ---------------------------------------------------------------------------
+  # Proton Mail Bridge. Unofficial image; the `build` tag is the one built from
+  # source and the only one that is multi-arch (amd64/arm64) — the default
+  # `latest` repacks the amd64-only .deb and its own README calls it legacy.
+  #
+  # This container is stateful in a way nothing else here is: the Proton login,
+  # its GPG keyring and the Bridge-issued IMAP/SMTP password all live in the
+  # volume below, and they get there through a one-time interactive `init` run
+  # you do over SSH. Lose the volume and you re-login and re-issue. See
+  # COOLIFY.md § "Log Bridge in".
+  # ---------------------------------------------------------------------------
+  bridge:
+    image: shenxn/protonmail-bridge:build
+    volumes:
+      # /root holds the Bridge session, the pass/GPG store and the cached
+      # message keys. Named explicitly so the `init` command in COOLIFY.md can
+      # name it too, rather than hunting for a UUID-prefixed one.
+      - bridge-data:/root
+    # Bridge re-authenticates against Proton on start and will keep retrying;
+    # restarting it is the standard fix for a session that has gone stale.
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+  db:
+    image: postgres:18
+    # Scaled down from docker-compose.yml, which assumes a ~32 GB host. These
+    # numbers pair with the 3 GB limit below: shared_buffers ~25% of it,
+    # effective_cache_size a guess at what the host page-caches on top.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=768MB
+      - -c
+      - effective_cache_size=2GB
+      - -c
+      - work_mem=32MB
+      - -c
+      - maintenance_work_mem=512MB
+      # Bulk ingest writes far more WAL than the 1GB default wants to check
+      # point through; this is the setting that matters most during backfill.
+      - -c
+      - max_wal_size=4GB
+      - -c
+      - min_wal_size=1GB
+      - -c
+      - checkpoint_completion_target=0.9
+      - -c
+      - wal_compression=lz4
+      # raw_mime, body_html and search_text all live in TOAST, and lz4 is
+      # several times faster than the pglz default at a similar ratio.
+      - -c
+      - default_toast_compression=lz4
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - effective_io_concurrency=200
+      - -c
+      - max_parallel_workers_per_gather=2
+      - -c
+      - max_parallel_maintenance_workers=2
+    # Docker's default 64MB /dev/shm silently caps parallel query workers.
+    shm_size: 256mb
+    deploy:
+      resources:
+        limits:
+          memory: 3g
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-meerail}
+      # No default on purpose. `meerail` is the documented password of the
+      # laptop stack and this database is one container-escape from the public
+      # internet; `:?` makes Coolify mark the variable required in the UI and
+      # refuses the deploy while it is empty.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set a Postgres password in Coolify}
+      POSTGRES_DB: ${POSTGRES_DB:-meerail}
+    volumes:
+      # Postgres 18+ wants the mount at /var/lib/postgresql, not .../data; this
+      # layout is what allows an in-place pg_upgrade --link later.
+      - pg-data:/var/lib/postgresql
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-meerail} -d ${POSTGRES_DB:-meerail}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  tika:
+    # apache/tika:latest-full plus the JPEG2000 ImageIO jars — see tika/Dockerfile
+    # for why the stock image cannot ship them. `-full` bundles Tesseract, which
+    # is what OCRs scanned PDFs and image attachments, and is a multi-GB pull.
+    # Swap the build for `image: apache/tika:latest` to skip OCR and shrink it.
+    image: meerail-tika
+    build: ./tika
+    environment:
+      # This image's entrypoint execs java directly with no $JAVA_OPTS, so that
+      # variable is silently ignored; JAVA_TOOL_OPTIONS is read by the JVM.
+      # Without a heap cap the JVM either sizes itself off the host or gets
+      # OOM-killed at the cgroup ceiling instead of collecting.
+      JAVA_TOOL_OPTIONS: "-XX:MaxRAMPercentage=60"
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+    restart: unless-stopped
+
+  server:
+    build: .
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    depends_on:
+      db:
+        condition: service_healthy
+    # `expose`, not `ports`. Coolify's Traefik reaches the container over the
+    # project network and terminates TLS in front of it; publishing on the host
+    # would put an extra unencrypted door next to the one it manages.
+    #
+    # Set the domain on this service in the Coolify UI (Service → Domains →
+    # `https://mail.example.com:8000`). Coolify writes the Traefik labels.
+    expose:
+      - "8000"
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-meerail}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-meerail}
+      # Coolify generates this once, stores it, and reuses it on every redeploy.
+      # It signs session cookies, so changing it logs every browser out.
+      SECRET_KEY: ${SERVICE_PASSWORD_64_MEERAIL}
+      DATA_DIR: /data
+      # Required here, unlike the laptop stack. An empty SERVER_PASSWORD means
+      # no auth, which is right for localhost and wrong for a public hostname.
+      SERVER_PASSWORD: ${SERVER_PASSWORD:?set a UI password in Coolify}
+      SESSION_MAX_AGE_DAYS: ${SESSION_MAX_AGE_DAYS:-30}
+      DEFAULT_SEARCH_YEARS: ${DEFAULT_SEARCH_YEARS:-0}
+      CONTACTS_SCAN_YEARS: ${CONTACTS_SCAN_YEARS:-1}
+    volumes:
+      # Staging for outgoing attachments only; mail bytes live in Postgres.
+      - mail-data:/data
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  agent:
+    build:
+      context: .
+      dockerfile: agent/Dockerfile
+    # python is PID 1 and installs no SIGTERM handler, so a signal with a
+    # default action is ignored; tini forwards it and stops take a second
+    # instead of waiting out the 10s kill timer on every redeploy.
+    init: true
+    depends_on:
+      db:
+        condition: service_healthy
+      tika:
+        condition: service_started
+      bridge:
+        condition: service_started
+    volumes:
+      # Coolify writes this file from the `content:` block on first deploy and
+      # then lets you edit it under the resource's Storages tab — which is where
+      # you put the real Bridge password, NOT here, where it would be committed.
+      #
+      # The agent never writes it, hence read_only. Note that Coolify creates it
+      # world-readable; the 0600 check in preflight.py only runs under `--test`,
+      # so it warns rather than blocks, but the file does hold a mail password
+      # in plaintext on the host either way.
+      - type: bind
+        source: ./coolify/agent-config.toml
+        target: /app/agent/config.toml
+        read_only: true
+        content: |
+          # Edit this in Coolify: resource → Storages → this file. The Bridge
+          # username and password below are NOT your Proton credentials — they
+          # are issued by Bridge and printed by `info` during the login step in
+          # COOLIFY.md. Redeploy the agent after changing anything here.
+
+          # Service names on Coolify's project network, not loopback: this agent
+          # is an ordinary container here, not one sharing the host's namespace.
+          # Keep the password in step with POSTGRES_PASSWORD in the UI.
+          database_url = "postgresql+psycopg://meerail:CHANGE-ME-SAME-AS-POSTGRES_PASSWORD@db:5432/meerail"
+          tika_url     = "http://tika:9998"
+
+          poll_interval      = 30
+          reconcile_interval = 900
+          # 50, not the 200 the laptop stack uses. The memory high-water mark of
+          # a pass is one batch of complete raw MIME messages held at once, with
+          # no cap on how large any of them is, and this container has 2 GB.
+          # Lowering it cuts the peak roughly linearly for a few more round trips.
+          batch_size = 50
+
+          # Roughly half the database is raw MIME that nothing reads yet. On a
+          # VPS disk that is usually the first thing to give up.
+          store_raw_mime = true
+
+          # 0 keeps every message body forever. Set e.g. 24 to keep only the last
+          # two years of content — older mail stays listed, threaded and
+          # searchable by subject and correspondent, but has no body to open, and
+          # already-stored mail is stripped back as the window slides past it.
+          content_window_months = 12
+
+          [[account]]
+          email         = "you@proton.me"
+          # socat inside the Bridge container listens on 25/143 and forwards to
+          # Bridge's own 127.0.0.1:1025/1143, so these are the plain ports.
+          imap_host     = "bridge"
+          imap_port     = 143
+          imap_security = "starttls"
+          smtp_host     = "bridge"
+          smtp_port     = 25
+          smtp_security = "starttls"
+          username      = "you@proton.me"
+          password      = "BRIDGE-PASSWORD-FROM-THE-INFO-COMMAND"
+          # Bridge serves a self-signed certificate issued for 127.0.0.1, and we
+          # now reach it as `bridge` — so neither the chain nor the hostname
+          # would verify. The hop is container-to-container on Coolify's own
+          # bridge network and never leaves the host.
+          verify_cert   = false
+          imap_connect_timeout = 10
+          imap_read_timeout    = 60
+          # addresses = ["alias@proton.me", "you@customdomain.com"]
+    environment:
+      # config.toml wins over both of these where it sets the key, and the file
+      # above does set both — they are here so the UI can still override an
+      # agent whose config predates them.
+      STORE_RAW_MIME: ${STORE_RAW_MIME:-false}
+      CONTENT_WINDOW_MONTHS: ${CONTENT_WINDOW_MONTHS:-0}
+    deploy:
+      resources:
+        limits:
+          # Pairs with batch_size = 50 above. Raise batch_size and this has to
+          # rise with it; the peak is a whole batch of raw messages in memory.
+          memory: 2g
+    # Cursors live in the database, so the agent is stateless and a restart
+    # resumes exactly where it left off.
+    restart: unless-stopped
+
+volumes:
+  pg-data:
+  mail-data:
+  bridge-data:

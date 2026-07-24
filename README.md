@@ -264,6 +264,12 @@ Nothing here puts the server behind TLS or asks for a password by default, which
 for a localhost app and wrong the moment 8000 is reachable from elsewhere — set
 `SERVER_PASSWORD` and put a TLS terminator in front if you expose it.
 
+If that terminator is Coolify, [`COOLIFY.md`](COOLIFY.md) and
+[`docker-compose.coolify.yml`](docker-compose.coolify.yml) deploy the whole stack —
+Bridge included, in a container — as one resource, with Traefik in front and nothing
+else published. It moves your mail credentials onto the server, which is the one thing
+the layout above is built to avoid; that file opens by saying so.
+
 ## Configuration
 
 Two files, and neither is committed — both are gitignored so credentials cannot be pushed
