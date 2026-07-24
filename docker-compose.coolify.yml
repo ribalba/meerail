@@ -49,18 +49,26 @@
 
 services:
   # ---------------------------------------------------------------------------
-  # Proton Mail Bridge. Unofficial image; the `build` tag is the one built from
-  # source and the only one that is multi-arch (amd64/arm64) — the default
-  # `latest` repacks the amd64-only .deb and its own README calls it legacy.
+  # Proton Mail Bridge. Unofficial image — a maintained fork of shenxn's, built
+  # from Bridge's source and multi-arch (amd64/arm64/riscv64), where the
+  # original's default tag repacks the amd64-only .deb.
   #
   # This container is stateful in a way nothing else here is: the Proton login,
   # its GPG keyring and the Bridge-issued IMAP/SMTP password all live in the
   # volume below, and they get there through a one-time interactive `init` run
   # you do over SSH. Lose the volume and you re-login and re-issue. See
   # COOLIFY.md § "Log Bridge in".
+  #
+  # Until that init has run, this container crash-loops: Bridge stores its vault
+  # key in a `pass` store under /root, finds none, and exits — which the restart
+  # policy then repeats. `pass not initialized` in the log means the init has not
+  # happened *against this volume*, which is a different thing from not happening
+  # at all. COOLIFY.md § "Troubleshooting Bridge" has the whole failure mode.
   # ---------------------------------------------------------------------------
   bridge:
-    image: dancwilliams/protonmail-bridge
+    # Pin this rather than tracking `latest`: an unattended Bridge upgrade is an
+    # unattended change to the thing holding your mail session.
+    image: dancwilliams/protonmail-bridge:v3.25.0
     volumes:
       # /root holds the Bridge session, the pass/GPG store and the cached
       # message keys. Named explicitly so the `init` command in COOLIFY.md can
@@ -231,11 +239,16 @@ services:
           # are issued by Bridge and printed by `info` during the login step in
           # COOLIFY.md. Redeploy the agent after changing anything here.
 
-          # Service names on Coolify's project network, not loopback: this agent
-          # is an ordinary container here, not one sharing the host's namespace.
-          # Keep the password in step with POSTGRES_PASSWORD in the UI.
-          database_url = "postgresql+psycopg://meerail:CHANGE-ME-SAME-AS-POSTGRES_PASSWORD@db:5432/meerail"
-          tika_url     = "http://tika:9998"
+          # database_url and tika_url are deliberately NOT set here — the
+          # environment block below supplies both, and load_config()'s
+          # os.environ.setdefault means an environment value wins over this file.
+          # That keeps the Postgres password in exactly one place (Coolify's
+          # POSTGRES_PASSWORD) instead of also being hand-copied into a file that
+          # then drifts out of step with it, which shows up as
+          # `password authentication failed for user "meerail"` in the db log.
+          #
+          # Setting either of them here would take this file back over, since
+          # config.toml wins wherever it says anything.
 
           poll_interval      = 30
           reconcile_interval = 900
@@ -276,6 +289,18 @@ services:
           imap_read_timeout    = 60
           # addresses = ["alias@proton.me", "you@customdomain.com"]
     environment:
+      # The single source of truth for where the agent writes, and the reason
+      # config.toml above sets neither. core.config reads both of these straight
+      # from the environment, and agent/config.py only *setdefault*s the file's
+      # values into it — so an environment value set here wins, and the Postgres
+      # password lives in one place rather than two that can drift apart.
+      #
+      # If POSTGRES_PASSWORD contains any of : / ? # [ ] @ it must be
+      # percent-encoded here (and in `server` below), because this is a URL and
+      # those characters are how a URL is parsed. Sticking to letters, digits and
+      # - _ . ~ sidesteps the whole question.
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-meerail}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-meerail}
+      TIKA_URL: http://tika:9998
       # config.toml wins over both of these where it sets the key, and the file
       # above does set both — they are here so the UI can still override an
       # agent whose config predates them.

@@ -88,16 +88,27 @@ cannot authenticate are the expected state until step 6.
 ## 5. Log Bridge in
 
 The one step Coolify cannot do. Bridge's login is an interactive CLI session with a
-2FA prompt, so it happens over SSH, against the same volume the running container
-uses.
+2FA prompt, so it happens over SSH — and it must run against **the same volume the
+`bridge` container has mounted**, which is the part that usually goes wrong. Coolify
+prefixes volume names with the resource UUID, and the upstream image's README uses a
+volume called `protonmail`, so it is easy to initialise one volume and run another.
+
+Read the name off the container rather than guessing it:
 
 ```bash
 ssh root@your-coolify-host
 
-# Coolify prefixes volume names with the resource UUID.
-docker volume ls | grep bridge-data
+docker ps -a --filter name=bridge --format '{{.Names}}\t{{.Status}}'
+docker inspect <bridge-container> \
+  --format '{{range .Mounts}}{{.Name}} -> {{.Destination}}{{println}}{{end}}'
+```
 
-docker run --rm -it -v <that-volume-name>:/root shenxn/protonmail-bridge:build init
+Stop the container first — Bridge holds an exclusive lock on the vault, and a
+crash-looping one will fight the init:
+
+```bash
+docker stop <bridge-container>
+docker run --rm -it -v <that-volume-name>:/root dancwilliams/protonmail-bridge init
 ```
 
 That entrypoint generates the GPG key, initialises the `pass` store and drops you
@@ -114,8 +125,16 @@ and are not your Proton password — they are what goes into the agent's config 
 the next step. The ports it reports (1143/1025) are Bridge's own; the container's
 socat republishes them as 143 and 25, which is what the agent connects to.
 
-Restart the `bridge` service in Coolify afterwards so the running container picks
-up the now-populated volume.
+Confirm the store landed in the volume before starting anything back up — this is
+the check that distinguishes "logged in" from "logged into the wrong volume":
+
+```bash
+docker run --rm --entrypoint bash -v <that-volume-name>:/root \
+  dancwilliams/protonmail-bridge -c 'ls /root/.password-store /root/.gnupg'
+```
+
+Then start the `bridge` service again in Coolify. Its log should reach
+`Listening on 127.0.0.1:1143` with no keychain errors.
 
 ## 6. Fill in the agent config
 
@@ -124,19 +143,24 @@ placeholder body, so after the first deploy it appears under the resource's
 **Storages** tab. Edit it there — not in the repository, where the password would
 be committed.
 
-Three things to change:
+Only two things to change, both from what `info` printed:
 
-- `database_url` — replace `CHANGE-ME-SAME-AS-POSTGRES_PASSWORD` with the
-  `POSTGRES_PASSWORD` you set in step 2. (Keep the rest: `db:5432` is the service
-  name on Coolify's project network.)
-- `email` / `username` — your address and the Bridge username from `info`.
-- `password` — the Bridge password from `info`.
+- `email` / `username` — your address and the Bridge username.
+- `password` — the Bridge password.
 
-Everything else is already pointed at the right places: `imap_host = "bridge"` on
-port 143, `smtp_host = "bridge"` on port 25, `tika_url = "http://tika:9998"`, and
-`verify_cert = false` because Bridge's self-signed certificate is issued for
-127.0.0.1 while we reach it as `bridge`. That hop is container-to-container on the
-host's own bridge network and never touches the wire.
+Everything else already points at the right places: `imap_host = "bridge"` on port
+143, `smtp_host = "bridge"` on port 25, and `verify_cert = false` because Bridge's
+self-signed certificate is issued for 127.0.0.1 while we reach it as `bridge` — a
+hop that is container-to-container on the host's own bridge network and never
+touches the wire.
+
+Note what is *absent* from that file: `database_url` and `tika_url`. The compose
+file passes both as environment variables instead, and `agent/config.py` only
+`setdefault`s the file's values into the environment, so an environment value wins.
+That is deliberate — it keeps the Postgres password in one place (Coolify's
+`POSTGRES_PASSWORD`) rather than also hand-copied into a file that then drifts. Add
+either key back to `config.toml` and it takes precedence again, which is the usual
+way this ends up broken.
 
 Redeploy the agent. Watch its logs: it creates the schema, backfills, and the
 account appears in the UI on its own after the first successful sync.
@@ -168,6 +192,100 @@ Disk is the other axis: `content_window_months = 24` in `config.toml` keeps only
 last two years of message *content*. Older mail stays listed, threaded and
 searchable by subject and correspondent, and the window slides — already-stored mail
 is stripped back to headers as it passes out of it. Nothing is deleted from Proton.
+
+## Troubleshooting Bridge
+
+### `pass not initialized` / `Could not load/create vault key`
+
+```
+WARN Failed to add test credentials to keychain  error="failed to open dbus connection: exec: \"dbus-launch\": executable file not found in $PATH"
+WARN Failed to add test credentials to keychain  error="pass not initialized: exit status 1: Error: password store is empty. Try \"pass init\"."
+ERRO Could not load/create vault key             error="could not create keychain: no keychain"
+     Proton Mail Bridge is not able to detect a supported password manager
+```
+
+Bridge has no keychain to store its vault key in, so it exits, and
+`restart: unless-stopped` loops it. It means **step 5 never ran against this
+volume** — either it was skipped, or `init` initialised a different volume than the
+one the container mounts (`protonmail` from the upstream README instead of Coolify's
+UUID-prefixed `bridge-data` is the usual mix-up).
+
+Only the third line matters. The `dbus-launch` one is Bridge trying the
+secret-service backend first and falling back to `pass`, which is the intended path
+in a container; the `unleash_startup_flags.json` one is a cold cache on first start.
+Both are noise even on a working Bridge.
+
+Fix: run step 5 against the volume name you read off the container with
+`docker inspect`, then verify `/root/.password-store` exists before restarting.
+
+If `init` itself fails partway — `set -ex` in the entrypoint aborts it if
+`gpg --generate-key` finds a half-written keyring from an earlier attempt — clear
+the two directories and start over. This throws away the Bridge login only; nothing
+in Postgres is touched:
+
+```bash
+docker run --rm --entrypoint bash -v <volume>:/root \
+  dancwilliams/protonmail-bridge -c 'rm -rf /root/.gnupg /root/.password-store'
+```
+
+## Troubleshooting Postgres
+
+### `password authentication failed for user "meerail"`
+
+```
+FATAL:  password authentication failed for user "meerail"
+DETAIL: Connection matched file ".../pg_hba.conf" line 128: "host all all all scram-sha-256"
+```
+
+Look one line further up in the `db` log for this:
+
+```
+PostgreSQL Database directory appears to contain a database; Skipping initialization
+```
+
+`POSTGRES_PASSWORD` is only ever applied by `initdb`, on the very first start
+against an empty volume. Once `pg-data` exists, changing that variable in Coolify
+changes what the *clients* send and nothing about what the server expects. A
+password you edited after the first deploy is therefore ignored by the database and
+obeyed by everything connecting to it.
+
+Which side is wrong is worth establishing before changing anything. Test the
+password the way a client does — over TCP, so it goes through the `scram-sha-256`
+rule rather than the container's `local ... trust` one:
+
+```bash
+docker exec -e PGPASSWORD='<what Coolify has>' <db-container> \
+  psql -h 127.0.0.1 -U meerail -d meerail -c 'select 1'
+```
+
+If that fails, the database holds an older password. Set it to the current one —
+no dump, no data loss, and the local socket is `trust` so it needs no password:
+
+```bash
+docker exec -it <db-container> \
+  psql -U meerail -d meerail -c "ALTER USER meerail WITH PASSWORD '<what Coolify has>';"
+```
+
+If it succeeds and only the *agent* is failing, its `config.toml` is overriding the
+environment — see step 6. Delete any `database_url` line from the Storages file and
+redeploy.
+
+Third possibility, if both look right: the password contains a URL metacharacter.
+`DATABASE_URL` is a URL, so `@`, `:`, `/`, `?`, `#`, `[` and `]` inside the password
+are parsed as structure — an `@` in particular silently truncates the host. Either
+percent-encode it in the compose file or use a password of letters, digits and
+`- _ . ~` only.
+
+### The agent logs authentication failures
+
+Expected between the first deploy and the end of step 6. The agent restarts on a
+backoff and picks up on its own once Bridge is logged in and the config has the real
+Bridge password — no redeploy needed beyond the one that reloads `config.toml`.
+
+A crash-looping `bridge` does **not** restart the rest of the stack: the agent's
+`depends_on` uses `condition: service_started`, which is satisfied once and not
+re-evaluated. What you see in Coolify is the resource reported unhealthy because one
+container is looping.
 
 ## Operating it
 
