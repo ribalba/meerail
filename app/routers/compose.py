@@ -218,7 +218,7 @@ def reply_context(message_id: int, mode: str = "reply", db: DBSession = Depends(
         return {
             "account_id": msg.account_id, "from_address": from_address, "to": [], "cc": [],
             "subject": ("" if normalize_subject(base_subj).startswith("fwd") else "Fwd: ") + base_subj,
-            "body_text": f"\n\n---------- Forwarded message ----------\nFrom: {msg.from_name or msg.from_addr}"
+            "body_text": f"\n\n---------- Forwarded message ----------\nFrom: {_format_sender(msg)}"
                          f"\nSubject: {base_subj}\n\n{msg.body_text or html_to_text(msg.body_html)}",
             "in_reply_to": None, "references": [],
         }
@@ -242,9 +242,16 @@ def reply_context(message_id: int, mode: str = "reply", db: DBSession = Depends(
     }
 
 
+def _format_sender(msg: Message) -> str:
+    """"Name <addr>" when the sender has a display name, else the bare address."""
+    if msg.from_name and msg.from_addr:
+        return f"{msg.from_name} <{msg.from_addr}>"
+    return msg.from_name or msg.from_addr
+
+
 def _quote(msg: Message) -> str:
     when = msg.date_sent.strftime("%b %d, %Y at %H:%M") if msg.date_sent else ""
-    who = msg.from_name or msg.from_addr
+    who = _format_sender(msg)
     body = msg.body_text or html_to_text(msg.body_html)
     quoted = "\n".join(("> " + ln).rstrip() for ln in body.splitlines())
     return f"On {when}, {who} wrote:\n{quoted}"
