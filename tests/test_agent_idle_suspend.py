@@ -13,6 +13,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agent"))
 import imap as agent_imap  # noqa: E402
+from config import AccountConfig  # noqa: E402
 from imap import Bridge, Suspended, _SUSPEND_GAP, _IDLE_SLICE  # noqa: E402
 
 
@@ -36,7 +37,9 @@ class FakeClient:
 
 
 def _bridge(client):
-    b = Bridge.__new__(Bridge)   # skip __init__: no real AccountConfig needed
+    # A real Bridge around a fake client: the IDLE calls run under the stall
+    # watchdog now, and its deadlines come off the account's timeouts.
+    b = Bridge(AccountConfig(email="probe@example.com"))
     b.client = client
     return b
 

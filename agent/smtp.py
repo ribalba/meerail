@@ -10,13 +10,21 @@ from config import AccountConfig
 
 
 def connect(account: AccountConfig, timeout: float | None = None) -> smtplib.SMTP:
-    """Open an authenticated SMTP session. Caller is responsible for quit()."""
+    """Open an authenticated SMTP session. Caller is responsible for quit().
+
+    ``timeout`` defaults to the account's ``smtp_timeout`` rather than to
+    smtplib's default, which is no timeout at all: a socket built that way is
+    blocking, and a blocking socket against a server that accepts the connection
+    and then says nothing parks the caller forever. That caller is the sync
+    thread — send is drained at the top of every pass — so the account stops
+    syncing entirely, with no error, until the process is restarted.
+    """
     ctx = ssl.create_default_context()
     if not account.verify_cert:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
 
-    kwargs = {"timeout": timeout} if timeout is not None else {}
+    kwargs = {"timeout": timeout if timeout is not None else account.smtp_timeout}
     if account.smtp_security == "ssl":
         server = smtplib.SMTP_SSL(account.smtp_host, account.smtp_port, context=ctx, **kwargs)
     else:

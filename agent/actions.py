@@ -19,7 +19,10 @@ MAX_ACTION_ATTEMPTS = 5
 def apply_action(db, bridge, account, action: PendingAction) -> None:
     t = action.type
     p = action.payload or {}
-    c = bridge.client
+    # Not bridge.client: every command here has to sit under the same stall
+    # watchdog as the fetch path, or a wedged write-back stops the account
+    # syncing with nothing logged. See Bridge.ops.
+    c = bridge.ops()
 
     if t == "setflags":
         c.select_folder(p["folder"])          # readwrite

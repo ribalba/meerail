@@ -47,6 +47,11 @@ class AccountConfig:
     # Bridge pausing mid-fetch while it pulls and decrypts a large message.
     imap_connect_timeout: int = 10
     imap_read_timeout: int = 60
+    # The same guarantee for the send path. smtplib's own default is no timeout,
+    # which builds a blocking socket; the send drain runs on the sync thread, so
+    # one silent SMTP server would stop the account syncing at all. See
+    # smtp.connect.
+    smtp_timeout: int = 60
     # UIDs per fetch/ingest batch for this account, overriding the global
     # batch_size. None means "use the global". Servers differ in how large an
     # ask they will actually answer: Gmail meets a big BODY.PEEK[] fetch with a
