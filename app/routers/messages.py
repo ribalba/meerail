@@ -216,8 +216,10 @@ def _message_detail(db: DBSession, msg: Message, load_remote: bool,
         # here carries no text/plain part at all, and that mail is exactly the
         # mail whose layout misbehaves — so fall back to flattening the HTML
         # rather than withholding the escape hatch. Flattened from the sanitized
-        # copy, so nothing nh3 stripped can come back as text.
-        "body_plain": msg.body_text or html_to_text(safe_html),
+        # copy, so nothing nh3 stripped can come back as text. Link addresses
+        # are spelled out: dropping them would leave "click here" pointing at
+        # nothing, and reading where a link goes is half of why you switch.
+        "body_plain": msg.body_text or html_to_text(safe_html, links=True),
         "remote_blocked": blocked, "images_loaded": load_remote,
         "has_attachments": msg.has_attachments,
         # full | skipped | pruned, plus the window that explains the last two.

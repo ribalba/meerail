@@ -29,6 +29,21 @@ App.markdown = (function () {
     return /^(https?:|mailto:)/i.test(u) ? u : "#";
   }
 
+  // A link's address, written out after its text.
+  //
+  // The reader is the only place a plain-text mail hides where a link goes:
+  // anyone opening the same message in another client reads the URL, and so
+  // does the flattened view of an HTML mail. Hiding it here is what makes
+  // "click here" unjudgeable. Skipped when the text already is the address,
+  // which is most links — repeating it would be noise.
+  const bareUrl = (s) => String(s).replace(/^(?:https?:\/\/|mailto:)?(?:www\.)?/i, "")
+    .replace(/\/+$/, "").toLowerCase();
+
+  function hrefTag(text, url) {
+    if (safeUrl(url) === "#" || bareUrl(text.trim()) === bareUrl(url)) return "";
+    return ` <span class="md-href">&lt;${esc(url)}&gt;</span>`;
+  }
+
   function wrap(tag, delim, inner, keep) {
     return mark(delim, keep) + `<${tag}>` + inlineHtml(inner, keep) + `</${tag}>` + mark(delim, keep);
   }
@@ -48,7 +63,8 @@ App.markdown = (function () {
     { re: /\[([^\]\n]*)\]\(([^)\s]+)\)/,
       build: (m, k) => k
         ? mark("[", k) + `<span class="md-link">${inlineHtml(m[1], k)}</span>` + mark(`](${m[2]})`, k)
-        : `<a href="${esc(safeUrl(m[2]))}" target="_blank" rel="noopener noreferrer">${inlineHtml(m[1], k)}</a>` },
+        : `<a href="${esc(safeUrl(m[2]))}" target="_blank" rel="noopener noreferrer">${inlineHtml(m[1], k)}</a>`
+          + hrefTag(m[1], m[2]) },
     // Bare URLs. The trailing-character class keeps sentence punctuation out
     // of the link, which otherwise swallows the full stop after a URL.
     { re: /(?<![\w@.])(https?:\/\/[^\s<>()[\]]*[^\s<>()[\].,;:!?'"])/,

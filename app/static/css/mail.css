@@ -590,6 +590,10 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
 .md-line.md-fence, .md-line.md-in-code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .86em; }
 .md-link { color: var(--accent); text-decoration: underline; }
+/* The address printed after a link's text. Dimmed and set small: it is there
+   to be read before clicking, not to compete with the sentence it sits in.
+   Long URLs break mid-word rather than pushing the pane wide. */
+.md-href { color: var(--text-faint); font-size: .88em; word-break: break-all; }
 .compose-attachments { display: flex; flex-wrap: wrap; gap: .4rem; }
 .compose-attachments:empty { display: none; }
 .compose-chip { display: inline-flex; align-items: center; gap: .35rem; background: var(--bg-elev);
@@ -856,6 +860,9 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sync-strip-who { font-size: .7rem; font-weight: 600; color: var(--text-muted);
   margin-top: .45rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The idle line. Sized like .ag-progress-sub so the strip keeps its footprint
+   between passes instead of the sidebar jumping every time one starts. */
+.sync-strip-idle { font-size: .71rem; color: var(--text-muted); padding: .2rem 0 .1rem; }
 
 .ag-error { margin-top: .7rem; border-radius: 8px; padding: .5rem .6rem;
   background: color-mix(in srgb, var(--danger) 9%, transparent);

@@ -202,13 +202,14 @@ App.status = (function () {
 
   // --- Sidebar sync strip ---
   // The same renderer as the modal, mounted a second time rather than forked:
-  // an in-flight sync is worth seeing without opening anything. Only while it
-  // is in flight, though — progressBlock's idle "last pass" variant is a modal
-  // footnote and would sit in the sidebar forever.
+  // an in-flight sync is worth seeing without opening anything.
   //
-  // Collapsible like the shortcut cheat sheet below it, and remembered the same
-  // way: a backfill runs for hours, and someone who has seen the numbers once
-  // should not have the sidebar shortened by them for the rest of the day.
+  // It stays put between passes rather than disappearing. Once a backfill is
+  // done a pass lasts seconds, so a strip that only existed during one would
+  // flash by unseen and read as a widget that had broken — "All up to date" is
+  // the answer to the same question the bars answer, just the quiet one. The
+  // idle state is one line, not progressBlock's "last pass" card per account:
+  // that is a modal footnote, and five of them would own the sidebar.
   const STRIP_KEY = "meerail.sync.collapsed";
 
   function stripCollapsed() { return localStorage.getItem(STRIP_KEY) === "1"; }
@@ -218,34 +219,55 @@ App.status = (function () {
     if (!strip) return;
     strip.classList.toggle("collapsed", state);
     const btn = strip.querySelector(".sc-toggle");
-    if (!btn) return;              // nothing rendered yet (no pass running)
+    if (!btn) return;              // nothing rendered yet (before the first poll)
     btn.setAttribute("aria-expanded", String(!state));
-    btn.title = state ? "Show sync progress" : "Minimize";
+    btn.title = state ? "Show sync status" : "Minimize";
     strip.querySelector(".sc-glyph").innerHTML = App.icon(state ? "chevron" : "minimize", 14);
     localStorage.setItem(STRIP_KEY, state ? "1" : "0");
+  }
+
+  // When the last pass anywhere finished. Plain string compare: these are all
+  // the same ISO format out of the same column, so lexical order is time order.
+  function lastPassAt() {
+    const seen = accountList()
+      .map((a) => a.sync_progress && (a.sync_progress.finished_at || a.sync_progress.updated_at))
+      .filter(Boolean)
+      .sort();
+    return seen.length ? seen[seen.length - 1] : null;
   }
 
   function renderStrip() {
     const strip = $("#sync-strip");
     if (!strip) return;
-    const live = accountList().filter((a) => a.sync_progress && a.sync_progress.active);
-    const index = indexBlock();
-    if (!live.length && !index) {
+    // No accounts at all is the first-run state, and the empty message list
+    // already explains it — same call the warning strip makes above.
+    if (!accountList().length) {
       strip.hidden = true;
       strip.innerHTML = "";
       return;
     }
+    const live = accountList().filter((a) => a.sync_progress && a.sync_progress.active);
+    const index = indexBlock();
     // Which account is syncing only matters when there is more than one; with a
     // single account the name is just a wider sidebar for no information.
     const multi = accountList().length > 1;
     strip.hidden = false;
-    const body = live.map((a) =>
-      (multi ? `<div class="sync-strip-who">${App.esc(a.label || a.email)}</div>` : "")
-      + progressBlock(a)).join("");
     // Two independent jobs, so name the one that is actually running rather
     // than filing attachment indexing under "Syncing".
     const label = live.length && index ? "Syncing · Indexing"
-      : live.length ? "Syncing" : "Indexing";
+      : live.length ? "Syncing"
+      : index ? "Indexing"
+      : "All up to date";
+    const at = lastPassAt();
+    const body = live.length || index
+      ? live.map((a) =>
+          (multi ? `<div class="sync-strip-who">${App.esc(a.label || a.email)}</div>` : "")
+          + progressBlock(a)).join("")
+      // Idle. The timestamp is the load-bearing half: "up to date" on its own
+      // says nothing about whether the agent checked a minute or a day ago.
+      : `<div class="sync-strip-idle">${at
+          ? `Last checked ${App.esc(App.relTime(at))}`
+          : "No sync yet"}</div>`;
     strip.innerHTML = `
       <button class="sc-toggle" type="button" aria-expanded="true">
         <span>${label}</span>

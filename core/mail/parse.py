@@ -40,6 +40,9 @@ _HARD_BREAK = "\x02"
 _BREAK_RUN_RE = re.compile(f"[ \t]*[{_SOFT_BREAK}{_HARD_BREAK}\n][ \t{_SOFT_BREAK}{_HARD_BREAK}\n]*")
 # Tags whose text is markup or metadata, never body copy.
 _SKIP_TAGS = frozenset({"head", "noscript", "script", "style", "title"})
+# Hrefs that name no destination worth spelling out next to the link text.
+_HREF_SKIP_RE = re.compile(r"^(#|javascript:|data:)", re.I)
+_URL_NOISE_RE = re.compile(r"^(?:https?://|mailto:)?(?:www\.)?", re.I)
 
 
 def strip_nuls(value: str) -> str:
@@ -155,20 +158,25 @@ def _get_body(msg: EmailMessage, subtype: str) -> str:
             return strip_nuls(payload.decode("utf-8", "replace"))
 
 
-def html_to_text(html: str) -> str:
+def html_to_text(html: str, links: bool = False) -> str:
     """Flatten HTML to plain text, keeping the sender's line structure.
 
     ``<br>`` and block boundaries become newlines: a reply quotes this text
     line by line, so a paragraphed mail flattened to a single line would come
     back as one unreadable ``>`` run. Snippets and the search corpus collapse
     whitespace themselves, so the extra newlines cost them nothing.
+
+    With ``links`` on, each anchor is followed by its address in angle brackets
+    — the convention plain-text mail has always used. It is off by default
+    because a snippet is 240 characters of preview and one tracking URL would
+    eat all of them; the reader's plain-text view asks for it explicitly.
     """
     if not html:
         return ""
     try:
         tree = HTMLParser(html)
         parts: list[str] = []
-        _flatten(tree.body or tree.root, parts)
+        _flatten(tree.body or tree.root, parts, links)
     except Exception:
         return ""
     text = _BREAK_RUN_RE.sub(_break_run, "".join(parts))
@@ -188,7 +196,7 @@ def _break_run(match: re.Match[str]) -> str:
     return "\n" * min(max(lines, 2 if _HARD_BREAK in run else 1), 2)
 
 
-def _flatten(node, parts: list[str]) -> None:
+def _flatten(node, parts: list[str], links: bool = False) -> None:
     for child in node.iter(include_text=True):
         tag = child.tag
         if tag == "-text":
@@ -202,10 +210,36 @@ def _flatten(node, parts: list[str]) -> None:
         elif tag in _BLOCK_TAGS:
             mark = _SOFT_BREAK if tag in _TIGHT_TAGS else _HARD_BREAK
             parts.append(mark)
-            _flatten(child, parts)
+            _flatten(child, parts, links)
             parts.append(mark)
+        elif tag == "a" and links:
+            start = len(parts)
+            _flatten(child, parts, links)
+            href = _spelled_href(child, "".join(parts[start:]))
+            if href:
+                parts.append(f" <{href}>")
         else:
-            _flatten(child, parts)
+            _flatten(child, parts, links)
+
+
+def _bare_url(url: str) -> str:
+    """A URL reduced to what makes two spellings of it the same link."""
+    return _URL_NOISE_RE.sub("", url).rstrip("/").lower()
+
+
+def _spelled_href(node, text: str) -> str:
+    """The address to write after a link's text, or ``""`` to leave it implicit.
+
+    A link whose text already *is* the address — which is most of them once a
+    client has autolinked a URL — would otherwise be printed twice. Anchors
+    with no text at all (an image, a bare tracking pixel) keep theirs: it is
+    the only trace the link leaves in the flattened copy.
+    """
+    href = (node.attributes.get("href") or "").strip()
+    if not href or _HREF_SKIP_RE.match(href):
+        return ""
+    shown = _WS_RE.sub("", text.replace(_SOFT_BREAK, "").replace(_HARD_BREAK, ""))
+    return "" if shown and _bare_url(shown) == _bare_url(href) else href
 
 
 def normalize_subject(subject: str) -> str:

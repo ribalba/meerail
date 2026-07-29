@@ -10,7 +10,7 @@
  * Override the spellchecker languages with MEERAIL_SPELLCHECK_LANGS:
  *   MEERAIL_SPELLCHECK_LANGS=en-GB,fr npm start
  */
-const { app, BrowserWindow, shell, Menu, MenuItem } = require("electron");
+const { app, BrowserWindow, clipboard, shell, Menu, MenuItem } = require("electron");
 const path = require("path");
 
 const APP_URL = (process.env.MEERAIL_URL || "http://localhost:8000").replace(/\/+$/, "");
@@ -80,6 +80,30 @@ function createWindow() {
   mainWindow.on("closed", () => { mainWindow = null; });
 }
 
+/* "Open Link" / "Copy Link Address" for the context menu below.
+ *
+ * A mailto: link is an address, not a URL, so it copies as one — pasting
+ * `mailto:x@y?subject=hi` into a To: field is never what was wanted. Its query
+ * string goes with the scheme; what is left is percent-decoded, since that is
+ * how the address was typed. */
+function appendLinkItems(menu, url) {
+  const mail = /^mailto:/i.test(url);
+  let copy = url;
+  if (mail) {
+    const addr = url.slice(7).split("?")[0];
+    try { copy = decodeURIComponent(addr); } catch { copy = addr; }
+  }
+  menu.append(new MenuItem({
+    label: mail ? "New Message to Address" : "Open Link in Browser",
+    click: () => shell.openExternal(url),
+  }));
+  menu.append(new MenuItem({
+    label: mail ? "Copy Email Address" : "Copy Link Address",
+    click: () => clipboard.writeText(copy),
+  }));
+  menu.append(new MenuItem({ type: "separator" }));
+}
+
 /* Spell checking for the compose fields.
  *
  * Chromium fetches the Hunspell dictionary for each language on first use and
@@ -106,6 +130,11 @@ function setUpSpellCheck(win) {
 
   win.webContents.on("context-menu", (_e, params) => {
     const menu = new Menu();
+
+    // Right-clicking a link in a message: copying the address is the whole
+    // point of the gesture, and this menu replacing Chromium's own is what
+    // took it away. Comes first, and works the same in a mail body's iframe.
+    if (params.linkURL) appendLinkItems(menu, params.linkURL);
 
     for (const suggestion of params.dictionarySuggestions) {
       menu.append(new MenuItem({

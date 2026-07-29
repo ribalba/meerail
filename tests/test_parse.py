@@ -133,6 +133,27 @@ def test_html_to_text_keeps_line_structure():
     assert html_to_text("<p>a  <b>b</b>\n  c</p>") == "a b c"
 
 
+def test_html_to_text_spells_out_hrefs():
+    html = '<p>See <a href="https://example.com/a?b=1">the docs</a> please</p>'
+    # Off by default: snippets and the search corpus must not fill up with URLs.
+    assert html_to_text(html) == "See the docs please"
+    assert html_to_text(html, links=True) == "See the docs <https://example.com/a?b=1> please"
+
+
+def test_html_to_text_omits_redundant_hrefs():
+    # An autolinked URL is its own text; printing it twice helps nobody.
+    assert html_to_text('<a href="https://example.com/">https://example.com</a>',
+                        links=True) == "https://example.com"
+    assert html_to_text('<a href="https://www.example.com">example.com</a>',
+                        links=True) == "example.com"
+    assert html_to_text('<a href="mailto:a@b.com">a@b.com</a>', links=True) == "a@b.com"
+    # Anchors and script URLs name no destination worth reading.
+    assert html_to_text('<a href="#top">back to top</a>', links=True) == "back to top"
+    # A link with no text of its own keeps its address: it is all that is left.
+    assert html_to_text('<a href="https://example.com/x"><img src="i.png"></a>',
+                        links=True) == "<https://example.com/x>"
+
+
 def test_inline_cid_image_captured():
     # Inline images live inside multipart/related and are NOT yielded by
     # iter_attachments(); the parser must still capture them so cid: resolves.
