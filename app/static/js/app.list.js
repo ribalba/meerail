@@ -177,9 +177,14 @@ App.list = (function () {
     });
 
     el.addEventListener("click", () => {
+      // The tail of a swipe can still arrive here as a tap; opening the mail
+      // that was just filed away is not what the gesture asked for.
+      if (App.swipe && App.swipe.blocked()) return;
       setFocus(rows.findIndex((x) => x.id === r.id), false);
       open(r, el);
     });
+    // Swipe-to-file, touch and narrow layout only — see app.swipe.js.
+    if (App.swipe) App.swipe.attach(el, r);
     return el;
   }
 
@@ -323,5 +328,8 @@ App.list = (function () {
   return { render, append, setMore, reset, move, moveAndOpen, openFocused, setFocus, ageDays, setAgeDays,
            selectAllLoaded, clearSelection, selection, markSeen,
            count: () => rows.length, hasFocus: () => focusIndex() >= 0,
+           // Which row the reading pane is showing, so a swipe that files it
+           // away can take the pane with it.
+           activeId: () => activeId,
            selectedCount: () => selected.size };
 })();

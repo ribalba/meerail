@@ -286,6 +286,49 @@ body.resizing { cursor: col-resize; user-select: none; }
 .flag-dot { color: var(--flag); display: flex; }
 .attach-glyph { color: var(--text-faint); display: flex; }
 .acct-stripe { position: absolute; left: 0; top: 0; bottom: 0; width: 3px; }
+
+/* --- Swipe actions ---
+   Touch only, and only in the narrow layout: app.swipe.js decides that, sets
+   --swipe-x / --swipe-w and the direction class, and builds .swipe-back on the
+   first swipe of a row. Everything below is inert until it does.
+
+   The row itself never moves — its contents slide, so the row keeps its place
+   in the list and the reveal is clipped by the pill's own rounded corners
+   (.msg-row is already overflow: hidden). The coloured bed fills exactly the
+   strip they vacate rather than lying under the whole row: the sender and
+   subject stay on the list's own background, legible the whole way across, and
+   the verb grows out of the edge the way the finger is going. */
+.msg-row > .msg-gutter, .msg-row > .msg-main { position: relative; }
+.msg-row > .msg-gutter, .msg-row > .msg-main, .msg-row > .acct-stripe {
+  z-index: 1; transform: translate3d(var(--swipe-x, 0px), 0, 0);
+  /* Matches SETTLE in app.swipe.js — the spring back and the slide out. */
+  transition: transform .2s ease-out; }
+/* Nothing to ease while a finger is setting the position outright. */
+.msg-row.swiping > .msg-gutter, .msg-row.swiping > .msg-main,
+.msg-row.swiping > .acct-stripe, .msg-row.swiping .swipe-back { transition: none; }
+/* Up only while a swipe is in play: the bed is kept once built, and a row at
+   rest must not leave white labels sitting under its text. */
+.swipe-back { position: absolute; top: 0; bottom: 0; z-index: 0; width: var(--swipe-w, 0px);
+  display: none; align-items: center; padding: 0 .8rem; overflow: hidden;
+  color: #fff; font-size: .8rem; font-weight: 600; white-space: nowrap;
+  transition: width .2s ease-out; }
+/* Each verb grows from the edge that performs it, and is clipped by the strip
+   until there is room — the icon shows first, the word follows. */
+.msg-row.swipe-right .swipe-back { display: flex; left: 0; justify-content: flex-start;
+  background: var(--danger); }
+.msg-row.swipe-left .swipe-back { display: flex; right: 0; justify-content: flex-end;
+  background: var(--accent); }
+.swipe-act { display: inline-flex; align-items: center; gap: .35rem;
+  opacity: .8; transition: opacity .12s linear; }
+.msg-row.swipe-right .swipe-act.act-archive, .msg-row.swipe-left .swipe-act.act-trash {
+  display: none; }
+/* Past the commit point: the verb goes to full strength, which is what says the
+   action will happen if the finger lifts here. */
+.msg-row.swipe-armed .swipe-act { opacity: 1; }
+@media (prefers-reduced-motion: reduce) {
+  .msg-row > .msg-gutter, .msg-row > .msg-main, .msg-row > .acct-stripe,
+  .swipe-back { transition: none; }
+}
 .list-empty, .reader-empty { color: var(--text-faint); text-align: center; padding: 3rem 1rem;
   font-size: .9rem; }
 .list-more { display: block; width: calc(100% - 1.5rem); margin: .5rem auto 1rem;
@@ -1108,7 +1151,12 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
      the ~44px a fingertip wants. */
   .mailbox-row { padding: .55rem; font-size: .95rem; }
   .account-head { padding-top: 1rem; }
-  .msg-row { padding: .7rem .8rem .75rem; }
+  /* pan-y tells the browser the row itself only ever scrolls the list, so a
+     horizontal drag reaches app.swipe.js as touchmove instead of being claimed
+     by a scroller first. pinch-zoom is named explicitly to keep it — and a
+     browser that cannot parse the pair drops the whole declaration, which is
+     the behaviour there was before swiping existed. */
+  .msg-row { padding: .7rem .8rem .75rem; touch-action: pan-y pinch-zoom; }
   .icon-btn { padding: .5rem; }
   .tb-btn { padding: .5rem .55rem; }
   /* Reveal-on-hover hides these permanently on a device with no hover. */
