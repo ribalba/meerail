@@ -214,6 +214,48 @@ def test_threads_and_attachments(mailbox):
     assert d["attachments"]["count"] == 1
 
 
+# --- Largest emails ---------------------------------------------------------
+
+
+def test_largest_ranks_by_whole_message_size(mailbox):
+    """The one message carrying a PDF is the heaviest thing in the window.
+
+    And the figure is the RFC822 size, not the attachment's: a base64'd PDF plus
+    its headers and body is necessarily larger than the payload `_attachments`
+    counts, so the two panels are answering different questions on purpose.
+    """
+    d = overview(mailbox)
+    rows = d["largest"]
+    assert rows, "every message in the fixture has a size, so none may be dropped"
+    assert rows[0]["subject"] == "Board pack"
+    assert rows[0]["attachments"] is True
+    assert [r["bytes"] for r in rows] == sorted((r["bytes"] for r in rows), reverse=True)
+    assert rows[0]["bytes"] > d["attachments"]["bytes"]
+
+
+def test_largest_carries_identity_for_each_row(mailbox):
+    """The panel exists to be clicked, and a link needs all three ids."""
+    for r in overview(mailbox)["largest"]:
+        assert r["id"]
+        assert r["account_id"] == mailbox["id"]
+        assert r["thread_id"]
+
+
+def test_largest_labels_direction_and_drops_the_excluded_folders(mailbox):
+    rows = {r["subject"]: r for r in overview(mailbox)["largest"]}
+    # Small mailbox, short list: everything countable is here, and nothing else.
+    assert "You have won" not in rows
+    assert "Unsent thought" not in rows
+    assert rows["Re: Contract draft"]["sent"] is True
+    assert rows["Invoice 0418"]["sent"] is False
+
+
+def test_totals_carry_the_stored_size(mailbox):
+    """The denominator the panel quotes, over the same base filter."""
+    d = overview(mailbox)
+    assert d["totals"]["bytes"] >= sum(r["bytes"] for r in d["largest"]) > 0
+
+
 def test_volume_and_heatmap_sum_to_the_totals(mailbox):
     """Every message lands in exactly one bucket of each breakdown."""
     d = overview(mailbox)

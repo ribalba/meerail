@@ -287,9 +287,13 @@ App.avatarColor = function (seed) {
   return `hsl(${h}, 62%, 48%)`;
 };
 
+// Written for one attachment, but the statistics modal now feeds it a whole
+// window's worth of mail, hence the GB step: without it a 4 GB year reads
+// "4096.0 MB", which is a number nobody parses at a glance.
 App.fmtSize = function (n) {
   if (!n) return "";
   if (n < 1024) return n + " B";
   if (n < 1048576) return (n / 1024).toFixed(0) + " KB";
-  return (n / 1048576).toFixed(1) + " MB";
+  if (n < 1073741824) return (n / 1048576).toFixed(1) + " MB";
+  return (n / 1073741824).toFixed(2) + " GB";
 };

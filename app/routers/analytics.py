@@ -67,6 +67,10 @@ RESPONSE_MATURITY = timedelta(days=7)
 # the daily average and spam domains at the top of the contacts list.
 EXCLUDED_ROLES = ("drafts", "junk")
 
+# How many of the heaviest messages to name. Short on purpose: this list exists
+# to be acted on one row at a time, and past ten the tail is all the same size.
+LARGEST = 10
+
 # Latency histogram edges, in seconds, with the label for each bucket.
 LATENCY_BUCKETS = [
     (900, "< 15 min"),
@@ -202,9 +206,12 @@ def overview(
             func.min(Message.date_sent),
             func.max(Message.date_sent),
             func.count(func.distinct(Message.thread_id)),
+            # Rides along with the counts because it comes off the same scan;
+            # it is what gives the "largest emails" panel a denominator.
+            func.coalesce(func.sum(Message.size_bytes), 0),
         ).where(*base)
     ).one()
-    total, n_sent, first_at, last_at, n_threads = totals
+    total, n_sent, first_at, last_at, n_threads, n_bytes = totals
     n_recv = int(total) - int(n_sent)
 
     # Denominator for the per-day averages. Not the nominal window length: on a
@@ -227,6 +234,7 @@ def overview(
             "received": n_recv,
             "sent": int(n_sent),
             "threads": int(n_threads or 0),
+            "bytes": int(n_bytes or 0),
             "first_at": _iso(first_at),
             "last_at": _iso(last_at),
             "span_days": round(span_days, 2),
@@ -247,6 +255,7 @@ def overview(
     payload["correspondents"] = _correspondents(db, base, sent, own, limit)
     payload["domains"] = _domains(db, base, sent, limit)
     payload["threads"] = _threads(db, base)
+    payload["largest"] = _largest(db, base, sent)
     payload["attachments"] = _attachments(db, base, sent)
     payload["busiest"] = _busiest(db, base, is_recv, tz_offset)
     # A fifth of the window, capped at RESPONSE_MATURITY — see that constant.
@@ -266,11 +275,11 @@ def _empty(range: str) -> dict:
         "grain": GRAINS.get(range, "day"),
         "accounts": [],
         "totals": {
-            "messages": 0, "received": 0, "sent": 0, "threads": 0,
+            "messages": 0, "received": 0, "sent": 0, "threads": 0, "bytes": 0,
             "first_at": None, "last_at": None, "span_days": 0,
             "received_per_day": 0, "sent_per_day": 0, "sent_ratio": None,
         },
-        "volume": [], "heatmap": [], "correspondents": [], "domains": [],
+        "volume": [], "heatmap": [], "correspondents": [], "domains": [], "largest": [],
         "threads": {"avg": 0, "max": 0, "multi": 0, "longest": []},
         "attachments": {"count": 0, "bytes": 0, "messages": 0},
         "busiest": None,
@@ -415,6 +424,65 @@ def _threads(db, base) -> dict:
         "multi": int(multi or 0),
         "longest": [{"subject": s or "(no subject)", "count": int(n)} for s, n in longest],
     }
+
+
+def _largest(db, base, sent) -> list[dict]:
+    """The heaviest individual messages in the window.
+
+    `size_bytes` is the whole RFC822 message — headers, body and attachments as
+    they sit on the wire, i.e. base64'd and so about a third larger than the
+    files themselves. That is deliberately the number a mail host counts against
+    a quota, rather than the sum of `attachments.size_bytes` next door in
+    `_attachments`, because the reason to read this panel is "what is filling
+    the account".
+
+    Populated for headers-only rows too (it comes from the server's RFC822.SIZE
+    when the body was never fetched — see core/mail/store.py), so a mailbox with
+    a short content window still ranks its big mail correctly even though it
+    cannot show it.
+
+    Identity travels with each row (`id`, `thread_id`, `account_id`): the client
+    turns these into a link into the mail itself, which is the only useful thing
+    to do with "this one is 40 MB".
+
+    No index serves this ordering — it is a top-N over the same window every
+    other panel here already scans, and Postgres takes it as a bounded heapsort
+    rather than a full ordering.
+    """
+    rows = db.execute(
+        select(
+            Message.id,
+            Message.account_id,
+            Message.thread_id,
+            Message.subject,
+            Message.from_name,
+            Message.from_addr,
+            Message.date_sent,
+            Message.size_bytes,
+            Message.has_attachments,
+            case((sent, True), else_=False).label("is_sent"),
+        )
+        # Size 0 means nothing was ever recorded for the row rather than "an
+        # empty message", and a list of unknowns at the bottom helps no one.
+        .where(*base, Message.size_bytes > 0)
+        .order_by(Message.size_bytes.desc())
+        .limit(LARGEST)
+    ).all()
+    return [
+        {
+            "id": r.id,
+            "account_id": r.account_id,
+            "thread_id": r.thread_id,
+            "subject": r.subject or "",
+            "name": r.from_name or "",
+            "address": r.from_addr or "",
+            "date": _iso(r.date_sent),
+            "bytes": int(r.size_bytes or 0),
+            "attachments": bool(r.has_attachments),
+            "sent": bool(r.is_sent),
+        }
+        for r in rows
+    ]
 
 
 def _attachments(db, base, sent) -> dict:

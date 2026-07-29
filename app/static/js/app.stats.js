@@ -381,6 +381,67 @@ App.stats = (function () {
         <tbody>${rows}</tbody></table>`);
   }
 
+  /* The heaviest messages in the window, each a link into the mail it names.
+     Nobody reads this panel out of curiosity — they read it holding a full
+     mailbox, looking for something to delete — so a row that only *described*
+     the message would leave the reader to go and find it by hand. */
+  function largest(d) {
+    const rows = d.largest || [];
+    if (!rows.length) return "";
+    const max = Math.max(...rows.map((r) => r.bytes), 1);
+    const body = rows.map((r) => {
+      // For our own mail the From line is us, which says nothing; the direction
+      // is the informative half. Colour carries it too, but never alone.
+      const who = r.sent ? "Sent" : (r.name || r.address || "unknown sender");
+      const meta = [who, r.date ? App.fmtDate(r.date) : "", r.attachments ? "with attachments" : ""]
+        .filter(Boolean).join(" · ");
+      // A message whose thread was never linked has nothing to open.
+      const openable = !!r.thread_id;
+      // The row shows the display name, so the address is the part hover can
+      // still add — plus what the click does, which the cursor only implies.
+      const hint = [r.address, openable ? "open this message" : ""].filter(Boolean).join(" — ");
+      return `<li>
+        <button type="button" class="an-big" ${openable ? "" : "disabled"}
+                data-thread="${App.esc(r.thread_id || "")}"
+                data-account="${r.account_id}" data-id="${r.id}"
+                title="${App.esc(hint)}">
+          <span class="an-big-who">
+            <span class="an-big-subj">${App.esc(r.subject || "(no subject)")}</span>
+            <span class="an-big-meta">${App.esc(meta)}</span>
+          </span>
+          <span class="an-big-bar">
+            <span class="an-track"><i class="an-fill ${r.sent ? "sent" : "recv"}"
+                  style="width:${(r.bytes / max) * 100}%"></i></span>
+            <span class="an-big-n">${App.esc(App.fmtSize(r.bytes) || "0 B")}</span>
+          </span>
+        </button>
+      </li>`;
+    }).join("");
+    return panel("Largest emails", `
+      <div class="an-legend">
+        <span class="an-key"><i class="an-swatch recv"></i>Received</span>
+        <span class="an-key"><i class="an-swatch sent"></i>Sent</span>
+      </div>
+      <ul class="an-big-list">${body}</ul>
+      <p class="an-note">${App.esc(App.fmtSize(d.totals.bytes) || "0 B")} of mail in this
+        window · each size is the whole message, attachments included</p>`);
+  }
+
+  // Same move as opening a row in the message list: turn the page on a narrow
+  // layout, then open the conversation with this message in focus. The modal
+  // closes because it covers the reader it just sent you to.
+  function wireLargest() {
+    document.querySelectorAll("#stats-body .an-big").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const { thread, account, id } = btn.dataset;
+        if (!thread) return;
+        close();
+        App.mobile.show("reader");
+        App.reader.openThread(thread, Number(account), Number(id));
+      });
+    });
+  }
+
   function panel(title, inner) {
     return `<section class="an-panel"><h3>${App.esc(title)}</h3>${inner}</section>`;
   }
@@ -404,6 +465,9 @@ App.stats = (function () {
         <li><b>Response rate</b> only counts mail at least
           ${App.esc(String(l.maturity_days ?? 7))} days old, so a message you have
           not got to yet is not scored as one you ignored.</li>
+        <li><b>Size</b> is the whole message as it travelled, so an attachment
+          counts at its encoded size — roughly a third more than the file on
+          disk. It is the figure a mail host bills against your quota.</li>
         <li><b>Drafts and junk are excluded</b> throughout. Times are your local
           time; the mail store keeps UTC.</li>
       </ul>
@@ -459,9 +523,11 @@ App.stats = (function () {
       correspondents(data) +
       `<div class="an-two">${latency(data)}${domains(data)}</div>` +
       threadsPanel(data) +
+      largest(data) +
       footnote(data);
     wireControls();
     wireVolumeHover(data);
+    wireLargest();
   }
 
   // Re-bound after every render, because the markup above is replaced wholesale.
