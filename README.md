@@ -404,6 +404,14 @@ page) into Settings and an *Add Task* button appears in the reading pane and on 
 pick a bucket and a status, and the subject, body and any attachments you tick go across. The
 server proxies the call — Meerato sends no CORS headers, and this keeps the token off the page.
 
+**From follows the recipients.** With more than one address to send as, the composer works out
+which of them you actually write to the people you are addressing from — the mail you have
+already sent them is the evidence — and switches the *From* to it as you add names, saying why
+next to the dropdown. It ranks candidates by how many of the current recipients each address has
+written to, then by how often in the last year, so an account you have since moved off is not
+propped up by its history. Your own choice always wins: touch the dropdown, or open a reply
+(whose *From* is already the alias the original was addressed to), and it stops guessing.
+
 **Send &amp; …** The composer offers two variants next to *Send*. *Send &amp; Archive* appears on a
 reply or forward and files the whole conversation away once the mail is out. *Send &amp; Ticket*
 appears once Meerato is configured: pick a bucket and a date, and the mail lands in Meerato's

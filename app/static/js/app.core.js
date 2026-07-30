@@ -156,6 +156,13 @@ App.api = {
   createTask(payload) { return this.post("/api/tasks", payload); },
 
   replyContext(id, mode) { return this.get(`/api/compose/reply-context/${id}?mode=${mode}`); },
+  // Which of the user's own addresses they normally write to these people from.
+  // Resolves to null when the mailbox has nothing to say about them.
+  senderFor(addresses) {
+    const p = new URLSearchParams();
+    addresses.forEach((a) => p.append("address", a));
+    return this.get("/api/compose/sender-for?" + p.toString());
+  },
   sendMail(payload) { return this.post("/api/compose/send", payload); },
   deleteAttachment(id) { return this.del(`/api/compose/attachments/${encodeURIComponent(id)}`); },
   async uploadAttachment(file) {

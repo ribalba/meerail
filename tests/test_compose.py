@@ -1,7 +1,7 @@
 """Integration tests for compose: send enqueues a send action; reply-context."""
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import dbfixture
 from conftest import ingest_one
@@ -214,6 +214,110 @@ def test_reply_all_carries_cc_but_drops_the_account_itself(account):
     _, ctx = api("GET", f"/api/compose/reply-context/{mid}?mode=replyall")
     assert ctx["to"] == ["alice@ex.com"]
     assert ctx["cc"] == ["bob@ex.com"]
+
+
+# --- Sender suggestion ------------------------------------------------------
+
+
+def _sent(email: str, frm: str, to: str, uid: int, when=T0, cc: str | None = None) -> None:
+    """Record one message the user sent, the way a Sent-folder sync would."""
+    raw = make_message(f"<sent-{uuid.uuid4().hex}@t>", "Prior mail", frm, to, "body", when, cc=cc)
+    dbfixture.ingest_raw_message(email, raw, uid=uid, folder="Sent", role_hint="sent")
+
+
+def _sender_for(*addresses: str):
+    query = "&".join(f"address={a}" for a in addresses)
+    code, body = api("GET", f"/api/compose/sender-for?{query}")
+    assert code == 200
+    return body
+
+
+def test_sender_suggestion_follows_past_mail(account):
+    """The From offered for a recipient is the address they were written to from."""
+    email = account["email"]
+    alias = f"alias-{uuid.uuid4().hex[:8]}@example.com"
+    dbfixture.report_sync(email, addresses=[alias])
+    bob = f"bob-{uuid.uuid4().hex[:8]}@ex.test"
+    _sent(email, alias, bob, uid=801)
+
+    hit = _sender_for(bob)
+    assert hit["address"] == alias.lower()
+    assert hit["account_id"] == account["id"]
+
+
+def test_sender_suggestion_is_silent_without_history(account):
+    """An unknown recipient gets no answer, so the composer keeps its own From."""
+    dbfixture.report_sync(account["email"], addresses=[f"alias-{uuid.uuid4().hex[:8]}@example.com"])
+    assert _sender_for(f"stranger-{uuid.uuid4().hex[:8]}@ex.test") is None
+
+
+def test_sender_suggestion_prefers_the_address_used_most(account):
+    """Two addresses have written to this person; the habitual one wins."""
+    email = account["email"]
+    alias = f"alias-{uuid.uuid4().hex[:8]}@example.com"
+    dbfixture.report_sync(email, addresses=[alias])
+    carol = f"carol-{uuid.uuid4().hex[:8]}@ex.test"
+    _sent(email, alias, carol, uid=811)
+    _sent(email, alias, carol, uid=812)
+    _sent(email, email, carol, uid=813)
+
+    assert _sender_for(carol)["address"] == alias.lower()
+
+
+def test_sender_suggestion_covers_as_many_recipients_as_it_can(account):
+    """An address that has written to both people beats one that knows only one,
+    however often that one has been written to."""
+    email = account["email"]
+    alias = f"alias-{uuid.uuid4().hex[:8]}@example.com"
+    dbfixture.report_sync(email, addresses=[alias])
+    dave, erin = (f"{n}-{uuid.uuid4().hex[:8]}@ex.test" for n in ("dave", "erin"))
+    for uid in (821, 822, 823):
+        _sent(email, email, dave, uid=uid)          # primary: three mails, one of the two
+    _sent(email, alias, dave, uid=824)              # alias: one each, but both of them
+    _sent(email, alias, erin, uid=825)
+
+    assert _sender_for(dave)["address"] == email                 # alone, the primary
+    assert _sender_for(dave, erin)["address"] == alias.lower()   # together, the alias
+
+
+def test_sender_suggestion_prefers_a_habit_you_still_have(account):
+    """Years of mail from an address since moved off must not outvote the
+    handful sent from the one in use now."""
+    email = account["email"]
+    alias = f"alias-{uuid.uuid4().hex[:8]}@example.com"
+    dbfixture.report_sync(email, addresses=[alias])
+    ivan = f"ivan-{uuid.uuid4().hex[:8]}@ex.test"
+    # Dated against the clock, not the suite's fixed T0: the year the server
+    # counts as "recent" runs backwards from today, not from 2026.
+    now = datetime.now(timezone.utc)
+    for uid in (851, 852, 853, 854):
+        _sent(email, email, ivan, uid=uid, when=now - timedelta(days=900))
+    _sent(email, alias, ivan, uid=855, when=now - timedelta(days=30))
+
+    assert _sender_for(ivan)["address"] == alias.lower()
+
+
+def test_sender_suggestion_counts_cc_recipients(account):
+    """Being Cc'd is being written to — the From that did it still counts."""
+    email = account["email"]
+    alias = f"alias-{uuid.uuid4().hex[:8]}@example.com"
+    dbfixture.report_sync(email, addresses=[alias])
+    frank = f"frank-{uuid.uuid4().hex[:8]}@ex.test"
+    _sent(email, alias, "someone@ex.test", uid=831, cc=frank)
+
+    assert _sender_for(frank)["address"] == alias.lower()
+
+
+def test_sender_suggestion_ignores_mail_the_user_did_not_send(account):
+    """Mail *from* a contact says nothing about which address to answer from —
+    only the user's own sent mail is evidence."""
+    email = account["email"]
+    dbfixture.report_sync(email, addresses=[f"alias-{uuid.uuid4().hex[:8]}@example.com"])
+    grace = f"grace-{uuid.uuid4().hex[:8]}@ex.test"
+    raw = make_message(f"<in-{uuid.uuid4().hex}@t>", "Incoming", grace, email, "body", T0)
+    dbfixture.ingest_raw_message(email, raw, uid=841)
+
+    assert _sender_for(grace) is None
 
 
 def test_forward_context(account):

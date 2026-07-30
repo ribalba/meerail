@@ -10,6 +10,11 @@ App.compose = (function () {
   let body = null;         // markdown live-preview editor over #compose-body
   let prefilledFooter = ""; // footer put in the editor on open; alone it is not a draft
   let archivable = false;  // opened off a thread, so "Send & Archive" has something to file
+  let fromPinned = false;  // From was decided (by the user, or by a reply) — stop guessing
+  let fromDefault = 0;     // identity index the composer opened with
+  let suggestSeq = 0;      // drops out-of-order sender-for replies
+  let suggestKey = null;   // recipient set the last lookup was made for
+  let suggestTimer = null;
   const $ = (s) => document.querySelector(s);
 
   // One entry per sendable address: the account primary plus its extra
@@ -134,6 +139,69 @@ App.compose = (function () {
     $("#compose-from-row").style.display = identities.length > 1 ? "" : "none";
   }
 
+  // --- From follows the recipients ---------------------------------------
+  // Someone with a work address and a private one writes to each set of people
+  // from a settled one of them. As addresses are added the server is asked
+  // which of the user's own it has seen them written to from, and the From
+  // dropdown follows the answer — but only while it is still an open question:
+  // a From the user picked by hand, or one a reply inherited from the message
+  // being answered, is a decision already made and is never overruled.
+
+  const ADDRESS_RE = /^[^\s@,]+@[^\s@,]+\.[^\s@,]+$/;
+
+  // Only whole addresses are worth asking about; a half-typed one matches
+  // nothing and would just churn requests letter by letter. Cc/Bcc are read
+  // from the fields, which showExtra() empties when it folds them away — an
+  // invisible recipient must not steer the From either.
+  function recipientAddresses() {
+    const out = [];
+    for (const sel of ["#compose-to", "#compose-cc", "#compose-bcc"]) {
+      for (const token of parseAddrs($(sel).value)) {
+        const angled = token.match(/<([^>]+)>/);           // "Name <addr>", if pasted that way
+        const address = (angled ? angled[1] : token).trim().toLowerCase();
+        if (ADDRESS_RE.test(address) && !out.includes(address)) out.push(address);
+      }
+    }
+    return out;
+  }
+
+  function setFromNote(text) {
+    const note = $("#compose-from-note");
+    note.textContent = text;
+    note.hidden = !text;
+  }
+
+  async function suggestFrom() {
+    if (fromPinned || identities.length < 2) return;
+    const addresses = recipientAddresses();
+    const key = addresses.join(",");
+    if (key === suggestKey) return;      // the same people as last time — same answer
+    suggestKey = key;
+
+    const seq = ++suggestSeq;
+    const generation = draftGeneration;
+    let hit = null;
+    if (addresses.length) {
+      try { hit = await App.api.senderFor(addresses); } catch (_) { return; }
+    }
+    // A newer lookup, a hand-picked From, or a different draft won the race.
+    if (seq !== suggestSeq || generation !== draftGeneration || fromPinned) return;
+
+    // No history means no opinion: fall back to what the composer opened with,
+    // so deleting the recipient that caused a switch also undoes the switch.
+    $("#compose-from").value = String(hit ? findIdentity(hit.account_id, hit.address) : fromDefault);
+    // The note says where this From came from, so it belongs on every one the
+    // history chose — including a choice that happens to match the default,
+    // and including a switch back off an earlier guess. Falling back to the
+    // default is not a choice and says nothing.
+    setFromNote(hit ? "you usually write to these people from here" : "");
+  }
+
+  function queueSuggestFrom() {
+    clearTimeout(suggestTimer);
+    suggestTimer = setTimeout(suggestFrom, 250);
+  }
+
   // --- Window dragging -------------------------------------------------
   // The window starts centred by the backdrop's flexbox; the first drag pins
   // it to pixel coordinates and it stays where the user left it.
@@ -179,6 +247,7 @@ App.compose = (function () {
 
   function close() {
     showDropHint(false);
+    clearTimeout(suggestTimer);      // nothing to suggest to a discarded draft
     discardStaged();
     $("#compose-modal").hidden = true;
     $("#compose-min").hidden = true;
@@ -252,6 +321,13 @@ App.compose = (function () {
     updateSendButtons();
     renderAttachments();
     fillFrom(ctx.account_id, ctx.from_address);
+    // A reply's From is the alias the original was addressed to — a better
+    // answer than any history could give, so it stands. A new message or a
+    // forward starts with the question still open.
+    fromDefault = Number($("#compose-from").value);
+    fromPinned = !!ctx.in_reply_to;
+    suggestKey = null;
+    setFromNote("");
     $("#compose-to").value = (ctx.to || []).join(", ");
     // A reply that already carries Cc/Bcc opens with those rows visible —
     // prefilled recipients have to be seen before the message goes out.
@@ -265,6 +341,7 @@ App.compose = (function () {
     body.setText(withFooter(ctx.body_text, ctx.account_id));
     show(ctx.title || "New Message");
     focusBody();
+    suggestFrom();          // a forward can open already addressed
   }
 
   // A reply is pre-addressed, so the caret belongs in the body; a blank
@@ -421,7 +498,17 @@ App.compose = (function () {
     $("#compose-cc-toggle").addEventListener("click", () => toggleExtra("cc"));
     $("#compose-bcc-toggle").addEventListener("click", () => toggleExtra("bcc"));
     $("#compose-file").addEventListener("change", (e) => onFiles(e.target.files));
-    ["#compose-to", "#compose-cc", "#compose-bcc"].forEach((s) => App.autocomplete.attach($(s)));
+    ["#compose-to", "#compose-cc", "#compose-bcc"].forEach((s) => {
+      App.autocomplete.attach($(s));
+      $(s).addEventListener("input", queueSuggestFrom);
+    });
+    // Hiding a Cc/Bcc row clears it, which changes who the message is going to.
+    ["#compose-cc-toggle", "#compose-bcc-toggle"].forEach((s) =>
+      $(s).addEventListener("click", queueSuggestFrom));
+    $("#compose-from").addEventListener("change", () => {
+      fromPinned = true;                  // an explicit choice ends the guessing
+      setFromNote("");
+    });
     // Deliberately no backdrop click handler: clicking outside the window
     // leaves the composer exactly as it is. Minimizing is the − button's job.
     $("#compose-head").addEventListener("pointerdown", startDrag);

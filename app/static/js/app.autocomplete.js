@@ -51,6 +51,10 @@ App.autocomplete = (function () {
       if (items[i]) replaceToken(items[i].address);
       close();
       input.focus();
+      // Setting .value in script fires nothing, and picking a name from this
+      // list is the main way a recipient gets added — anything watching the
+      // field (the composer's From suggestion) has to hear about it.
+      input.dispatchEvent(new Event("input", { bubbles: true }));
     }
 
     async function run() {

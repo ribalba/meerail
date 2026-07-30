@@ -595,6 +595,13 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
   border: 1px solid var(--border); border-radius: 7px; background: var(--bg); color: var(--text); min-width: 0;
 }
 .compose-row input:focus, #compose-from:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+/* Why the From changed itself. Shrinks before the field it explains does, and
+   drops out entirely on a narrow window — it is a footnote, not a control. */
+.compose-note {
+  flex: 0 1 auto; min-width: 0; color: var(--text-muted); font-size: .75rem;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.compose-note[hidden] { display: none; }
 /* Cc/Bcc live folded away behind these; they sit inside the To row so the
    composer keeps its height until a field is actually wanted. */
 .compose-toggles { display: flex; gap: .1rem; flex: 0 0 auto; }
@@ -1212,5 +1219,8 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
   .modal.compose.dragging-placed { position: relative; margin: revert; inset: auto; }
   .modal.compose .modal-head { cursor: default; }
   .compose-row label { width: 44px; }
+  /* No room for a footnote next to the field: the From still switches itself,
+     it just does so silently rather than squeezing the dropdown to a stub. */
+  .compose-note { display: none; }
   .modal { width: min(480px, 94vw); max-height: 88vh; }
 }

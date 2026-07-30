@@ -8,19 +8,20 @@ import mimetypes
 import os
 import re
 import uuid
+from datetime import timedelta
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 from pydantic import BaseModel, EmailStr
-from sqlalchemy import select
+from sqlalchemy import distinct, func, select, tuple_
 from sqlalchemy.orm import Session as DBSession
 
 from core.config import get_settings
 from core.database import get_db
 from ..deps import require_ui_auth
-from core.models import Account, Message, Outbound, PendingAction, Recipient
+from core.models import Account, Message, Outbound, PendingAction, Recipient, utcnow
 from core.mail.parse import html_to_text, normalize_subject
 
 router = APIRouter(prefix="/api/compose", tags=["compose"], dependencies=[Depends(require_ui_auth)])
@@ -187,6 +188,81 @@ def send(req: SendRequest, db: DBSession = Depends(get_db)):
             pass
 
     return {"id": outbound.id, "state": outbound.state}
+
+
+# --- Which address do I write to these people from? -------------------------
+#
+# Someone with a work account and a personal one writes to each set of people
+# from a settled one of the two, and picking it by hand on every message is
+# something the mailbox already knows the answer to. The composer asks this as
+# recipients are typed and follows the answer.
+#
+# The evidence is your own sent mail: messages whose From is one of your
+# accounts' sendable addresses and whose To/Cc/Bcc carries one of the addresses
+# being typed. Candidates rank by
+#
+#   1. how many of the current recipients that address has written to — one
+#      that covers the whole list beats one that only knows a single name;
+#   2. how often within the last year — a habit since changed must not be
+#      outvoted by however many years were spent on the old one;
+#   3. how often ever, then how recently.
+#
+# No history means no answer (``null``), and the composer then leaves the From
+# it opened with alone. Drafts are counted along with sent mail: they carry the
+# same "I chose this address for this person" decision.
+#
+# This only answers the question; whether it is worth acting on is the
+# composer's call — with one sendable address there is nothing to switch to,
+# and it does not ask.
+
+RECENT_DAYS = 365
+MAX_LOOKUP_ADDRESSES = 20      # a composer with more recipients than this is not asking a question
+
+
+def _identities(db: DBSession) -> list[tuple[int, str]]:
+    """Every (account_id, address) the user can send as — the candidate set."""
+    accounts = db.execute(select(Account).order_by(Account.created_at)).scalars().all()
+    return [(a.id, addr.lower()) for a in accounts for addr in _sender_addresses(a)]
+
+
+@router.get("/sender-for")
+def sender_for(address: list[str] = Query(default=[]), db: DBSession = Depends(get_db)):
+    """The From address usually used with these recipients, or null if unknown."""
+    wanted: list[str] = []
+    for raw in address:
+        candidate = (raw or "").strip().lower()
+        if candidate and "@" in candidate and candidate not in wanted:
+            wanted.append(candidate)
+        if len(wanted) >= MAX_LOOKUP_ADDRESSES:
+            break
+
+    identities = _identities(db)
+    if not wanted or not identities:
+        return None
+
+    matched = func.count(distinct(Recipient.address)).label("matched")
+    recent = func.count().filter(Message.date_sent >= utcnow() - timedelta(days=RECENT_DAYS)).label("recent")
+    sent = func.count().label("sent")
+    last_sent = func.max(Message.date_sent).label("last_sent")
+
+    row = db.execute(
+        select(Message.account_id, Message.from_addr, matched, recent, sent, last_sent)
+        .join(Recipient, Recipient.message_pk == Message.id)
+        .where(
+            Recipient.kind.in_(("to", "cc", "bcc")),
+            Recipient.address.in_(wanted),
+            tuple_(Message.account_id, Message.from_addr).in_(identities),
+        )
+        .group_by(Message.account_id, Message.from_addr)
+        .order_by(matched.desc(), recent.desc(), sent.desc(), last_sent.desc().nullslast())
+        .limit(1)
+    ).first()
+    if row is None:
+        return None
+    return {
+        "account_id": row.account_id, "address": row.from_addr,
+        "matched": row.matched, "sent": row.sent, "last_sent": row.last_sent,
+    }
 
 
 @router.get("/reply-context/{message_id}")
