@@ -199,6 +199,14 @@ def outbound_mime(outbound_id: int) -> str:
         return ob.raw_mime if ob else ""
 
 
+def outbound_body_text(outbound_id: int) -> str:
+    """The markdown the composer sent. For a formatted message this is the only
+    record of it — the wire carries the rendering instead."""
+    with session() as db:
+        ob = db.get(Outbound, outbound_id)
+        return ob.body_text if ob else ""
+
+
 def stored_raw_mime(email: str, message_id: str) -> bytes | None:
     """The original bytes kept for a message — None when store_raw_mime is off."""
     with session() as db:

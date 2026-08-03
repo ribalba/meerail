@@ -3,40 +3,94 @@
    The SHORTCUTS table below is the single source of truth: it drives both the
    key handling and the cheat-sheet box in the sidebar, so the two cannot drift.
 
+   The keyboard lives in one of three panes — folders → list → thread — which
+   are the same three the narrow layout pages through (see app.mobile.js). It
+   starts on the folders. Enter goes one pane deeper, Escape comes one back, and
+   j/k/arrows always act on whichever pane holds it, so the same four keys walk
+   the sidebar, the list, and the thread without any of them needing a chord.
+
    The arrows and j/k deliberately differ: ↑/↓ open each row as you land on it
    (preview-as-you-go), while j/k only move the cursor and leave opening to
-   Enter/o. Opening fetches the thread and marks it read, so j/k is the way to
-   skim a mailbox without burning through your unread state.
-
-   Enter/o also hands the arrows over to the reading pane, where they scroll the
-   thread until Escape (or j/k) hands them back to the list. */
+   Enter/o. Opening a conversation fetches the thread and marks it read, so j/k
+   is the way to skim a mailbox without burning through your unread state. */
 
 App.keys = (function () {
   const $ = (s) => document.querySelector(s);
   const STORE_KEY = "meerail.shortcuts.collapsed";
 
+  const PANES = ["folders", "list", "reader"];
+
   let pendingG = null;       // timer for the "g then …" chord
-  let inReader = false;      // do the arrows scroll the thread or walk the list?
+  let pane = "folders";      // which of PANES the arrows and j/k act on
 
-  // The pane is only really "focused" while a thread is up. If the thread went
-  // away under us (mailbox switch, archive) the flag is dropped here, so the
-  // arrows go straight back to the list instead of costing an Escape first.
-  function readerHasKeys() {
-    if (inReader && !App.reader.isOpen()) setReader(false);
-    return inReader;
+  // The reader is only really a pane while a thread is up — or on its way, since
+  // the keystroke that moves the keyboard in is the one that asks for it. If the
+  // thread went away under us (mailbox switch, archive) the keyboard is handed
+  // back here, so the arrows walk the list again instead of costing an Escape.
+  function hasThread() { return App.reader.isOpen() || App.reader.isBusy(); }
+
+  function current() {
+    if (pane === "reader" && !hasThread()) setPane("list");
+    return pane;
   }
 
-  function setReader(state) {
-    inReader = state;
-    App.reader.setKeyFocus(state);   // the ↑↓ marker in the thread's action bar
+  function setPane(next) {
+    if (next === "reader" && !hasThread()) next = "list";
+    pane = next;
+    // Each pane draws its own cursor; telling all three keeps exactly one of
+    // them looking live, whichever way the move was made.
+    App.shell.setFolderKeyFocus(pane === "folders");
+    App.list.setKeyFocus(pane === "list");
+    App.reader.setKeyFocus(pane === "reader");   // the ↑↓ marker in the action bar
+    syncMobile(next);
   }
 
-  function openAndRead() { if (App.list.openFocused()) setReader(true); }
+  // Narrow layouts show one pane at a time, so moving the keyboard has to turn
+  // the page as well — going back through history rather than pushing onto it,
+  // so Escape and the Back button agree about where "back" is. Desktop shows
+  // all three at once and has nothing to turn.
+  function syncMobile(next) {
+    if (!App.mobile || !App.mobile.narrow() || App.mobile.current() === next) return;
+    if (PANES.indexOf(next) < PANES.indexOf(App.mobile.current())) App.mobile.back(next);
+    else App.mobile.show(next);
+  }
 
-  function listMove(delta) { setReader(false); App.list.move(delta); }
+  // Enter: one pane deeper, but only if there is something there to go to —
+  // an empty sidebar or a cursor on no row leaves the keyboard where it is.
+  function enter() {
+    if (current() === "folders") { if (App.shell.openFocusedFolder()) setPane("list"); return; }
+    if (pane !== "list") return;
+    if (!App.list.hasFocus()) App.list.move(1);   // no cursor yet — start at the top
+    if (App.list.openFocused()) setPane("reader");
+  }
+
+  // Escape steps back one pane, in two halves called from different points in
+  // onEscape(): dropping out of a thread comes before clearing the search box,
+  // and dropping out of the list comes after it. Each answers false when it is
+  // not the step to take, so onEscape() can carry on down its list.
+  function leaveReader() {
+    if (current() !== "reader") return false;
+    setPane("list");
+    return true;
+  }
+
+  function leaveList() {
+    if (current() !== "list") return false;
+    setPane("folders");     // the sidebar is the floor — Escape there does nothing
+    return true;
+  }
+
+  // j/k never open anything, so they are also how you take the keyboard back
+  // off the thread without giving up your place in the list.
+  function move(delta) {
+    if (current() === "folders") return App.shell.moveFolder(delta);
+    if (pane === "reader") setPane("list");
+    App.list.move(delta);
+  }
 
   function arrow(delta) {
-    if (readerHasKeys()) return App.reader.scrollBy(delta, 0.15);
+    if (current() === "folders") return App.shell.moveFolderAndOpen(delta);
+    if (pane === "reader") return App.reader.scrollBy(delta, 0.15);
     App.list.moveAndOpen(delta);
   }
 
@@ -44,16 +98,22 @@ App.keys = (function () {
     {
       group: "Navigate",
       items: [
-        { keys: ["j"], show: "j", label: "Next message",
-          run: () => listMove(1) },
-        { keys: ["k"], show: "k", label: "Previous message",
-          run: () => listMove(-1) },
+        { keys: ["j"], show: "j", label: "Next folder / message",
+          run: () => move(1) },
+        { keys: ["k"], show: "k", label: "Previous folder / message",
+          run: () => move(-1) },
         { keys: ["ArrowDown"], show: "↓", label: "Next + open / scroll",
           run: () => arrow(1) },
         { keys: ["ArrowUp"], show: "↑", label: "Previous + open / scroll",
           run: () => arrow(-1) },
-        { keys: ["Enter", "o"], show: "↵ / o", label: "Open + read thread",
-          run: () => openAndRead() },
+        // The two labels are the same three panes read each way, and the key
+        // beside them says which way. Anything longer than this is truncated by
+        // the box, which is what makes them terse rather than a sentence.
+        { keys: ["Enter", "o"], show: "↵ / o", label: "folder → list → thread",
+          run: () => enter() },
+        // Handled ahead of the table in handle(), like the modified keys below,
+        // because Escape has to work while a modal or the composer has focus.
+        { show: "Esc", label: "thread → list → folder" },
         { keys: ["PageDown"], show: "PgDn", label: "End of thread",
           run: () => App.reader.scrollEnd(1) },
         { keys: ["PageUp"], show: "PgUp", label: "Top of thread",
@@ -100,7 +160,8 @@ App.keys = (function () {
         { show: "⌘/Ctrl ↵", label: "Send message" },
         // Handled ahead of the table in handle() — modified keys never reach it.
         { show: "⌘/Ctrl A", label: "Select all in list" },
-        { show: "Esc", label: "Close / clear" },
+        // Escape is listed under Navigate — it steps back a pane once there is
+        // nothing left to close, and one row for it is enough.
         { keys: ["?"], show: "?", label: "Toggle this box", run: () => toggleBox() },
       ],
     },
@@ -144,13 +205,17 @@ App.keys = (function () {
     if (App.bulk.isActive()) return App.bulk.clear();
     // Hand the arrows back to the list before Escape starts closing things:
     // leaving a thread you were reading is the smaller, more likely intent.
-    if (readerHasKeys()) return setReader(false);
+    if (leaveReader()) return;
+    // A search is narrowing the list you are standing in, so clear it before
+    // stepping out of the list altogether — otherwise backing up to the folders
+    // strands the results behind you with no way to see them again.
     const input = $("#search-input");
     if (App.search.isActive() || document.activeElement === input) {
       App.search.clear(true);
       input.blur();
       return;
     }
+    if (leaveList()) return;
     if (isTyping(document.activeElement)) document.activeElement.blur();
   }
 
@@ -244,8 +309,13 @@ App.keys = (function () {
 
   function init() {
     renderBox();
+    // The folders are where the keyboard starts, before there is a list or a
+    // thread to hand it to.
+    setPane("folders");
     document.addEventListener("keydown", handle);
   }
 
-  return { init, handle };
+  // `focus` is for the mouse: a click that lands in a pane takes the keyboard
+  // with it, so the two never end up pointing at different things.
+  return { init, handle, focus: setPane, pane: () => pane };
 })();

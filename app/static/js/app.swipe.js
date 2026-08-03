@@ -103,27 +103,30 @@ App.swipe = (function () {
   async function commit(el, r, act) {
     el.classList.remove("swiping");
     el.classList.add("swipe-armed");
-    // The row sits there, emptied, until the request comes back; a second swipe
-    // across it in the meantime would file the same mail twice.
+    // Marked busy for good: once hidden the row cannot be swiped again, so the
+    // same mail can never be filed twice.
     el.dataset.swipeBusy = "1";
     setX(el, act === "trash" ? el.offsetWidth : -el.offsetWidth);
+    // The contents get their slide off-screen, then the row closes up — without
+    // waiting on the request that makes it true, whose round trip is what made
+    // a swipe feel stuck against a remote server. The reload after it settles
+    // reconciles the list either way.
+    setTimeout(() => { if (el.isConnected) el.style.display = "none"; }, SETTLE);
+    // The reader is a separate page down here and would otherwise keep showing
+    // the conversation that just left the folder.
+    if (App.reader && App.list.activeId() === r.id) App.reader.clear();
     try {
       await apply(r, act);
     } catch (e) {
       // The mail is still where it was, so the row has to come back rather than
-      // sit blank over a red bed.
+      // stay gone over a lie.
+      el.style.display = "";
       delete el.dataset.swipeBusy;
       release(el);
       alert((act === "trash" ? "Could not delete: " : "Could not archive: ")
         + (e.message || "action failed"));
       return;
     }
-    // Out of the flow before the reload lands: the rows below close the gap at
-    // once instead of holding an empty slot for the width of a round trip.
-    el.style.display = "none";
-    // The reader is a separate page down here and would otherwise keep showing
-    // the conversation that just left the folder.
-    if (App.reader && App.list.activeId() === r.id) App.reader.clear();
     if (App.shell) await App.shell.reloadList();
   }
 

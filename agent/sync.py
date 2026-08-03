@@ -286,7 +286,7 @@ def _reconcile(db, bridge: Bridge, mailbox, batch: int,
     db.commit()
 
 
-def _extract_all(db, limit_batches: int = 200) -> int:
+def _extract_all(db, limit_batches: int = 200, on_batch=None) -> int:
     """Drain pending attachment text extraction through Tika."""
     total = 0
     for _ in range(limit_batches):
@@ -295,10 +295,12 @@ def _extract_all(db, limit_batches: int = 200) -> int:
         if not n:
             break
         total += n
+        if on_batch:
+            on_batch(total)
     return total
 
 
-def _thumb_all(db, limit_batches: int = 200) -> int:
+def _thumb_all(db, limit_batches: int = 200, on_batch=None) -> int:
     """Drain pending attachment previews."""
     total = 0
     for _ in range(limit_batches):
@@ -307,10 +309,12 @@ def _thumb_all(db, limit_batches: int = 200) -> int:
         if not n:
             break
         total += n
+        if on_batch:
+            on_batch(total)
     return total
 
 
-def _prune_all(db, months: int, limit_batches: int = 200) -> int:
+def _prune_all(db, months: int, limit_batches: int = 200, on_batch=None) -> int:
     """Strip content from stored mail that has slid out of the content window."""
     cutoff = ingest.content_cutoff(months)
     if cutoff is None:
@@ -322,14 +326,92 @@ def _prune_all(db, months: int, limit_batches: int = 200) -> int:
         if not n:
             break
         total += n
+        if on_batch:
+            on_batch(total)
     return total
 
 
-def index_once(months: int = 0) -> tuple[int, int, int]:
-    """Drain the attachment queues once. Returns (extracted, previews, pruned)."""
+# How often a running drain says it is still running. Long enough that a queue
+# which drains quickly prints nothing at all, short enough that a wait of
+# minutes never looks like a hang.
+_PROGRESS_EVERY = 15.0
+
+# Below this, a queue is not worth announcing: it drains in seconds, and the
+# end-of-pass summary already reports it. The backlog this exists for is four
+# figures.
+_ANNOUNCE_ABOVE = 50
+
+
+class _IndexReporter:
+    """Throttled progress lines for a drain that can run for many minutes.
+
+    The first pass over a real mailbox queues thousands of attachments, and the
+    drain used to log only once it had finished all of them: after "sync
+    complete" the agent went silent for ten minutes with no way to tell work
+    from a wedge (issue #3). So a phase with a real backlog says so, and then
+    keeps saying where it is every `_PROGRESS_EVERY` seconds until it is done.
+
+    One clock across all phases, so the cadence is the agent's, not each
+    queue's, and a drain that finishes inside one interval stays silent — this
+    is here to explain a backlog, not to narrate a healthy poll.
+    """
+
+    def __init__(self, db, every: float = _PROGRESS_EVERY) -> None:
+        self._db = db
+        self._every = every
+        self._last = time.monotonic()
+
+    def phase(self, label: str, queue: str | None = None):
+        """Return one drain phase's per-batch callback.
+
+        ``queue`` names the attachment queue to size ('extract' / 'thumb'),
+        counted once — after the first batch has proven there is work to do.
+        Deferring it that far means an idle poll, which is nearly every poll,
+        pays for no count at all. Without it the phase reports a bare running
+        total, which is all the prune can offer: "what is past the cutoff" is a
+        scan of the whole message table, and draining it is the cheaper answer.
+        """
+        state: dict[str, int | None] = {"total": None}
+
+        def report(done: int) -> None:
+            if queue and state["total"] is None:
+                state["total"] = done + ingest.pending_attachment_count(self._db, queue)
+                if state["total"] >= _ANNOUNCE_ABOVE:
+                    log.info(f"indexing {state['total']} {label} — this can take a "
+                             "while on a first run", "indexer")
+            now = time.monotonic()
+            if now - self._last < self._every:
+                return
+            self._last = now
+            total = state["total"]
+            if not total:
+                log.info(f"  {label}: {done} so far", "indexer")
+                return
+            # Capped at the total we measured: a sync thread can queue more
+            # while this runs, and "112%" reads as a bug rather than as luck.
+            log.info(f"  {label}: {done}/{total} ({min(100, done * 100 // total)}%)",
+                     "indexer")
+
+        return report
+
+
+def index_once(months: int = 0, report: bool = False) -> tuple[int, int, int]:
+    """Drain the attachment queues once. Returns (extracted, previews, pruned).
+
+    With ``report`` the drain narrates itself as it goes; see _IndexReporter.
+    Off by default so that callers which only want the numbers (tests, the
+    preview backfill) stay quiet.
+    """
     db = SessionLocal()
     try:
-        return _extract_all(db), _thumb_all(db), _prune_all(db, months)
+        if not report:
+            return _extract_all(db), _thumb_all(db), _prune_all(db, months)
+        reporter = _IndexReporter(db)
+        return (
+            _extract_all(db, on_batch=reporter.phase("attachment(s) to index", "extract")),
+            _thumb_all(db, on_batch=reporter.phase("preview(s) to render", "thumb")),
+            _prune_all(db, months, on_batch=reporter.phase("message(s) pruned to headers")),
+        )
     finally:
         db.close()
 
@@ -354,7 +436,7 @@ def run_indexer_forever(cfg: AgentConfig) -> None:
             # is database-only work over every account at once, and it has to
             # keep happening on a mailbox where no new mail is arriving — the
             # cutoff moves whether or not anything is being fetched.
-            extracted, thumbed, pruned = index_once(cfg.content_window_months)
+            extracted, thumbed, pruned = index_once(cfg.content_window_months, report=True)
             if extracted or thumbed or pruned:
                 idle = 0
                 log.ok(f"{extracted} attachment(s) extracted, "

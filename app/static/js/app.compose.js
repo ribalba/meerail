@@ -15,7 +15,9 @@ App.compose = (function () {
   let suggestSeq = 0;      // drops out-of-order sender-for replies
   let suggestKey = null;   // recipient set the last lookup was made for
   let suggestTimer = null;
+  let htmlMode = false;    // send a formatted copy alongside the plain text
   const $ = (s) => document.querySelector(s);
+  const HTML_KEY = "meerail.compose.html";
 
   // One entry per sendable address: the account primary plus its extra
   // "send as" addresses (Proton aliases). Drives the From dropdown.
@@ -298,6 +300,35 @@ App.compose = (function () {
     return `\n\n${prefilledFooter}${text || ""}`;
   }
 
+  // --- "Send as HTML email" ---------------------------------------------
+  // Off, the message is the text that is on screen and nothing else — the way
+  // every mail this composer has ever sent went out. On, that text is rendered
+  // and the message goes as HTML instead.
+  //
+  // Instead, not alongside: sending both as a multipart/alternative is the
+  // textbook answer and was the first one tried, but the pair does not survive
+  // delivery — see _build_mime in app/routers/compose.py. So this really is a
+  // choice between two kinds of mail, and the price of the formatted one is
+  // that a reader who cannot render HTML sees the markup.
+  //
+  // It is decided per message, because whether formatting is worth that is a
+  // fact about the message: a table of figures wants it, a two-line reply to a
+  // mailing list does not. The setting only chooses which way it starts.
+
+  function htmlDefault() { return localStorage.getItem(HTML_KEY) === "1"; }
+
+  function setHtmlDefault(on) { localStorage.setItem(HTML_KEY, on ? "1" : "0"); }
+
+  function setHtmlMode(on) {
+    htmlMode = !!on;
+    const btn = $("#compose-html");
+    btn.setAttribute("aria-pressed", String(htmlMode));
+    btn.classList.toggle("on", htmlMode);
+    btn.title = htmlMode
+      ? "On: the markdown is rendered and the message is sent as HTML"
+      : "Off: the message goes out as plain text, exactly as it is written";
+  }
+
   // Cc/Bcc stay folded away until asked for. Hiding clears the field: a
   // recipient the user cannot see is one they cannot decide to remove, so an
   // invisible row must never carry an address into sendNow().
@@ -338,6 +369,7 @@ App.compose = (function () {
     $("#compose-cc").value = cc;
     $("#compose-bcc").value = bcc;
     $("#compose-subject").value = ctx.subject || "";
+    setHtmlMode(htmlDefault());       // per message, so every draft starts from the setting
     body.setText(withFooter(ctx.body_text, ctx.account_id));
     show(ctx.title || "New Message");
     focusBody();
@@ -390,14 +422,18 @@ App.compose = (function () {
     busy(true);
     try {
       const from = identities[Number($("#compose-from").value)] || identities[0] || {};
+      // The editor only decorates; the markdown source the user typed is what
+      // goes into body_text, and with the toggle off that is the whole message,
+      // sent as text/plain exactly as it always has been. A draft with nothing
+      // in it has nothing to render, so it stays plain either way.
+      const text = body.getText();
       await App.api.sendMail({
         account_id: from.account_id,
         from_address: from.address,
         to, cc: parseAddrs($("#compose-cc").value), bcc: parseAddrs($("#compose-bcc").value),
         subject: $("#compose-subject").value,
-        // The editor only decorates; what leaves here is the markdown source
-        // the user typed, sent as text/plain exactly as before.
-        body_text: body.getText(),
+        body_text: text,
+        body_html: htmlMode && text.trim() ? App.markdown.toMail(text) : "",
         in_reply_to: replyTo, references,
         attachments: staged.map((a) => a.id),
       });
@@ -495,6 +531,8 @@ App.compose = (function () {
     $("#compose-send-archive").addEventListener("click", sendAndArchive);
     $("#compose-send-ticket").addEventListener("click", sendAndTicket);
     $("#compose-attach").addEventListener("click", () => $("#compose-file").click());
+    $("#compose-html").addEventListener("click", () => setHtmlMode(!htmlMode));
+    setHtmlMode(htmlDefault());
     $("#compose-cc-toggle").addEventListener("click", () => toggleExtra("cc"));
     $("#compose-bcc-toggle").addEventListener("click", () => toggleExtra("bcc"));
     $("#compose-file").addEventListener("change", (e) => onFiles(e.target.files));
@@ -548,6 +586,7 @@ App.compose = (function () {
   return {
     init, openNew, openReply, close, sendNow, sendDefault, sendAndArchive, sendAndTicket,
     minimize, restore,
+    htmlDefault, setHtmlDefault,     // the settings modal owns the checkbox, not the state
     isOpen: () => !$("#compose-modal").hidden,
     isMinimized,
     refreshAccounts: async () => {

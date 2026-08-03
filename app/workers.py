@@ -29,8 +29,15 @@ async def contacts_loop() -> None:
     # Build once at startup (so autocomplete works immediately), then refresh
     # periodically to pick up newly-synced mail.
     while True:
+        count = 0
         try:
-            await asyncio.to_thread(_rebuild_contacts_once)
-        except Exception:
-            pass
-        await asyncio.sleep(6 * 3600)
+            count = await asyncio.to_thread(_rebuild_contacts_once)
+        except Exception as e:  # noqa: BLE001
+            # Never let a bad rebuild kill the loop, but don't swallow it either:
+            # a silent failure here looks exactly like "autocomplete is broken".
+            print(f"contacts rebuild failed: {e!r}", flush=True)
+        # A fresh install starts the app before the agent has written its first
+        # message, so the startup rebuild finds nothing. Sleeping the full period
+        # on that result would leave autocomplete dead for the rest of the day;
+        # poll quickly until there is actually something to build from.
+        await asyncio.sleep(6 * 3600 if count else 60)

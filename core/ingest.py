@@ -512,6 +512,22 @@ def _release_before_slow_work(db) -> None:
     db.commit()
 
 
+_PENDING_QUEUES = {"extract": Attachment.extract_status, "thumb": Attachment.thumb_status}
+
+
+def pending_attachment_count(db, queue: str) -> int:
+    """How many attachments are queued for 'extract' text or 'thumb' previews.
+
+    Only used to say how much work a drain has left. A first run over a real
+    mailbox queues thousands of attachments and takes many minutes, and a
+    number to count down is the difference between "working" and "wedged".
+    """
+    return db.scalar(
+        select(func.count()).select_from(Attachment)
+        .where(_PENDING_QUEUES[queue] == "pending")
+    ) or 0
+
+
 def extract_pending(db, limit: int = EXTRACT_BATCH) -> int:
     """Run Tika over a batch of pending attachments and refresh search text.
 

@@ -8,6 +8,9 @@
   <link rel="icon" type="image/png" href="/static/img/logo-square.png" />
   <link rel="apple-touch-icon" href="/static/img/logo-square.png" />
   <link rel="stylesheet" href="/static/css/mail.css" />
+  <!-- In <head> and blocking on purpose: it sets the theme attribute on <html>
+       before the first paint, so a forced theme never flashes the other one. -->
+  <script src="/static/js/app.theme.js"></script>
 </head>
 <body>
   <!-- data-mview drives the narrow layout only: below the breakpoint the three
@@ -52,9 +55,6 @@
                   title="What you can type in here"></button>
         </div>
         <div class="search-controls" id="search-controls" hidden>
-          <label class="rx-toggle" title="Match with a POSIX regular expression">
-            <input type="checkbox" id="rx-toggle" /> <span>Regex</span>
-          </label>
           <!-- One option per folder, filled in by app.search.js from the sidebar. -->
           <select id="scope-select" class="search-select" title="Search scope">
             <option value="all">All Mailboxes</option>
@@ -64,6 +64,11 @@
             <option value="2">Last 2 years</option>
             <option value="1">Last year</option>
           </select>
+          <!-- Last, so the short time window and this pair up on the second line
+               when the folder name is long enough to wrap the row. -->
+          <label class="rx-toggle" title="Match with a POSIX regular expression">
+            <input type="checkbox" id="rx-toggle" /> <span>Regex</span>
+          </label>
           <span class="search-status" id="search-status"></span>
         </div>
       </div>
@@ -96,6 +101,24 @@
     </section>
   </div>
 
+  <!-- Attachment viewer — narrow layouts only, opened by app.mobile.js. A PDF
+       opened in a tab of its own hands the phone to the browser's viewer, which
+       has no route back to the thread; this keeps it inside the app under a
+       header that has. The two links on the right are the escape hatch for
+       anything the frame will not render. -->
+  <div class="att-viewer" id="att-viewer" hidden>
+    <div class="att-viewer-bar">
+      <button class="mobile-back" id="btn-back-message" aria-label="Back to the message">
+        <span>Message</span>
+      </button>
+      <span class="att-viewer-name" id="att-viewer-name"></span>
+      <a class="icon-btn" id="att-viewer-open" target="_blank" rel="noopener"
+         title="Open in a new tab" aria-label="Open in a new tab"></a>
+      <a class="icon-btn" id="att-viewer-save" title="Download" aria-label="Download"></a>
+    </div>
+    <iframe class="att-viewer-frame" id="att-viewer-frame" title="Attachment"></iframe>
+  </div>
+
   <!-- Settings / accounts modal -->
   <div class="modal-backdrop" id="settings-modal" hidden>
     <div class="modal">
@@ -116,12 +139,42 @@
 
         <h3 class="settings-heading">Appearance</h3>
         <div class="settings-section">
+          <label for="theme-mode">Theme</label>
+          <select id="theme-mode">
+            <option value="system">Follow the system</option>
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+          </select>
+          <p class="muted small">
+            meerail follows your operating system's light or dark setting on its
+            own. Pick <em>Light</em> or <em>Dark</em> to hold it there instead,
+            whatever the system does. Stored in this browser only.
+          </p>
+        </div>
+
+        <div class="settings-section">
           <label for="age-days">Age tint horizon (days)</label>
           <input type="number" id="age-days" min="0" max="3650" step="1" />
           <p class="muted small">
             Messages in the list fade from white towards red as they age,
             reaching full red once they are this old. Set to <code>0</code> to
             switch the tint off. Stored in this browser only.
+          </p>
+        </div>
+
+        <h3 class="settings-heading">Composing</h3>
+        <div class="settings-section">
+          <label class="settings-check" for="compose-html-default">
+            <input type="checkbox" id="compose-html-default" />
+            <span>Send as HTML email by default</span>
+          </label>
+          <p class="muted small">
+            Which way the composer's <em>Send as HTML email</em> button starts.
+            Turned on, the markdown you write is rendered and the message is
+            sent as HTML, so headings, lists and links arrive formatted. Turned
+            off, the message goes out as plain text exactly as you typed it.
+            Either way it stays a per-message choice. Stored in this browser
+            only.
           </p>
         </div>
 
@@ -306,6 +359,11 @@
         <div class="compose-actions">
           <button id="compose-attach" class="icon-btn" title="Attach file"></button>
           <input type="file" id="compose-file" multiple hidden />
+          <!-- Renders the markdown and sends the message as HTML rather than as
+               plain text; see app.compose.js. Its title is written by
+               setHtmlMode(), which is also what knows which way it is. -->
+          <button type="button" class="compose-toggle" id="compose-html"
+                  aria-pressed="false">Send as HTML email</button>
           <span id="compose-status" class="compose-status"></span>
           <!-- Send & Archive is the default, so it sits last where the primary
                button has always been. Neither variant is drawn unless it can

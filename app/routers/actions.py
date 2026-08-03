@@ -336,8 +336,10 @@ def _thread_move(db: DBSession, thread_id: str, account_id: int, target: Mailbox
     _recompute(db, touched)
     db.commit()
     _wake_agent(db, msgs[0])
-    for msg in msgs:
-        events.publish({"type": "present", "message_id": msg.id})
+    # One event for the conversation, not one per message: each publish() is a
+    # pg_notify round trip of its own (see _announce), and nothing reads the
+    # message_id off these — to the UI they are just "something changed, reload".
+    events.publish({"type": "present", "moved": moved})
     return moved
 
 

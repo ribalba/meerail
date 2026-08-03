@@ -126,6 +126,7 @@ App.search = (function () {
     const applied = await run();
     if (!applied) return;
     if (!App.list.count()) return;      // no results — stay in the box and keep typing
+    if (App.keys) App.keys.focus("list");
     App.list.setFocus(0);
     App.list.openFocused();
     els().input.blur();

@@ -206,6 +206,25 @@ def test_tika_failure_leaves_attachment_pending_for_retry(account, monkeypatch):
     assert attachment["extract_status"] == "pending"
 
 
+def test_pending_attachment_count_sizes_the_indexing_queue(account):
+    """The agent's "indexing N attachment(s)" line counts real queued work."""
+    email = account["email"]
+    raw = make_message(f"<queued-{uuid.uuid4().hex}@t>", "Queued for indexing",
+                       "x@y.com", email, "body", T0, text_attachment=b"index me")
+    dbfixture.ingest_raw_message(email, raw, uid=1)
+
+    with dbfixture.session() as db:
+        assert ingest.pending_attachment_count(db, "extract") >= 1
+
+    dbfixture.extract_all()
+    dbfixture.thumb_all()
+
+    # Drained to zero, so a steady-state pass announces nothing at all.
+    with dbfixture.session() as db:
+        assert ingest.pending_attachment_count(db, "extract") == 0
+        assert ingest.pending_attachment_count(db, "thumb") == 0
+
+
 def test_previews_are_precomputed_for_pdfs_and_images(account):
     """The agent's thumbnail pass renders previews the read API then advertises."""
     pytest.importorskip("pymupdf", reason="preview rendering is an agent-side dep")
@@ -235,6 +254,29 @@ def test_previews_are_precomputed_for_pdfs_and_images(account):
         # rather than trusting the header we set ourselves.
         assert body[:4] == b"RIFF" and body[8:12] == b"WEBP"
         assert len(body) < 100_000, "a preview should be small"
+
+
+def test_message_source_serves_the_original_bytes(account):
+    """"View source" hands back exactly what was ingested, as inert text."""
+    email, aid = account["email"], account["id"]
+    mid = f"source-{uuid.uuid4().hex}@t"
+    raw = make_message(f"<{mid}>", "Show me the source", "x@y.com", email,
+                       "the body", T0, text_attachment=b"notes")
+    dbfixture.ingest_raw_message(email, raw, uid=1)
+
+    msg = _detail_by_subject(aid, "Show me the source")
+    assert msg["has_source"] is True
+
+    code, body, headers = api_bytes(f"/api/messages/{msg['id']}/source")
+    assert code == 200
+    assert body == raw
+    # Rendered in the tab rather than downloaded, and never sniffed into
+    # something the browser would execute on our own origin.
+    assert headers["Content-Type"].startswith("text/plain")
+    assert headers["Content-Disposition"].startswith("inline;")
+    assert headers["X-Content-Type-Options"] == "nosniff"
+
+    assert api("GET", "/api/messages/99999999/source")[0] == 404
 
 
 def test_preview_pass_skips_types_it_cannot_render(account):

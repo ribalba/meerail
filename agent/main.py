@@ -90,7 +90,19 @@ def main() -> int:
         # never starts. Drain it inline instead, or a one-shot run would fetch
         # the mail and leave every attachment unindexed and unsearchable. The
         # window prune rides the same call, for the same reason.
-        index_once(cfg.content_window_months)
+        #
+        # report=True because this is the phase that runs after the last "sync
+        # complete" line: on a first run it is minutes of work behind a silent
+        # prompt, which reads as a hung process (issue #3).
+        extracted, thumbed, pruned = index_once(cfg.content_window_months, report=True)
+        log.ok(f"indexing complete — {extracted} attachment(s) extracted, "
+               f"{thumbed} preview(s) rendered, {pruned} message(s) pruned to headers",
+               "indexer")
+        # The exit itself needs saying too: --once is the Getting Started
+        # command, and the last thing it printed used to be a sync line that
+        # left it ambiguous whether the process was done or stalled.
+        log.info("one-shot run finished — start without --once to keep syncing "
+                 "and to keep the web app's agent status green.")
         return 1 if failed else 0
 
     # Only for the continuous mode: --once has no wait for a refresh to cut short.

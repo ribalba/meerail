@@ -52,6 +52,10 @@ class SendRequest(BaseModel):
     bcc: list[EmailStr] = []
     subject: str = ""
     body_text: str = ""
+    # A rendering of body_text, built by the composer when "Send as HTML email"
+    # is on. Present, it *is* the message body — see _build_mime for why it
+    # cannot be an alternative alongside the text.
+    body_html: str = ""
     in_reply_to: str | None = None
     references: list[str] = []
     attachments: list[str] = []          # staging ids from /attachments
@@ -143,8 +147,37 @@ def _build_mime(req: SendRequest, from_addr: str) -> tuple[EmailMessage, list[st
         m["References"] = " ".join(f"<{r}>" for r in refs)
     # Body verbatim: the composer prefills the account footer into the editor,
     # so whatever the user left in there is exactly what goes out.
-    m.set_content(req.body_text or "")
+    #
+    # "Send as HTML email" makes the message an HTML one, rather than an HTML
+    # alternative to a plain-text one. multipart/alternative is the textbook
+    # shape and is what this sent at first — both renderings, plain text first,
+    # the reader's client picks whichever it prefers. It does not survive the
+    # trip. Proton keeps a single body per message, and handed the pair it
+    # keeps the plain text and discards the HTML, so the mail arrives as raw
+    # markdown. That was measured, not guessed: the alternative was sent with
+    # RFC-correct CRLF endings, in the right order, with no stray headers on
+    # either part, and it still landed as text/plain.
+    #
+    # Nothing about the message was wrong. There was simply a choice available
+    # to get wrong, so do not offer one. The button says HTML and the mail is
+    # HTML. The cost is the plain-text fallback — a client that cannot render
+    # HTML now shows the markup — and that is the trade the button makes, once,
+    # per message, when the user presses it. With it off nothing has changed:
+    # the message is text/plain and nothing else, exactly as it always was.
+    if (req.body_html or "").strip():
+        m.set_content(req.body_html, subtype="html")
+    else:
+        m.set_content(req.body_text or "")
     staged_paths = _attach_staged(m, req.attachments)
+    # MIME-Version belongs to the message. RFC 2045 defines it at the top level
+    # and leaves it undefined on a body part, and no ordinary mail client emits
+    # one down there — but Python stamps one on the parts it builds, both for an
+    # alternative and for an attachment. A part carrying it can read to a
+    # gateway as an encapsulated message rather than as content to display,
+    # which is a quiet way to have one dropped in transit.
+    for part in m.walk():
+        if part is not m:
+            del part["MIME-Version"]
     rcpt = [str(a) for a in (req.to + req.cc + req.bcc)]
     return m, rcpt, staged_paths
 
@@ -165,6 +198,7 @@ def send(req: SendRequest, db: DBSession = Depends(get_db)):
         to_addrs=[str(a) for a in req.to], cc_addrs=[str(a) for a in req.cc],
         bcc_addrs=[str(a) for a in req.bcc], subject=req.subject,
         body_text=req.body_text or "",
+        body_html=req.body_html or "",
         in_reply_to=req.in_reply_to, references=req.references,
         attachments=[p.name for p in staged_paths],
         raw_mime=m.as_string(),

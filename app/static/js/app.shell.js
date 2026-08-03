@@ -109,6 +109,79 @@ App.shell = (function () {
     // scope menu too, otherwise it offers a list of folders that no longer
     // matches the one beside it.
     if (App.search) App.search.syncScope();
+    paintFolderFocus();   // the rows were just rebuilt — put the cursor back on
+  }
+
+  // --- Folder keyboard cursor ---
+  // The sidebar is the first of the three keyboard panes (folders → list →
+  // thread; see app.keys.js). The cursor is held as a key rather than an index
+  // because renderSidebar() rebuilds every row on each refresh and the order
+  // shifts as folders are pinned or created.
+  let folderFocusKey = null;
+  let folderKeys = false;     // does the sidebar own the arrows right now?
+
+  function folderRows() {
+    return Array.from(document.querySelectorAll("#mailbox-tree .mailbox-row"));
+  }
+
+  function paintFolderFocus(scroll = false) {
+    const rows = folderRows();
+    $("#mailbox-tree").classList.toggle("keys", folderKeys);
+    for (const el of rows) el.classList.toggle("focused", el.dataset.key === folderFocusKey);
+    if (!scroll) return;
+    const el = rows.find((n) => n.dataset.key === folderFocusKey);
+    if (el) el.scrollIntoView({ block: "nearest" });
+  }
+
+  // Falls back to the open folder when the cursor has no row — at boot, or
+  // after the row it sat on was unpinned — so j/k carry on from where you are
+  // rather than from the top of the tree.
+  function folderIndex(rows) {
+    const at = (key) => rows.findIndex((el) => el.dataset.key === key);
+    const cur = at(folderFocusKey);
+    return cur >= 0 ? cur : (selection ? at(selection.key) : -1);
+  }
+
+  function moveFolder(delta) {
+    const rows = folderRows();
+    if (!rows.length) return;
+    const cur = folderIndex(rows);
+    const next = cur < 0 ? (delta > 0 ? 0 : rows.length - 1)
+                         : Math.min(rows.length - 1, Math.max(0, cur + delta));
+    folderFocusKey = rows[next].dataset.key;
+    paintFolderFocus(true);
+  }
+
+  // Answers false when there is no row to open — an empty sidebar before the
+  // first account syncs — so the caller can leave the keyboard where it is
+  // instead of handing it to a list that will never appear.
+  function openFocusedFolder() {
+    const rows = folderRows();
+    const cur = folderIndex(rows);
+    if (cur < 0) return false;
+    folderFocusKey = rows[cur].dataset.key;
+    paintFolderFocus();
+    // Already standing in this folder: stepping back into the list must not
+    // reload it, which would throw away the cursor's place and every page past
+    // the first. Search results are the exception — they are not this folder,
+    // so re-entering it does have to fetch it back.
+    const showing = selection && selection.key === folderFocusKey
+      && !(App.search && App.search.isActive());
+    if (!showing) select(selections[folderFocusKey]);
+    return true;
+  }
+
+  // Arrows preview as they go, the same bargain the list strikes: j/k only walk
+  // the tree, ↑/↓ walk it and load each folder as they land.
+  function moveFolderAndOpen(delta) {
+    moveFolder(delta);
+    openFocusedFolder();
+  }
+
+  function setFolderKeyFocus(state) {
+    folderKeys = state;
+    if (state && !folderFocusKey && selection) folderFocusKey = selection.key;
+    paintFolderFocus(state);
   }
 
   async function toggleFavorite(mailboxId, favorite) {
@@ -135,6 +208,11 @@ App.shell = (function () {
     document.querySelectorAll(".mailbox-row.active").forEach((n) => n.classList.remove("active"));
     const el = document.querySelector(`.mailbox-row[data-key="${sel.key}"]`);
     if (el) el.classList.add("active");
+    // However the folder was picked — click, "g i", the cursor itself — the
+    // keyboard cursor follows it, so Escaping back to the sidebar lands on the
+    // folder you are actually in.
+    folderFocusKey = sel.key;
+    paintFolderFocus();
     App.list.reset();
     App.reader.clear();
     await loadList();
@@ -414,7 +492,9 @@ App.shell = (function () {
     $("#settings-modal").hidden = false;
     renderSettingsAccounts();
     loadMeeratoUrl();
+    $("#theme-mode").value = App.theme.mode();
     $("#age-days").value = App.list.ageDays();
+    $("#compose-html-default").checked = App.compose.htmlDefault();
   }
   function closeSettings() { $("#settings-modal").hidden = true; }
   function settingsOpen() { return !$("#settings-modal").hidden; }
@@ -490,7 +570,15 @@ App.shell = (function () {
     });
     $("#btn-refresh").addEventListener("click", requestRefresh);
     $("#meerato-save").addEventListener("click", saveMeeratoUrl);
+    // Immediate, like the age tint below it: the whole window repaints as you
+    // pick, which is the only honest preview a theme picker can give.
+    $("#theme-mode").addEventListener("change", (e) => App.theme.set(e.target.value));
     $("#age-days").addEventListener("input", applyAgeDays);
+    // Like the age tint, this is local and takes effect immediately — but only
+    // on the next draft: an open composer's button is that message's answer,
+    // and the setting is not entitled to overrule it mid-sentence.
+    $("#compose-html-default").addEventListener("change", (e) =>
+      App.compose.setHtmlDefault(e.target.checked));
   }
 
   function selectDefault() {
@@ -539,7 +627,8 @@ App.shell = (function () {
   }
 
   return { boot, currentMailboxId, mailboxesFor, accounts, reloadList, goto, closeSettings, settingsOpen,
-           closeFolder, folderOpen, listSelector, currentTitle, listTotal: () => listTotal };
+           closeFolder, folderOpen, listSelector, currentTitle, listTotal: () => listTotal,
+           moveFolder, moveFolderAndOpen, openFocusedFolder, setFolderKeyFocus };
 })();
 
 document.addEventListener("DOMContentLoaded", App.shell.boot);

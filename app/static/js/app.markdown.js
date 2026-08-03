@@ -1,13 +1,16 @@
-/* meerail markdown: one parser, two consumers.
+/* meerail markdown: one parser, three consumers.
 
-   Mail leaves here as text/plain and always has — markdown is a *convention*
-   inside that plain text, not a second MIME part. Both consumers below are
-   presentation only; nothing here changes a byte of what gets sent.
+   Markdown is a *convention* inside plain text, and unless the composer is
+   asked for otherwise, that plain text is the mail: the source the user typed
+   goes out as text/plain, markers and all.
 
      toHtml(text)  — the reader. Markers are consumed: `**a**` becomes bold "a".
      editor(el)    — the composer. Markers are KEPT and dimmed: `**a**` shows
                      the asterisks alongside bold "a", so what you see is still
                      literally what the recipient receives.
+     toMail(text)  — the composer again, on request. The reader's rendering,
+                     packaged to be sent *as* the message. The only consumer
+                     that decides what the recipient gets.
 
    Everything is escaped on the way in and the HTML is assembled here, so no
    message content ever reaches innerHTML unescaped. */
@@ -39,9 +42,12 @@ App.markdown = (function () {
   const bareUrl = (s) => String(s).replace(/^(?:https?:\/\/|mailto:)?(?:www\.)?/i, "")
     .replace(/\/+$/, "").toLowerCase();
 
+  // The separating space lives *inside* the span, not before it. The mail
+  // renderer drops this whole element (see toMail), and a space left outside it
+  // would strand itself in front of whatever punctuation followed the link.
   function hrefTag(text, url) {
     if (safeUrl(url) === "#" || bareUrl(text.trim()) === bareUrl(url)) return "";
-    return ` <span class="md-href">&lt;${esc(url)}&gt;</span>`;
+    return `<span class="md-href"> &lt;${esc(url)}&gt;</span>`;
   }
 
   function wrap(tag, delim, inner, keep) {
@@ -185,6 +191,84 @@ App.markdown = (function () {
       out.push(`<p>${para.join("<br>")}</p>`);
     }
     return out.join("");
+  }
+
+  // --- Mail: markdown -> the message body -------------------------------
+  //
+  // This becomes the message when "Send as HTML email" is on — not an
+  // alternative offered next to the source. Sending both is the textbook shape
+  // and was tried first; it does not survive delivery, so the composer has to
+  // pick one. See _build_mime in app/routers/compose.py.
+  //
+  // The markup is the reader's own, so a message arrives looking like the
+  // preview it was written in. Two things change once the HTML is somebody
+  // else's to render:
+  //
+  //   * The address printed after a link goes. It is there so a plain-text
+  //     reader can see where a link points before following it (see hrefTag);
+  //     in HTML the link already answers that, and saying it twice reads as a
+  //     mistake rather than as care.
+  //   * Every rule is inlined. A mail client is under no obligation to keep a
+  //     stylesheet and several drop one outright, so a class name is the one
+  //     thing that certainly will not arrive. The colours are literals for the
+  //     same reason, chosen against the white a mail client renders an HTML
+  //     part on — the app's own custom properties mean nothing over there.
+  //
+  // Sizes are all em, relative to the one px value below: rem would resolve
+  // against a root element that belongs to the reader's client, not to us.
+
+  const MAIL_HEAD = "margin:1.1em 0 .45em;line-height:1.3;";
+  const MAIL_MONO = "font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.88em;";
+
+  const MAIL_STYLE = {
+    p:  "margin:0 0 .8em",
+    h1: MAIL_HEAD + "font-size:1.4em",
+    h2: MAIL_HEAD + "font-size:1.22em",
+    h3: MAIL_HEAD + "font-size:1.08em",
+    h4: MAIL_HEAD + "font-size:1em",
+    h5: MAIL_HEAD + "font-size:1em",
+    h6: MAIL_HEAD + "font-size:1em",
+    ul: "margin:0 0 .8em;padding-left:1.5em",
+    ol: "margin:0 0 .8em;padding-left:1.5em",
+    li: "margin:.15em 0",
+    blockquote: "margin:0 0 .8em;padding-left:.8em;border-left:3px solid #d0d7de;color:#57606a",
+    hr: "border:none;border-top:1px solid #d0d7de;margin:1.1em 0",
+    a:  "color:#0969da",
+    code: MAIL_MONO + "background:#f0f2f5;border-radius:4px;padding:.08em .3em",
+    pre: "background:#f6f8fa;border:1px solid #d0d7de;border-radius:8px;" +
+         "margin:0 0 .8em;padding:.6em .75em;overflow-x:auto",
+  };
+  // A code span inside a fence is the block's own text — it must not draw a
+  // second box inside the one already around it.
+  const MAIL_PRE_CODE = MAIL_MONO + "background:none;border:none;padding:0";
+  // Everything the message needs sits on a wrapper div rather than on <body>:
+  // several clients (Gmail among them) drop the <body> element and re-parent
+  // its children, taking any styling on it along with it. A div survives that.
+  //
+  // The padding is the whole reason the wrapper is worth having. A mail client
+  // gives an HTML part no margin of its own, so without it every line starts
+  // hard against the left edge of the window — which reads as broken rather
+  // than as plain.
+  const MAIL_WRAP = "padding:16px 18px;color:#1f2328;font-size:14px;line-height:1.55;" +
+    "word-wrap:break-word;overflow-wrap:break-word;" +
+    "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif";
+
+  function toMail(text) {
+    const root = document.createElement("div");
+    root.innerHTML = toHtml(text);
+    root.querySelectorAll("span.md-href").forEach((n) => n.remove());
+    for (const node of root.querySelectorAll("*")) {
+      node.removeAttribute("class");
+      const css = MAIL_STYLE[node.nodeName.toLowerCase()];
+      if (css) node.setAttribute("style", css);
+    }
+    root.querySelectorAll("pre code").forEach((n) => n.setAttribute("style", MAIL_PRE_CODE));
+    // Nothing follows the last block, so its bottom margin is only a gap above
+    // whatever the recipient's client draws next — its quote rule, its reply
+    // box — and reads as the message trailing off.
+    if (root.lastElementChild) root.lastElementChild.style.marginBottom = "0";
+    return `<!DOCTYPE html>\n<html><body style="margin:0">` +
+      `<div style="${MAIL_WRAP}">${root.innerHTML}</div></body></html>`;
   }
 
   // --- Composer: live-preview editor -----------------------------------
@@ -509,5 +593,5 @@ App.markdown = (function () {
     };
   }
 
-  return { toHtml, editor, inlineHtml };
+  return { toHtml, toMail, editor, inlineHtml };
 })();

@@ -211,6 +211,8 @@ const ICON_PATHS = {
   chevron: '<polyline points="6 9 12 15 18 9"/>',
   // A sheet with lines of text — the "show me the plain-text part" toggle.
   plaintext: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/>',
+  // Angle brackets — "show me the raw message", the way every editor spells it.
+  code: '<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>',
   info: '<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="11"/><line x1="12" y1="8" x2="12.01" y2="8"/>',
   minimize: '<line x1="5" y1="18" x2="19" y2="18"/>',
   activity: '<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>',
@@ -222,6 +224,10 @@ const ICON_PATHS = {
   stats: '<line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>',
   // A clock — mail whose body is outside the content window.
   clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+  // Tray with an arrow into it — save the attachment you are looking at.
+  download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',
+  // Arrow leaving a box — hand the attachment to the browser's own viewer.
+  external: '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>',
 };
 
 App.icon = function (name, size = 18, fill = false) {

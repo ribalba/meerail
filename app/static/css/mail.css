@@ -1,89 +1,80 @@
-/* meerail — Apple Mail–style three-pane UI. Light + dark follow the system. */
+/* meerail — Apple Mail–style three-pane UI. Light + dark, following the system
+   unless the Appearance setting forces one; see the color-scheme rules below. */
 
 :root {
+  /* Which half of every light-dark() pair below is used. `light dark` means the
+     OS decides — and it also puts scrollbars, tickboxes and number spinners on
+     the same side as the rest of the app, which a hand-rolled palette cannot. */
+  color-scheme: light dark;
   --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  --accent: #1d6ff2;
-  --accent-weak: #e8f0fe;
+  --accent: light-dark(#1d6ff2, #3b82f6);
+  --accent-weak: light-dark(#e8f0fe, #1e2a44);
   /* Lighter than --accent: the keyboard cursor is drawn around content you are
      reading, so it marks its place without shouting over the text. */
-  --accent-soft: #6ba4f8;
-  --bg: #ffffff;
-  --bg-elev: #f5f5f7;
-  --sidebar: #e8e8ea;
+  --accent-soft: light-dark(#6ba4f8, #7cb0fb);
+  --bg: light-dark(#ffffff, #1c1c1e);
+  --bg-elev: light-dark(#f5f5f7, #2c2c2e);
+  --sidebar: light-dark(#e8e8ea, #232325);
   --sidebar-section: #8a8a8e;
-  --list-bg: #ffffff;
-  --list-sel: #d5d9de;
-  --text: #1d1d1f;
-  --text-muted: #86868b;
-  --text-faint: #a1a1a6;
-  --border: #dededf;
-  --border-strong: #cbcbcd;
+  --list-bg: light-dark(#ffffff, #1c1c1e);
+  --list-sel: light-dark(#d5d9de, #38383a);
+  --text: light-dark(#1d1d1f, #f5f5f7);
+  --text-muted: light-dark(#86868b, #8d8d92);
+  --text-faint: light-dark(#a1a1a6, #6a6a6e);
+  --border: light-dark(#dededf, #313133);
+  --border-strong: light-dark(#cbcbcd, #3a3a3c);
   /* Outlines message cards. A shade up from --border so a thread reads as
      separate cards, but nowhere near black — the mail is the ink here. */
-  --msg-border: #d0d0d3;
+  --msg-border: light-dark(#d0d0d3, #48484b);
   --flag: #f5a623;
   --danger: #d70015;
   --unread-dot: #1d6ff2;
-  --shadow: 0 1px 3px rgba(0,0,0,.10), 0 10px 30px rgba(0,0,0,.08);
+  --shadow: 0 1px 3px light-dark(rgba(0,0,0,.10), rgba(0,0,0,.5)),
+            0 10px 30px light-dark(rgba(0,0,0,.08), rgba(0,0,0,.4));
   --radius: 8px;
-  /* Age tint: rows fade towards red as they get older. --age-max is the alpha
-     at (or past) the configured horizon — kept well below 1 so the text on top
-     stays readable at full age. */
-  --age-rgb: 255, 69, 58;
-  --age-max: .34;
+  /* Hover tints, as overlays rather than flat colours: one pair of values keeps
+     every hoverable surface consistent instead of re-picking a colour per
+     theme. Soft is for large areas, strong for small icon buttons. */
+  --hover-tint: light-dark(rgba(0,0,0,.05), rgba(255,255,255,.06));
+  --hover-tint-soft: light-dark(rgba(0,0,0,.035), rgba(255,255,255,.05));
+  --hover-tint-strong: light-dark(rgba(0,0,0,.06), rgba(255,255,255,.08));
   /* Statistics panels. Two series colours (received / sent) plus a one-hue
      sequential ramp for the arrival heatmap. The pair was checked for
      colour-blind separation against this surface before being chosen, and the
      panels that use it also label both bars, so hue never carries the
      distinction on its own. --an-recv deliberately matches --accent: received
-     mail is the subject of most of these panels. */
-  --an-recv: #1d6ff2;
-  --an-sent: #eb6834;
-  --an-seq-0: #f2f2f4;
-  --an-seq-1: #cde2fb;
-  --an-seq-2: #9ec5f4;
-  --an-seq-3: #6da7ec;
-  --an-seq-4: #3987e5;
-  --an-seq-5: #256abf;
-  --an-seq-6: #184f95;
+     mail is the subject of most of these panels. Both series are stepped for
+     the dark surface rather than reused from light — the light steps sit too
+     close to the background to clear 3:1 there. The sequential ramp flips
+     anchor: on dark, more mail means lighter. */
+  --an-recv: light-dark(#1d6ff2, #3b82f6);
+  --an-sent: light-dark(#eb6834, #d95926);
+  --an-seq-0: light-dark(#f2f2f4, #2a2a2c);
+  --an-seq-1: light-dark(#cde2fb, #152e4d);
+  --an-seq-2: light-dark(#9ec5f4, #1a3f6b);
+  --an-seq-3: light-dark(#6da7ec, #205089);
+  --an-seq-4: light-dark(#3987e5, #2a6bb5);
+  --an-seq-5: light-dark(#256abf, #3987e5);
+  --an-seq-6: light-dark(#184f95, #6da7ec);
+  /* Age tint: rows fade towards red as they get older. --age-max is the alpha
+     at (or past) the configured horizon — kept well below 1 so the text on top
+     stays readable at full age. */
+  --age-rgb: 255, 69, 58;
+  --age-max: .34;
 }
 
+/* The Appearance setting, written onto <html> by app.theme.js. No attribute
+   means "follow the OS", which is what the :root default above already says. */
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; }
+
+/* Red reads hotter against the dark list, so it needs less of it. A component
+   list and a number, neither of which light-dark() can hold — so this pair is
+   the one place the theme has to be spelled out twice. */
 @media (prefers-color-scheme: dark) {
-  :root {
-    --accent: #3b82f6;
-    --accent-weak: #1e2a44;
-    --accent-soft: #7cb0fb;
-    --bg: #1c1c1e;
-    --bg-elev: #2c2c2e;
-    --sidebar: #232325;
-    --sidebar-section: #8a8a8e;
-    --list-bg: #1c1c1e;
-    --list-sel: #38383a;
-    --text: #f5f5f7;
-    --text-muted: #8d8d92;
-    --text-faint: #6a6a6e;
-    --border: #313133;
-    --border-strong: #3a3a3c;
-    /* Same one-shade-up relationship to --border as in light mode. */
-    --msg-border: #48484b;
-    --shadow: 0 1px 3px rgba(0,0,0,.5), 0 10px 30px rgba(0,0,0,.4);
-    /* Red reads hotter against the dark list, so it needs less of it. */
-    --age-rgb: 255, 59, 48;
-    --age-max: .26;
-    /* Both series stepped for the dark surface rather than reused from light —
-       the light steps sit too close to the background to clear 3:1 here. The
-       sequential ramp flips anchor: on dark, more mail means lighter. */
-    --an-recv: #3b82f6;
-    --an-sent: #d95926;
-    --an-seq-0: #2a2a2c;
-    --an-seq-1: #152e4d;
-    --an-seq-2: #1a3f6b;
-    --an-seq-3: #205089;
-    --an-seq-4: #2a6bb5;
-    --an-seq-5: #3987e5;
-    --an-seq-6: #6da7ec;
-  }
+  :root:not([data-theme="light"]) { --age-rgb: 255, 59, 48; --age-max: .26; }
 }
+:root[data-theme="dark"] { --age-rgb: 255, 59, 48; --age-max: .26; }
 
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; font-family: var(--font); color: var(--text);
@@ -130,9 +121,15 @@ body.resizing { cursor: col-resize; user-select: none; }
 .mailbox-row { display: flex; align-items: center; gap: .5rem; padding: .32rem .55rem;
   border-radius: 6px; cursor: pointer; font-size: .875rem; color: var(--text);
   user-select: none; }
-.mailbox-row:hover { background: rgba(0,0,0,.05); }
-@media (prefers-color-scheme: dark) { .mailbox-row:hover { background: rgba(255,255,255,.06); } }
+.mailbox-row:hover { background: var(--hover-tint); }
 .mailbox-row.active { background: var(--accent); color: #fff; }
+/* Folder keyboard cursor, drawn the same way as the list's — see .msg-row.focused.
+   On the active row the outline has to lift off the accent fill it sits on, so
+   it goes white there rather than blue-on-blue. */
+.mailbox-row.focused { outline: 2px solid var(--accent-soft); outline-offset: -2px; }
+.mailbox-row.active.focused { outline-color: rgba(255,255,255,.75); }
+.mailbox-tree:not(.keys) .mailbox-row.focused { outline-color: var(--border); }
+.mailbox-tree:not(.keys) .mailbox-row.active.focused { outline-color: rgba(255,255,255,.35); }
 .mailbox-row.active .mailbox-count { color: rgba(255,255,255,.85); }
 .mailbox-row.active .mb-icon { color: #fff; }
 .mb-icon { color: var(--accent); flex: 0 0 auto; display: flex; }
@@ -167,8 +164,7 @@ body.resizing { cursor: col-resize; user-select: none; }
   border: none; cursor: pointer; font: inherit; font-size: .68rem; font-weight: 700;
   text-transform: uppercase; letter-spacing: .04em; color: var(--sidebar-section);
   padding: .35rem .55rem; border-radius: 6px; }
-.sc-toggle:hover { background: rgba(0,0,0,.05); }
-@media (prefers-color-scheme: dark) { .sc-toggle:hover { background: rgba(255,255,255,.06); } }
+.sc-toggle:hover { background: var(--hover-tint); }
 .sc-glyph { display: flex; margin-left: auto; }
 /* The chevron points down; flip it so "restore" reads as opening upward. */
 .shortcut-box.collapsed .sc-glyph { transform: rotate(180deg); }
@@ -230,8 +226,11 @@ body.resizing { cursor: col-resize; user-select: none; }
 .msg-row:hover { background: var(--bg-elev); }
 .msg-row.active { background: var(--list-sel); }
 /* Keyboard cursor — an inset outline rather than a fill, so it reads clearly on
-   top of .active and hover, and does not cover the account stripe on the left. */
+   top of .active and hover, and does not cover the account stripe on the left.
+   The cursor stays put while the keyboard is elsewhere (Escape comes back to
+   it), but goes grey: only the pane holding the keys wears the accent. */
 .msg-row.focused { outline: 2px solid var(--accent-soft); outline-offset: -2px; }
+.message-list:not(.keys) .msg-row.focused { outline-color: var(--border); }
 .msg-row.selected { background: var(--accent-weak); }
 .msg-gutter { display: flex; flex-direction: column; align-items: center; padding-top: .2rem; gap: .3rem;
   position: relative; }
@@ -381,10 +380,7 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
 /* An overlay rather than a second colour: the head and the toolbar under it
    share one tint, and a flat hover colour would have to be re-picked for both
    themes to stay this subtle. */
-.msg-head:hover { box-shadow: inset 0 0 0 999px rgba(0,0,0,.035); }
-@media (prefers-color-scheme: dark) {
-  .msg-head:hover { box-shadow: inset 0 0 0 999px rgba(255,255,255,.05); }
-}
+.msg-head:hover { box-shadow: inset 0 0 0 999px var(--hover-tint-soft); }
 .msg-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 /* The head folds the card, but the strings in it — sender, recipients, date,
    subject — are things people copy, so they opt back out of the button. */
@@ -503,14 +499,13 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
 /* --- Buttons --- */
 .icon-btn { background: none; border: none; color: var(--text-muted); cursor: pointer;
   padding: .35rem; border-radius: 6px; display: flex; align-items: center; }
-.icon-btn:hover { background: rgba(0,0,0,.06); color: var(--text); }
+.icon-btn:hover { background: var(--hover-tint-strong); color: var(--text); }
 .icon-btn:disabled { cursor: default; }
 .icon-btn.spinning svg { animation: icon-spin 1s linear infinite; }
 @keyframes icon-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {
   .icon-btn.spinning svg { animation: none; opacity: .5; }
 }
-@media (prefers-color-scheme: dark) { .icon-btn:hover { background: rgba(255,255,255,.08); } }
 .tb-btn { background: none; border: none; color: var(--text-muted); cursor: pointer;
   padding: .35rem .5rem; border-radius: 6px; display: flex; align-items: center; gap: .3rem; font: inherit;
   font-size: .82rem; }
@@ -521,10 +516,11 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
    you made rather than as mail that arrived broken. */
 .tb-btn[data-act="plain"].on { color: var(--accent); background: var(--bg-elev); }
 .tb-btn:disabled { opacity: .35; cursor: default; }
-/* The two Back buttons and the bar holding the second one. Off at desktop
-   widths, where all three panes are on screen at once and there is nowhere to
-   go back to; the narrow block at the foot of this file turns them on. */
-.mobile-back, .mobile-nav { display: none; }
+/* The Back buttons, the bar holding one of them, and the attachment viewer the
+   third one backs out of. All off at desktop widths, where the three panes are
+   on screen at once and an attachment opens in a tab of its own; the narrow
+   block at the foot of this file turns them on. */
+.mobile-back, .mobile-nav, .att-viewer { display: none; }
 .tb-spacer { flex: 1; }
 /* Groups the bar the way Apple Mail does: compose | reply verbs | filing verbs. */
 .tb-sep { width: 1px; align-self: stretch; margin: .2rem .4rem; background: var(--border); }
@@ -534,8 +530,7 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
 .move-menu { position: fixed; z-index: 40; min-width: 190px; max-width: 280px;
   max-height: 320px; overflow-y: auto; padding: .25rem;
   background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(0,0,0,.18); }
-@media (prefers-color-scheme: dark) { .move-menu { box-shadow: 0 8px 24px rgba(0,0,0,.5); } }
+  box-shadow: 0 8px 24px light-dark(rgba(0,0,0,.18), rgba(0,0,0,.5)); }
 .move-item { display: flex; align-items: center; gap: .5rem; width: 100%;
   background: none; border: none; cursor: pointer; font: inherit; font-size: .85rem;
   color: var(--text); text-align: left; padding: .4rem .5rem; border-radius: 6px; }
@@ -611,6 +606,13 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
 }
 .compose-toggle:hover { background: var(--bg-elev); color: var(--text); }
 .compose-toggle[aria-expanded="true"] { color: var(--accent); }
+/* The "Send as HTML email" toggle. Unlike Cc/Bcc it changes what leaves the
+   composer rather than what is on screen, so being on is filled rather than
+   merely tinted — a glance has to be enough to tell which kind of mail this
+   is. */
+.compose-toggle[aria-pressed="true"] { background: var(--accent); color: #fff; }
+.compose-toggle[aria-pressed="true"]:hover { background: var(--accent); color: #fff;
+  filter: brightness(1.05); }
 .compose-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
 .compose-textarea {
   flex: 1; min-height: 120px; resize: none; font: inherit; font-size: .9rem; line-height: 1.5;
@@ -654,8 +656,11 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
   font-size: 1.05rem; line-height: 1; padding: 0 .1rem; }
 .cc-remove:hover { color: var(--danger); }
 /* Tighter than the rest of the composer: up to three send buttons sit here, and
-   the status line's flex:1 is what actually holds them apart from the paperclip. */
-.compose-actions { display: flex; align-items: center; gap: .5rem; margin-top: .4rem; }
+   the status line's flex:1 is what actually holds them apart from the paperclip.
+   Wrapping is the release valve for the narrow case — a phone with Meerato
+   configured, replying, has every control in this row at once, and a second
+   line is better than a Send button pushed off the edge. */
+.compose-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-top: .4rem; }
 .compose-status { flex: 1; color: var(--text-muted); font-size: .84rem; }
 /* Outlined alternative to .btn-primary. The composer swaps the two classes
    between its send buttons as the default moves, so they have to match in
@@ -719,15 +724,13 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
 .sa-sub { font-size: .76rem; color: var(--text-muted); }
 .status-pill { font-size: .7rem; padding: .1rem .5rem; border-radius: 999px; background: var(--bg-elev);
   border: 1px solid var(--border); color: var(--text-muted); }
-.status-pill.ok { color: #1a7f37; border-color: #1a7f3766; }
+.status-pill.ok { color: light-dark(#1a7f37, #4ac26b);
+  border-color: light-dark(#1a7f3766, #4ac26b55); }
 .status-pill.busy { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
-.status-pill.warn { color: #9a6700; border-color: #9a670066; }
-.status-pill.error { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, transparent); }
-@media (prefers-color-scheme: dark) {
-  .status-pill.ok { color: #4ac26b; border-color: #4ac26b55; }
-  .status-pill.warn { color: #d4a72c; border-color: #d4a72c55; }
-  .status-pill.error { color: #ff6369; border-color: #ff636955; }
-}
+.status-pill.warn { color: light-dark(#9a6700, #d4a72c);
+  border-color: light-dark(#9a670066, #d4a72c55); }
+.status-pill.error { color: light-dark(var(--danger), #ff6369);
+  border-color: light-dark(color-mix(in srgb, var(--danger) 45%, transparent), #ff636955); }
 /* Per-account signature/disclaimer editor. */
 .sa-footer { margin: .55rem 0 0 1.4rem; }
 .sa-footer label { display: block; font-size: .74rem; color: var(--text-muted); margin-bottom: .3rem; }
@@ -753,8 +756,20 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
   background: var(--bg); color: var(--text); }
 /* The horizon is a small number — a full-width box would look like a mistake. */
 .settings-section input[type="number"] { width: 7rem; }
+/* Same box as the text fields, but only as wide as its longest option: three
+   short words in a field the width of the modal would read as a text input. */
+.settings-section select { font: inherit; font-size: .84rem; padding: .45rem .6rem;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg); color: var(--text); }
 .settings-section input[type="text"]:focus,
-.settings-section input[type="number"]:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.settings-section input[type="number"]:focus,
+.settings-section select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+/* A tickbox names itself, so its label sits beside it and reads at body size
+   rather than above it in the muted caption the text fields use. */
+.settings-section label.settings-check { display: flex; align-items: center; gap: .5rem;
+  font-size: .84rem; color: var(--text); cursor: pointer; }
+.settings-check input[type="checkbox"] { accent-color: var(--accent); margin: 0;
+  width: 15px; height: 15px; cursor: pointer; }
 
 /* --- Add-task dialog --- */
 .task-field { display: block; margin-bottom: .8rem; }
@@ -800,13 +815,15 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
 .agent-warning { display: flex; align-items: center; gap: .4rem; width: calc(100% - 1rem);
   margin: 0 .5rem .3rem; padding: .38rem .5rem; border-radius: 6px; cursor: pointer;
   font: inherit; font-size: .76rem; text-align: left;
-  color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent);
+  /* The text lifts to a brighter red on dark, where #d70015 all but disappears
+     into the sidebar; the fill and border stay keyed to --danger either way. */
+  color: light-dark(var(--danger), #ff6369);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
   border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent); }
 .agent-warning[hidden] { display: none; }
 .agent-warning:hover { background: color-mix(in srgb, var(--danger) 20%, transparent); }
 .agent-warning .aw-icon { flex: 0 0 auto; display: flex; }
 .agent-warning .aw-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-@media (prefers-color-scheme: dark) { .agent-warning { color: #ff6369; } }
 
 /* Server unreachable — a bar across the bottom, above everything including the
    minimized composer, since nothing else on screen can be trusted while it is up. */
@@ -948,13 +965,9 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
   border: 1px solid var(--border); border-radius: 7px; padding: 2px; }
 .an-range { border: none; background: none; color: var(--text-muted); cursor: pointer;
   font: inherit; font-size: .78rem; padding: .25rem .6rem; border-radius: 5px; }
-.an-range:hover { background: rgba(0,0,0,.05); color: var(--text); }
+.an-range:hover { background: var(--hover-tint); color: var(--text); }
 .an-range.on { background: var(--bg); color: var(--text); font-weight: 550;
-  box-shadow: 0 1px 2px rgba(0,0,0,.08); }
-@media (prefers-color-scheme: dark) {
-  .an-range:hover { background: rgba(255,255,255,.06); }
-  .an-range.on { box-shadow: 0 1px 2px rgba(0,0,0,.4); }
-}
+  box-shadow: 0 1px 2px light-dark(rgba(0,0,0,.08), rgba(0,0,0,.4)); }
 
 .an-reloading { font-size: .76rem; color: var(--text-muted); margin: 0 0 .5rem; }
 .an-error { font-size: .84rem; color: var(--danger); margin: .6rem 0; }
@@ -1223,4 +1236,26 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
      it just does so silently rather than squeezing the dropdown to a stub. */
   .compose-note { display: none; }
   .modal { width: min(480px, 94vw); max-height: 88vh; }
+
+  /* Attachment viewer. Covers everything rather than living in the reading
+     pane: the point is that the attachment gets the whole screen, and the only
+     thing it owes the reader is the way back along the top. */
+  .att-viewer { display: flex; flex-direction: column; position: fixed; inset: 0;
+    z-index: 60; background: var(--bg);
+    padding: env(safe-area-inset-top) env(safe-area-inset-right)
+             env(safe-area-inset-bottom) env(safe-area-inset-left); }
+  /* Beats the rule above — `hidden` has to keep meaning hidden. */
+  .att-viewer[hidden] { display: none; }
+  /* Same height as .mobile-nav, and for the same reason: it is the header a
+     thread has, in the one place a thread is not what you are looking at. */
+  .att-viewer-bar { display: flex; align-items: center; gap: .3rem; flex: 0 0 auto;
+    height: 44px; padding: 0 .4rem 0 .9rem;
+    background: var(--bg); border-bottom: 1px solid var(--border); }
+  .att-viewer-name { flex: 1; min-width: 0; text-align: center;
+    font-size: .9rem; font-weight: 600;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* --bg-elev, not --bg: a PDF page is white on both, and needs an edge in dark
+     mode to read as a sheet of paper rather than as the app going blank. */
+  .att-viewer-frame { flex: 1; width: 100%; min-height: 0; border: 0;
+    background: var(--bg-elev); }
 }

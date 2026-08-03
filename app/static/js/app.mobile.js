@@ -12,6 +12,10 @@ App.mobile = (function () {
   const MQ = window.matchMedia("(max-width: 900px)");
 
   let view = "folders";
+  // The attachment on screen over the reader — {url, name, download} — or null.
+  // It lives in the history entry as well, so Back closes the viewer before it
+  // starts walking back through the panes.
+  let att = null;
 
   const $ = (s) => document.querySelector(s);
 
@@ -36,6 +40,41 @@ App.mobile = (function () {
     if (push && MQ.matches) history.pushState({ mview: v }, "");
   }
 
+  // --- Attachment viewer ------------------------------------------------
+  // Tapping a PDF chip opens the browser's own viewer, full screen, with the
+  // thread nowhere in reach — on a phone that is a dead end. Viewable
+  // attachments are shown here instead: the same URL the chip pointed at, in a
+  // frame under a header that goes back.
+  function paintViewer() {
+    const box = $("#att-viewer");
+    const frame = $("#att-viewer-frame");
+    box.hidden = !att;
+    if (!att) {
+      // Drop the bytes on the way out; a reopened viewer sets a fresh src, and
+      // a PDF left loaded in a hidden frame is a few MB doing nothing.
+      frame.removeAttribute("src");
+      return;
+    }
+    if (frame.getAttribute("src") !== att.url) frame.setAttribute("src", att.url);
+    $("#att-viewer-name").textContent = att.name;
+    $("#att-viewer-open").href = att.url;
+    $("#att-viewer-save").href = att.download;
+    $("#att-viewer-save").setAttribute("download", att.name);
+  }
+
+  function openAttachment(a) {
+    att = a;
+    paintViewer();
+    history.pushState({ mview: view, att: a }, "");
+  }
+
+  // Mirrors back(): prefer unwinding the entry we pushed, so the header button
+  // and the browser's own Back leave the stack in the same shape.
+  function closeAttachment() {
+    if (history.state && history.state.att) history.back();
+    else { att = null; paintViewer(); }
+  }
+
   // Only pop when the entry on top is demonstrably one of ours, which is the
   // one case where the browser has somewhere to put us. Otherwise — a window
   // dragged narrow with a thread already open, say — switch directly rather
@@ -55,13 +94,47 @@ App.mobile = (function () {
     $("#btn-back-folders").addEventListener("click", () => back("folders"));
     $("#btn-back-list").addEventListener("click", () => back("list"));
 
+    $("#btn-back-message").insertAdjacentHTML("afterbegin", App.icon("chevron", 20));
+    $("#att-viewer-open").innerHTML = App.icon("external", 18);
+    $("#att-viewer-save").innerHTML = App.icon("download", 18);
+    $("#btn-back-message").addEventListener("click", closeAttachment);
+
+    // Delegated, because the reader redraws its chips on every render. Only the
+    // chips the server marked viewable carry target=_blank; the rest are plain
+    // downloads and are left alone.
+    document.addEventListener("click", (e) => {
+      if (!MQ.matches) return;
+      const chip = e.target.closest && e.target.closest('a.attachment-chip[target="_blank"]');
+      if (!chip || e.metaKey || e.ctrlKey || e.shiftKey || e.button) return;
+      e.preventDefault();
+      // Same resource without the inline disposition — what the save button
+      // hands the browser, so it offers a file rather than another preview.
+      const dl = new URL(chip.href, location.href);
+      dl.searchParams.delete("inline");
+      openAttachment({
+        url: chip.getAttribute("href"),
+        name: chip.title || chip.querySelector(".att-name").textContent,
+        download: dl.pathname + dl.search,
+      });
+    });
+
     window.addEventListener("popstate", (e) => {
       view = (e.state && e.state.mview) || "folders";
+      att = (e.state && e.state.att) || null;
       paint();
+      paintViewer();
+    });
+
+    // A window dragged wide with an attachment up: the viewer is a phone
+    // affordance, and desktop already opens these in a tab of their own.
+    MQ.addEventListener("change", () => {
+      if (!MQ.matches && att) { att = null; paintViewer(); }
     });
 
     paint();
   }
 
-  return { init, show, current: () => view };
+  // `narrow` is app.keys.js asking whether moving the keyboard between panes
+  // also has to turn a page — on desktop all three are already on screen.
+  return { init, show, back, current: () => view, narrow: () => MQ.matches };
 })();

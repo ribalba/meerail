@@ -33,13 +33,6 @@ from core.models import Account, Message, MessageLocation, Recipient, utcnow
 
 router = APIRouter(prefix="/api", tags=["search"], dependencies=[Depends(require_ui_auth)])
 
-# A double-quoted run, or a bare run of non-space characters.
-_TERMS = re.compile(r'"([^"]*)"|(\S+)')
-
-
-def _like_escape(term: str) -> str:
-    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
 
 def _check_regex(pattern: str, where: str) -> str:
     """Reject a pattern the engine can't compile, naming the filter it came from.
@@ -53,21 +46,6 @@ def _check_regex(pattern: str, where: str) -> str:
     except re.error as e:
         raise HTTPException(status_code=400, detail=f"Invalid regex in {where}: {e}")
     return pattern
-
-
-def keyword_terms(q: str) -> list[str]:
-    """Split a keyword query into substrings to AND together.
-
-    Quoted runs survive as a single term, so `"how to build"` matches that
-    phrase rather than the three words scattered anywhere in the mail. An
-    unbalanced trailing quote is treated as an open phrase to end-of-query
-    (`"how to bui` while still typing) instead of erroring — search runs on
-    every keystroke, so a half-typed quote must not blank the results.
-    """
-    if q.count('"') % 2:
-        q += '"'
-    terms = [(a or b) for a, b in _TERMS.findall(q)]
-    return [t for t in terms if t.strip()]
 
 
 @router.get("/search")
@@ -94,13 +72,14 @@ def search(
             _check_regex(parsed.text, "the query")
             clauses.append(Message.search_text.op("~*")(parsed.text))
         else:
-            terms = keyword_terms(parsed.text)
+            terms = searchquery.keyword_terms(parsed.text)
             if not terms:
                 return empty
             # A term is a literal, so % and _ in it are characters the user typed
             # ("50% off"), not LIKE wildcards.
             clauses.extend(
-                Message.search_text.ilike(f"%{_like_escape(t)}%", escape="\\") for t in terms
+                Message.search_text.ilike(f"%{searchquery.like_escape(t)}%", escape="\\")
+                for t in terms
             )
     elif not parsed.filtered:
         # The whole query was a filter still being typed (`:from `).

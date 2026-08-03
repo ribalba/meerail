@@ -145,6 +145,10 @@ def test_prune_strips_stored_content_but_keeps_the_message(account):
     assert gone["attachments"][0]["stored"] is False
     code, _ = api("GET", f"/api/attachments/{gone['attachments'][0]['id']}")
     assert code == 404
+    # The original bytes went with the content, so the reader stops offering
+    # "view source" on this message rather than linking at a 404.
+    assert gone["has_source"] is False
+    assert api("GET", f"/api/messages/{gone['id']}/source")[0] == 404
 
     # Only the pruned message left the search corpus.
     assert _search(aid, needle) == ["Still fresh"]

@@ -47,7 +47,7 @@ def utcnow() -> datetime:
 DEFAULT_FOOTER = (
     "----\n"
     "This mail was sent using https://meerail.com/ "
-    "- the email management tool for hardcore users"
+    "- the email management tool for professional users"
 )
 
 
@@ -220,11 +220,23 @@ class Message(Base):
 
     # The original RFC822 bytes. Stored in the DB so the ingesting agent and the
     # serving web app share no filesystem — the DB is the only handoff.
-    raw_mime: Mapped[bytes | None] = mapped_column(LargeBinary)
+    #
+    # Deferred, and this is not an optimisation but the difference between the
+    # reader opening and the reader hanging: nothing outside ingest ever reads
+    # these two, yet `select(Message)` — which is how the thread view, archive,
+    # trash and rethread all load mail — dragged both across the wire for every
+    # message in the conversation. Attachments live in here base64-encoded, so a
+    # four-message thread carrying a couple of videos is 130MB of raw_mime read,
+    # detoasted and materialised in Python to render 14kB of HTML: a ~17s stall
+    # holding a pooled connection and a threadpool slot throughout. Deferring
+    # means the column is simply not in the SELECT list; assigning to it still
+    # works, so ingest is unaffected, and the search WHERE clauses reference
+    # search_text in SQL rather than through the attribute.
+    raw_mime: Mapped[bytes | None] = mapped_column(LargeBinary, deferred=True)
     body_text: Mapped[str] = mapped_column(Text, default="", nullable=False)
     body_html: Mapped[str] = mapped_column(Text, default="", nullable=False)
     # Concatenation indexed for regex/keyword search.
-    search_text: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    search_text: Mapped[str] = mapped_column(Text, default="", nullable=False, deferred=True)
 
     # Rollup of attachment text extraction: none | pending | done | error
     extract_status: Mapped[str] = mapped_column(String(16), default="none", nullable=False)

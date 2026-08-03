@@ -13,6 +13,7 @@ import subprocess
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
+from email import message_from_bytes, policy
 from pathlib import Path
 
 import pytest
@@ -139,5 +140,54 @@ def test_flag_writeback_reaches_real_imap(require_server, tmp_path):
             c.select_folder("INBOX")
             flags = c.get_flags([uid]).get(uid, ())
         assert _seen(flags), f"\\Seen not set on the server (flags={flags})"
+    finally:
+        api("DELETE", f"/api/accounts/{acc['id']}")
+
+
+@pytest.mark.skipif(not port_open("127.0.0.1", IMAP_PORT), reason="GreenMail not on :3143")
+@pytest.mark.skipif(not AGENT_PY.exists(), reason="agent venv missing (run agent/run.sh once)")
+def test_formatted_send_reaches_the_server_as_html(require_server, tmp_path):
+    """The whole chain behind "Send as HTML email": the server builds the MIME,
+    the agent relays it over real SMTP, and a real mail server hands back a
+    message that is still HTML.
+
+    Worth doing end-to-end rather than against the MIME in the outbound row,
+    because the interesting failures are not in what we build — they are in what
+    survives being put on the wire. Bare LF line endings, which is what
+    ``as_string()`` writes and what ``sendmail`` will happily transmit, leave the
+    boundaries unrecognisable to a strict parser; and a multipart/alternative
+    does not reach the recipient intact at all, which is why there is only one
+    body here to check.
+    """
+    email = f"gm-{uuid.uuid4().hex[:10]}@example.com"
+    acc = dbfixture.create_account(email, label="gmsend")
+    try:
+        with IMAPClient("127.0.0.1", port=IMAP_PORT, ssl=False, use_uid=True) as c:
+            c.login(email, "whatever")      # auth disabled -> creates the mailbox
+
+        code, _ = api("POST", "/api/compose/send", {
+            "account_id": acc["id"], "to": [email], "subject": "GREENHTML",
+            "body_text": "# Heading\n\nSome **bold** text.",
+            "body_html": "<html><body><h1>Heading</h1>"
+                         "<p>Some <strong>bold</strong> text.</p></body></html>"})
+        assert code == 200
+
+        _run_agent(_write_config(tmp_path, email))
+
+        with IMAPClient("127.0.0.1", port=IMAP_PORT, ssl=False, use_uid=True) as c:
+            c.login(email, "whatever")
+            c.select_folder("INBOX")
+            uids = c.search(["SUBJECT", "GREENHTML"])
+            assert uids, "the message never reached the mail server"
+            raw = c.fetch([max(uids)], ["RFC822"])[max(uids)][b"RFC822"]
+
+        msg = message_from_bytes(raw, policy=policy.default)
+        assert msg.get_content_type() == "text/html", \
+            f"structure changed in transit: {msg.get_content_type()}"
+        assert not msg.is_multipart()
+        assert "<strong>bold</strong>" in msg.get_content()
+        # The markdown source is not on the wire, so it must not have leaked
+        # into the body either — the recipient gets the rendering, once.
+        assert "**bold**" not in msg.get_content()
     finally:
         api("DELETE", f"/api/accounts/{acc['id']}")

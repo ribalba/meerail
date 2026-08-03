@@ -18,7 +18,8 @@ threading · POSIX-regex & keyword search (scope + "last N years" window, `:unre
 `:has-attachment` / `:from` / `:to` filters, searches PDF/Office attachment text via Tika) ·
 sandboxed HTML rendering with remote-image blocking · read/flag/
 archive/delete and compose that **sync back to your mail server** over IMAP/SMTP · file a mail
-as a **Meerato task**, attachments and all · light + dark.
+as a **Meerato task**, attachments and all · light + dark, following the system or pinned to
+either in Settings.
 
 <p align="center">
   <img src="website/public/img/screenshots/inbox.png" width="820" alt="meerail inbox" />
@@ -417,6 +418,22 @@ reply or forward and files the whole conversation away once the mail is out. *Se
 appears once Meerato is configured: pick a bucket and a date, and the mail lands in Meerato's
 Backlog, moving to *Now* on that day. Both send first — a follow-up that fails is reported
 without the composer pretending the mail did not go.
+
+**HTML messages.** The composer renders markdown as you type without ever removing the
+markers, so the field always shows the exact text that will be sent. The *Send as HTML email*
+button decides what that text travels as: off, the mail is plain text and nothing else, the
+way every mail from here has always gone out; on, the markdown is rendered and the message is
+sent as HTML, so headings, lists, quotes, code and links arrive formatted. The styling is
+inlined, because a mail client is under no obligation to keep a stylesheet. It is a
+per-message choice; Settings only decides which way each new draft opens.
+
+Sending both at once — a `multipart/alternative` carrying the rendering *and* the source, so
+the reader's client can pick — is the textbook answer, and it was the first thing tried here.
+It does not survive delivery: Proton stores one body per message and, handed the pair, keeps
+the plain text and discards the HTML, so the mail arrives as raw markdown. That was measured
+against a correctly formed message — RFC-compliant CRLF endings, plain text first, no stray
+headers on either part — so the price of a formatted message is a real one: a reader who
+cannot render HTML sees the markup. That is what the button is choosing, each time.
 
 Not yet implemented: saving **drafts** (the data model supports it) and CONDSTORE/QRESYNC
 fast-resync (a UID/flag-diff fallback is used).

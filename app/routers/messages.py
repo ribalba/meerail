@@ -205,6 +205,13 @@ def _message_detail(db: DBSession, msg: Message, load_remote: bool,
     locs = db.execute(
         select(MessageLocation).where(MessageLocation.message_pk == msg.id)
     ).scalars().all()
+    # Whether "view source" has anything to show. Asked as a predicate rather
+    # than by touching msg.raw_mime, which is deferred precisely so a thread
+    # view never drags every message's original bytes across the wire — the
+    # test costs a boolean, reading the attribute would cost the blob.
+    has_source = bool(db.execute(
+        select(Message.raw_mime.is_not(None)).where(Message.id == msg.id)
+    ).scalar())
     return {
         "id": msg.id, "account_id": msg.account_id, "thread_id": msg.thread_id,
         "message_id": msg.message_id, "subject": msg.subject or "(no subject)",
@@ -230,6 +237,7 @@ def _message_detail(db: DBSession, msg: Message, load_remote: bool,
             (content_window_months(db) if window_months is None else window_months)
             if msg.content_status != "full" else 0
         ),
+        "has_source": has_source,
         "seen": any(l.seen for l in locs), "flagged": any(l.flagged for l in locs),
         "answered": any(l.answered for l in locs),
         "locations": [
@@ -253,6 +261,39 @@ def get_message(message_id: int, images: bool = False, db: DBSession = Depends(g
     return _message_detail(db, msg, load_remote=images)
 
 
+@router.get("/messages/{message_id}/source")
+def message_source(message_id: int, db: DBSession = Depends(get_db)):
+    """The message exactly as it arrived — headers, MIME structure and all.
+
+    Served as text/plain so a new tab shows it rather than saving it, and under
+    the same sandbox/nosniff headers as an attachment: these are the sender's
+    bytes, and a browser that decided for itself that they were HTML would be
+    running the sender's markup on our own origin.
+
+    Two things stop this having a body: `store_raw_mime` off when the mail was
+    ingested, and pruning as it aged out of the content window. Neither is an
+    error worth a different code than "there is nothing here to show" — the
+    reader already draws the button that leads here disabled in both cases.
+    """
+    row = db.execute(
+        select(Message.id, Message.raw_mime).where(Message.id == message_id)
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Message not found")
+    if row.raw_mime is None:
+        raise HTTPException(status_code=404, detail="Original message bytes are not stored")
+    return Response(
+        content=row.raw_mime,
+        media_type="text/plain; charset=utf-8",
+        headers={
+            # Named so that saving the tab lands a file a mail client can open.
+            "Content-Disposition": f'inline; filename="message-{message_id}.eml"',
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "sandbox; default-src 'none'",
+        },
+    )
+
+
 # --- Search-term hits inside attachments ---------------------------------
 # A search matches Message.search_text, which folds in extracted attachment
 # text. So a result can be one where the term appears in a PDF and nowhere in
@@ -268,10 +309,11 @@ _MAX_HITS = 3           # per attachment — a preview, not a concordance
 def match_patterns(q: str, mode: str) -> list[re.Pattern]:
     """The client-visible mirror of the search WHERE clause.
 
-    keyword -> each whitespace-separated term, case-insensitively, as a literal
-    substring. regex -> the pattern itself. Postgres POSIX and Python `re` part
-    ways on exotic syntax; a pattern that only one of them accepts costs a
-    missing highlight, never a wrong result.
+    keyword -> each term the search ANDed together, case-insensitively, as a
+    literal substring — a quoted run stays one term, so `"was sent"` marks the
+    phrase it matched on. regex -> the pattern itself. Postgres POSIX and Python
+    `re` part ways on exotic syntax; a pattern that only one of them accepts
+    costs a missing highlight, never a wrong result.
 
     Filter tokens narrowed the result set rather than matching text in it, so
     they are dropped here — otherwise `:unread` would come back highlighted as
@@ -283,7 +325,7 @@ def match_patterns(q: str, mode: str) -> list[re.Pattern]:
     try:
         if mode == "regex":
             return [re.compile(q, re.IGNORECASE)]
-        return [re.compile(re.escape(t), re.IGNORECASE) for t in q.split()]
+        return [re.compile(re.escape(t), re.IGNORECASE) for t in searchquery.keyword_terms(q)]
     except re.error:
         return []
 
@@ -317,12 +359,17 @@ def _contexts(text: str, pats: list[re.Pattern]) -> list[dict]:
 def _annotate_attachment_hits(db: DBSession, msgs, details: list[dict], q: str,
                               mode: str, pats: list[re.Pattern]) -> None:
     # The SQL filter is written the way search.py writes it — ILIKE for keyword,
-    # POSIX for regex — rather than by feeding it the Python patterns, whose
-    # backslash escaping Postgres reads differently.
+    # POSIX for regex, quoted runs kept whole — rather than by feeding it the
+    # Python patterns, whose backslash escaping Postgres reads differently. The
+    # filter tokens are already gone: `pats` comes from the same stripped text,
+    # and searching attachments for the literal ":unread" would find nothing.
     if mode == "regex":
         where = Attachment.extracted_text.op("~*")(q)
     else:
-        where = or_(*[Attachment.extracted_text.ilike(f"%{t}%") for t in q.split()])
+        where = or_(*[
+            Attachment.extracted_text.ilike(f"%{searchquery.like_escape(t)}%", escape="\\")
+            for t in searchquery.keyword_terms(q)
+        ])
     # Filtered in SQL first: extracted text runs to whole PDFs, and a thread of
     # them should not cross the wire so Python can throw most of it away.
     rows = db.execute(
@@ -368,7 +415,7 @@ def get_thread(
     pats = match_patterns(q, mode)
     if pats:
         try:
-            _annotate_attachment_hits(db, msgs, details, q.strip(), mode, pats)
+            _annotate_attachment_hits(db, msgs, details, searchquery.parse(q).text, mode, pats)
         except DBAPIError:
             # A pattern Postgres rejects costs the attachment highlights, not
             # the thread — the reader still opens.

@@ -15,6 +15,7 @@ App.list = (function () {
   let focusId = null;
   let rows = [];             // [{ id, data, el }] in render order
   let tintOn = false;        // set per render by the caller — see render()
+  let keyFocus = false;      // is the list the pane holding the keyboard?
   let selected = new Set();  // row ids ticked for a bulk action
   let anchorId = null;       // where the last plain tick landed, for shift-range
   let moreFn = null;         // caller's "fetch the next page" hook, or null at the end
@@ -181,6 +182,9 @@ App.list = (function () {
       // that was just filed away is not what the gesture asked for.
       if (App.swipe && App.swipe.blocked()) return;
       setFocus(rows.findIndex((x) => x.id === r.id), false);
+      // Clicking into the list takes the keyboard with it, so j/k carry on from
+      // the row you pointed at instead of walking the sidebar.
+      if (App.keys) App.keys.focus("list");
       open(r, el);
     });
     // Swipe-to-file, touch and narrow layout only — see app.swipe.js.
@@ -219,6 +223,18 @@ App.list = (function () {
   function moveAndOpen(delta) {
     move(delta);
     openFocused();
+  }
+
+  // app.keys.js saying whether the list is the pane holding the keyboard. The
+  // cursor ring goes quiet while the folders or the thread have it, so only one
+  // of the three ever looks live.
+  function setKeyFocus(state) {
+    keyFocus = state;
+    document.getElementById("message-list").classList.toggle("keys", state);
+    // Taking the keyboard with nothing under the cursor leaves the pane looking
+    // dead — start at the top. The rows may still be loading, in which case
+    // render() does the same thing once they land.
+    if (state && rows.length && focusIndex() < 0) setFocus(0, false);
   }
 
   // --- Paging ---
@@ -314,8 +330,35 @@ App.list = (function () {
     const stillThere = rows.findIndex((x) => x.id === focusId);
     if (stillThere >= 0) setFocus(stillThere, false);
     else if (prevIdx >= 0) setFocus(Math.min(prevIdx, rows.length - 1), false);
+    // First rows of a folder the keyboard was handed to while it was still
+    // loading — see setKeyFocus().
+    else if (keyFocus) setFocus(0, false);
     else focusId = null;
     if (App.reader && !App.reader.isOpen()) App.reader.renderEmpty();
+  }
+
+  // An action just filed these rows away: take them out of the list now, ahead
+  // of the round trip that makes it true — reloadList() reconciles afterwards,
+  // and puts them back if the server said no. The cursor stays on the slot the
+  // rows vacated (the same rule render() applies on a refresh), so
+  // openFocused() lands on the next mail down. Returns how many rows went.
+  function drop(pred) {
+    const prevIdx = focusIndex();
+    const going = rows.filter((r) => pred(r.data));
+    if (!going.length) return 0;
+    for (const r of going) { r.el.remove(); selected.delete(r.id); }
+    rows = rows.filter((r) => !pred(r.data));
+    if (going.some((r) => r.id === activeId)) activeId = null;
+    if (anchorId !== null && !rows.some((r) => r.id === anchorId)) anchorId = null;
+    changed();
+    if (!rows.length) {
+      document.getElementById("message-list").innerHTML = `<div class="list-empty">No messages</div>`;
+      focusId = null;
+      if (App.reader && !App.reader.isOpen()) App.reader.renderEmpty();
+    } else if (focusId !== null && !rows.some((r) => r.id === focusId)) {
+      setFocus(Math.min(Math.max(prevIdx, 0), rows.length - 1), false);
+    }
+    return going.length;
   }
 
   function reset() {
@@ -325,7 +368,8 @@ App.list = (function () {
     changed();
   }
 
-  return { render, append, setMore, reset, move, moveAndOpen, openFocused, setFocus, ageDays, setAgeDays,
+  return { render, append, setMore, reset, drop, move, moveAndOpen, openFocused, setFocus,
+           setKeyFocus, ageDays, setAgeDays,
            selectAllLoaded, clearSelection, selection, markSeen,
            count: () => rows.length, hasFocus: () => focusIndex() >= 0,
            // Which row the reading pane is showing, so a swipe that files it

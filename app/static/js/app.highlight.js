@@ -6,6 +6,24 @@
    regexing their markup would happily wrap a `<mark>` around half a tag. */
 
 App.highlight = (function () {
+  // Mirrors keyword_terms() in app/searchquery.py: a quoted run is one term
+  // so `"was sent"` marks the phrase, not the two words wherever they land. An
+  // unbalanced quote closes at end-of-query, because search runs on every
+  // keystroke and a half-typed phrase must still highlight what it found.
+  const TERMS = /"([^"]*)"|(\S+)/g;
+
+  function keywordTerms(q) {
+    if ((q.match(/"/g) || []).length % 2) q += '"';
+    const out = [];
+    TERMS.lastIndex = 0;
+    let m;
+    while ((m = TERMS.exec(q)) !== null) {
+      const t = m[1] !== undefined ? m[1] : m[2];
+      if (t && t.trim()) out.push(t);
+    }
+    return out;
+  }
+
   // Mirrors app/routers/search.py: keyword = AND of case-insensitive
   // substrings, regex = the pattern itself. Postgres POSIX and JS RegExp
   // disagree on the exotic corners; a pattern only one of them accepts costs a
@@ -15,7 +33,7 @@ App.highlight = (function () {
     if (!q) return [];
     try {
       if (mode === "regex") return [new RegExp(q, "gi")];
-      return q.split(/\s+/).map((t) => new RegExp(t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"));
+      return keywordTerms(q).map((t) => new RegExp(t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"));
     } catch (_) { return []; }  // half-typed regex — nothing to mark yet
   }
 

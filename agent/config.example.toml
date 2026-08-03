@@ -61,6 +61,12 @@ verify_cert  = false          # Bridge uses a self-signed cert; false trusts it
 # mid-backfill; without it a hung Bridge parks the sync thread silently.
 imap_connect_timeout = 10
 imap_read_timeout    = 60
+
+# The same guarantee for the send path. smtplib defaults to no timeout at all,
+# and the outgoing drain runs on the sync thread — so one SMTP server that
+# stops answering would stop this account syncing, not just sending.
+smtp_timeout         = 60
+
 # Extra addresses this Proton account can send from (aliases / additional
 # addresses you own in Proton). They appear in the compose "From" dropdown.
 # The primary `email` above is always sendable and need not be repeated here.

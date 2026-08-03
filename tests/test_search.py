@@ -136,6 +136,37 @@ def test_thread_reports_which_attachment_matched(account):
     assert token not in (hit["messages"][0]["body_text"] or "")
 
 
+def test_thread_annotation_marks_a_quoted_phrase(account):
+    """The phrase that matched is the span that comes back.
+
+    Splitting the query on whitespace would look for `"the` and `phrase"` —
+    quote characters included — so an attachment found by an exact phrase came
+    back with no hit windows at all, and the reader had nothing to mark.
+    """
+    email, aid = account["email"], account["id"]
+    mid = f"phr-{uuid.uuid4().hex}@t"
+    _ingest(email, [(1, make_message(
+        f"<{mid}>", "Delivery report", "x@y.com", email, "nothing in the body here", T0,
+        text_attachment=b"everyone agrees the report was sent on time"))])
+    assert dbfixture.extract_all() >= 1
+
+    def contexts(q):
+        _, sr = _search(aid, q)
+        assert sr["total"] == 1, sr
+        _, hit = api("GET", f"/api/threads/{sr['rows'][0]['thread_id']}"
+                            f"?account_id={aid}&" + urlencode({"q": q}))
+        return [c for m in hit["messages"] for a in m["attachments"]
+                for c in a.get("match_contexts", [])]
+
+    hits = contexts('"was sent"')
+    assert [c["match"] for c in hits] == ["was sent"], hits
+    assert hits[0]["before"].endswith("the report ")
+
+    # A filter narrowed the results; it is not a term to mark up.
+    hits = contexts('"was sent" :has-attachment')
+    assert [c["match"] for c in hits] == ["was sent"], hits
+
+
 def test_thread_annotation_survives_a_bad_regex(account):
     """A pattern Postgres rejects costs the highlights, not the conversation."""
     email, aid = account["email"], account["id"]

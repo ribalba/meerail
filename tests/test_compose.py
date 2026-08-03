@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import datetime, timedelta, timezone
+from email import message_from_string, policy
 
 import dbfixture
 from conftest import ingest_one
@@ -165,6 +166,110 @@ def test_footer_is_stored_per_account(account):
         assert other_acc["footer"] == "FOOTER-TWO"
     finally:
         api("DELETE", f"/api/accounts/{second['id']}")
+
+
+# --- "Send as HTML email" ----------------------------------------------------
+#
+# The button makes the message an HTML one, not an HTML alternative to a
+# plain-text one. multipart/alternative is the textbook shape and is what this
+# sent at first, but a message carrying both renderings arrives as raw markdown:
+# Proton keeps one body per message and, handed the pair, keeps the plain text.
+# So what these pin down is that a formatted message is text/html with nothing
+# to choose between — and that with the button off, nothing changed.
+
+
+def _parts(mime: str) -> dict[str, str]:
+    """Every leaf part of a message, keyed by content type."""
+    parsed = message_from_string(mime, policy=policy.default)
+    return {p.get_content_type(): p.get_content()
+            for p in parsed.walk() if not p.is_multipart()}
+
+
+def test_formatted_send_is_an_html_message(account):
+    """A single text/html body — no alternative to pick the wrong half of."""
+    email, aid = account["email"], account["id"]
+    code, _ = api("POST", "/api/compose/send", {
+        "account_id": aid, "to": ["dest@example.com"], "subject": "Formatted",
+        "body_text": "# Heading\n\nSome **bold** text.",
+        "body_html": "<html><body><h1>Heading</h1><p>Some <strong>bold</strong> text.</p></body></html>"})
+    assert code == 200
+
+    _, mime = _raw_mime_of_last_send(email)
+    parsed = message_from_string(mime, policy=policy.default)
+    assert parsed.get_content_type() == "text/html"
+    assert not parsed.is_multipart()
+    assert "<strong>bold</strong>" in parsed.get_content()
+    assert "multipart" not in mime
+
+
+def test_formatted_send_still_records_the_markdown_source(account):
+    """The source stops being on the wire, so the outbound row is the only place
+    left that knows what was actually typed. It has to keep it."""
+    email, aid = account["email"], account["id"]
+    api("POST", "/api/compose/send", {
+        "account_id": aid, "to": ["dest@example.com"], "subject": "Source",
+        "body_text": "# Heading\n\nSome **bold** text.",
+        "body_html": "<html><body><h1>Heading</h1></body></html>"})
+
+    send = dbfixture.pending_actions(email, "send")[-1]
+    assert dbfixture.outbound_body_text(send["payload"]["outbound_id"]) == \
+        "# Heading\n\nSome **bold** text."
+
+
+def test_unformatted_send_stays_a_plain_text_message(account):
+    """Without the button the message is exactly what it always was — no HTML
+    anywhere, and no multipart wrapper to make a plain note look like one."""
+    email, aid = account["email"], account["id"]
+    api("POST", "/api/compose/send", {
+        "account_id": aid, "to": ["dest@example.com"],
+        "subject": "Plain", "body_text": "just text"})
+
+    _, mime = _raw_mime_of_last_send(email)
+    assert list(_parts(mime)) == ["text/plain"]
+    assert "multipart" not in mime
+    assert "text/html" not in mime
+
+
+def test_no_body_part_declares_its_own_mime_version(account):
+    """MIME-Version describes the message, not a piece of it. Python stamps one
+    on the parts it builds for an attachment, and a part carrying it can read to
+    a gateway as an encapsulated message rather than as content to display."""
+    email, aid = account["email"], account["id"]
+    code, up = upload_attachment(build_pdf("MIMEVERSION"), "v.pdf", "application/pdf")
+    assert code == 200
+    api("POST", "/api/compose/send", {
+        "account_id": aid, "to": ["dest@example.com"], "subject": "Headers",
+        "body_text": "text", "body_html": "<html><body><p>text</p></body></html>",
+        "attachments": [up["id"]]})
+
+    _, mime = _raw_mime_of_last_send(email)
+    parsed = message_from_string(mime, policy=policy.default)
+    assert parsed["MIME-Version"] == "1.0"          # the message still declares it
+    assert [p["MIME-Version"] for p in parsed.walk() if p is not parsed] == [None, None]
+
+
+def test_formatted_send_still_carries_attachments(account):
+    """A file makes it multipart/mixed with the HTML as the body inside it.
+    Mixed is a different question from alternative — nothing has to choose
+    between these parts, so nothing can choose wrong."""
+    email, aid = account["email"], account["id"]
+    code, up = upload_attachment(build_pdf("FORMATTEDATTACH"), "note.pdf", "application/pdf")
+    assert code == 200
+
+    code, _ = api("POST", "/api/compose/send", {
+        "account_id": aid, "to": ["dest@example.com"], "subject": "Formatted with a file",
+        "body_text": "see attached", "body_html": "<html><body><p>see attached</p></body></html>",
+        "attachments": [up["id"]]})
+    assert code == 200
+
+    _, mime = _raw_mime_of_last_send(email)
+    parsed = message_from_string(mime, policy=policy.default)
+    assert parsed.get_content_type() == "multipart/mixed"
+    leaves = [p.get_content_type() for p in parsed.walk() if not p.is_multipart()]
+    assert leaves == ["text/html", "application/pdf"]
+    assert "<p>see attached</p>" in parsed.get_body(("html",)).get_content()
+    assert "note.pdf" in mime
+    assert "multipart/alternative" not in mime
 
 
 def test_reply_context_prefills_headers(account):

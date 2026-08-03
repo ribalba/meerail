@@ -3,6 +3,7 @@
 App.reader = (function () {
   let currentThread = null;
   let openRequest = 0;
+  let loading = 0;              // threads fetched but not yet on screen — see isBusy()
   let collapsed = new Set();    // message ids folded shut; everything else is open
   let imagesFor = new Set();    // message ids with remote images loaded
   let plainFor = new Set();     // message ids switched to their plain-text part
@@ -149,6 +150,13 @@ App.reader = (function () {
     const off = !m.body_html;
     const hint = off ? "This message is already plain text"
       : on ? "Show the formatted message" : "Show the plain text version";
+    // View source rides next to the plain-text switch: both answer "show me
+    // what this message really is", one a step further than the other. It goes
+    // disabled rather than missing when the original bytes were never kept or
+    // have been pruned, for the same reason the switch does.
+    const noSrc = !m.has_source;
+    const srcHint = noSrc ? "The original message bytes are not stored"
+      : "View the message source (opens in a new tab)";
     return `<div class="msg-toolbar" data-msg="${m.id}">
       <button class="tb-btn" data-act="reply" title="Reply">${App.icon("reply", 16)} Reply</button>
       <button class="tb-btn" data-act="replyall" title="Reply All">${App.icon("replyAll", 16)} Reply All</button>
@@ -159,6 +167,9 @@ App.reader = (function () {
       <button class="tb-btn${on ? " on" : ""}" data-act="plain" aria-pressed="${on}"
         title="${hint}" aria-label="${hint}"${off ? " disabled" : ""}
         >${App.icon("plaintext", 16)}</button>
+      <button class="tb-btn" data-act="source"
+        title="${srcHint}" aria-label="${srcHint}"${noSrc ? " disabled" : ""}
+        >${App.icon("code", 16)}</button>
       <button class="tb-btn ${m.flagged ? "on" : ""}" data-act="flag" title="Flag">${App.icon("flag", 16, m.flagged)}</button>
       <button class="tb-btn" data-act="move" title="Move to folder">${App.icon("move", 16)}</button>
       <button class="tb-btn" data-act="archive" title="Archive">${App.icon("archive", 16)}</button>
@@ -283,12 +294,13 @@ App.reader = (function () {
 
   // Like archive and trash, a move takes the whole conversation with it — each
   // message leaves its own folder, so no reply is stranded behind.
-  async function moveThreadTo(mailboxId) {
+  function moveThreadTo(mailboxId) {
     try {
       const targets = moveTargets();
       if (!targets.length) throw new Error("No source mailbox for this message");
-      for (const t of targets) await App.api.moveMsg(t.m.id, mailboxId, t.source);
-      await afterRemove(targets.map((t) => t.m));
+      finishRemove(targets.map((t) => t.m), (async () => {
+        for (const t of targets) await App.api.moveMsg(t.m.id, mailboxId, t.source);
+      })());
     } catch (e) { alert(e.message || "Move failed"); }
   }
 
@@ -300,25 +312,26 @@ App.reader = (function () {
   // server resolves the thread fresh and empties every folder it is filed
   // under, so a message that arrived after this pane was drawn — or a second
   // placement under a label — can't hold the row in the list.
-  async function removeThread(act) {
+  function removeThread(act) {
     const msgs = currentThread ? currentThread.messages : [];
     if (!msgs.length) return;
     const accountId = msgs[0].account_id;
     // Only a threaded conversation has an id to act on. A message that never
     // got threaded stands alone, so its single placement is the whole job.
     if (currentThread.thread_id) {
-      if (act === "archive") await App.api.archiveThread(currentThread.thread_id, accountId);
-      else await App.api.trashThread(currentThread.thread_id, accountId);
-      await afterRemove(msgs.slice());
-      return;
+      const threadId = currentThread.thread_id;
+      return finishRemove(msgs.slice(),
+        act === "archive" ? App.api.archiveThread(threadId, accountId)
+                          : App.api.trashThread(threadId, accountId));
     }
     const targets = moveTargets();
     if (!targets.length) throw new Error("No source mailbox for this message");
-    for (const t of targets) {
-      if (act === "archive") await App.api.archiveMsg(t.m.id, t.source);
-      else await App.api.trashMsg(t.m.id, t.source);
-    }
-    await afterRemove(targets.map((t) => t.m));
+    finishRemove(targets.map((t) => t.m), (async () => {
+      for (const t of targets) {
+        if (act === "archive") await App.api.archiveMsg(t.m.id, t.source);
+        else await App.api.trashMsg(t.m.id, t.source);
+      }
+    })());
   }
 
   async function handleAction(act, m, anchor) {
@@ -330,29 +343,51 @@ App.reader = (function () {
       if (act === "reply") return App.compose.openReply(m.id, "reply");
       if (act === "replyall") return App.compose.openReply(m.id, "replyall");
       if (act === "forward") return App.compose.openReply(m.id, "forward");
+      // A new tab, like an attachment: the source of a real message runs to
+      // hundreds of lines of headers and base64, which is a document to scroll
+      // through rather than something to fit beside the thread.
+      if (act === "source") {
+        if (!m.has_source) return;
+        return window.open(`/api/messages/${m.id}/source`, "_blank", "noopener");
+      }
       if (act === "plain") {
         if (!m.body_html) return;   // nothing to switch away from
         if (plainFor.has(m.id)) plainFor.delete(m.id); else plainFor.add(m.id);
         return rerender();
       }
-      if (act === "flag") { m.flagged = !m.flagged; await App.api.flagMsg(m.id, m.flagged); return rerender(); }
+      if (act === "flag") { m.flagged = !m.flagged; rerender(); await App.api.flagMsg(m.id, m.flagged); return; }
       if (act === "unread") { m.seen = false; await App.api.markSeen(m.id, false); return; }
       if (act === "archive" || act === "trash") return removeThread(act);
     } catch (e) { alert(e.message || "Action failed"); }
   }
 
-  async function afterRemove(removed) {
+  // The pane, the list and the cursor all move on *before* the server is asked:
+  // `call` is the request that makes it true, and against a remote server its
+  // round trip is what made archive and delete feel stuck. The reload after it
+  // settles reconciles the list with the truth — which, when the server said
+  // no, is also what puts the rows back.
+  function finishRemove(removed, call) {
+    const threadId = currentThread.thread_id;
+    const accountId = removed[0].account_id;
     const gone = new Set(removed.map((x) => x.id));
     currentThread.messages = currentThread.messages.filter((x) => !gone.has(x.id));
     const emptied = !currentThread.messages.length;
     if (emptied) clear(); else rerender();
-    if (!App.shell) return;
-    await App.shell.reloadList();
+    // A list row is a conversation, so it goes by thread — its id is whichever
+    // message the row was built from, not necessarily one the reader held.
+    App.list.drop((r) => (threadId
+      ? r.thread_id === threadId && r.account_id === accountId
+      : gone.has(r.id)));
     // Clearing the conversation you were reading would leave the pane blank and
-    // the keyboard flow stranded. The list keeps the cursor on the slot the row
+    // the keyboard flow stranded. The list kept the cursor on the slot the row
     // vacated, so opening it lands on the next mail down — and on nothing at
     // all when the folder is empty, which is what draws the all-done state.
     if (emptied) App.list.openFocused();
+    call.then(() => App.shell && App.shell.reloadList())
+      .catch((e) => {
+        alert(e.message || "Action failed");
+        if (App.shell) App.shell.reloadList();
+      });
   }
 
   // Every message in the thread is drawn in full — no "N earlier messages" to
@@ -597,7 +632,16 @@ App.reader = (function () {
     // Asked for with the search still in hand: the server has to find the hits
     // in extracted attachment text, which the client never sees.
     const search = App.search && App.search.isActive() ? App.search.query() : null;
-    const data = await App.api.thread(threadId, accountId, false, search);
+    let data;
+    // Counted rather than flagged, so overlapping opens cannot clear it early.
+    // app.keys.js reads this to tell "no thread" from "the thread you just
+    // asked for has not landed yet" — see isBusy().
+    loading += 1;
+    try {
+      data = await App.api.thread(threadId, accountId, false, search);
+    } finally {
+      loading -= 1;
+    }
     if (request !== openRequest) return;
     marks = search ? App.highlight.patterns(search.q, search.mode) : [];
     currentThread = data;
@@ -607,6 +651,11 @@ App.reader = (function () {
     // for per message, not a state a thread arrives in.
     collapsed = new Set();
     rerender(true);
+    // clear() drops the ↑↓ marker along with the thread it belonged to, which
+    // is right when the pane empties — but archiving from here empties it and
+    // opens the next conversation in one go, and the keyboard never left. Ask
+    // where it actually is rather than leaving the bar saying otherwise.
+    if (App.keys && App.keys.pane() === "reader") setKeyFocus(true);
     // Opening a conversation marks its messages read (write-back via the agent).
     for (const m of data.messages) {
       if (!m.seen) { m.seen = true; App.api.markSeen(m.id, true).catch(() => {}); }
@@ -666,7 +715,12 @@ App.reader = (function () {
   // thread open — both the bar and the per-message toolbars carry one.
   return { openThread, clear, action, scrollBy, scrollEnd, setKeyFocus, renderEmpty,
     redraw: () => rerender(), isOpen: () => !!currentThread,
-    // For the composer's "Send & Archive". Errors are the caller's to report:
-    // the mail is already gone by then, so a failure here is not a failed send.
+    // "A thread is on its way." The keyboard moves into this pane on the same
+    // keystroke that asks for the thread, which is a fetch ahead of isOpen().
+    isBusy: () => loading > 0,
+    // For the composer's "Send & Archive". Settles as soon as the UI has moved
+    // on — the request runs behind it and reports its own failure, which is
+    // right for the composer too: the mail is already sent by then, so a failed
+    // archive must not read as a failed send.
     archiveThread: () => (currentThread ? removeThread("archive") : Promise.resolve()) };
 })();
