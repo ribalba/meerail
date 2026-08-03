@@ -30,13 +30,13 @@ Run meerail-agent in the background, as a launchd LaunchAgent (macOS only).
   ./service.sh install     write the plist, load it, start syncing
   ./service.sh status      loaded? running? what did it exit with?
   ./service.sh logs        tail the log
-  ./service.sh restart     bounce it (after editing config.toml)
+  ./service.sh restart     bounce it (after editing meerail.toml)
   ./service.sh stop        stop + unload, but keep the plist
   ./service.sh start       load it again after a stop
   ./service.sh uninstall   stop, unload, delete the plist
 
   --config PATH            run the agent against a config other than
-                           agent/config.toml (install only)
+                           the repository's meerail.toml (install only)
 USAGE
 }
 
@@ -108,9 +108,12 @@ require_plist() {
 }
 
 cmd_install() {
-  if [ ! -f config.toml ] && [ -z "${CONFIG_PATH:-}" ]; then
-    echo "No config.toml here. Copy config.example.toml and fill it in first:" >&2
-    echo "  cp config.example.toml config.toml && chmod 600 config.toml" >&2
+  # One level up: meerail.toml is shared with the server and lives at the
+  # repository root, not in this directory.
+  if [ ! -f ../meerail.toml ] && [ -z "${CONFIG_PATH:-}" ]; then
+    echo "No ../meerail.toml. Copy the example and fill it in first:" >&2
+    echo "  (cd .. && cp meerail.example.toml meerail.toml && chmod 600 meerail.toml)" >&2
+    echo "Upgrading an older install? Run: (cd .. && python -m core.config migrate)" >&2
     exit 1
   fi
   if [ ! -d .venv ]; then

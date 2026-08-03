@@ -7,10 +7,12 @@ electron
 # directory can no longer be excluded wholesale — keep out its host venv (wrong
 # platform, ~190 MB) and its credentials, which are bind-mounted at runtime.
 agent/.venv
-agent/config.toml
+# The whole system's configuration, bind-mounted at runtime into both images.
+# It holds mailbox passwords in plaintext, so it must never bake into a layer.
+meerail.toml
 # Same, for the Coolify deployment: Coolify writes this into the checkout it
 # then builds from, so it would otherwise land in the image layer.
-coolify/agent-config.toml
+coolify/meerail.toml
 data
 *.md
 .env

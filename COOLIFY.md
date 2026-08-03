@@ -23,7 +23,7 @@ make on shared or untrusted infrastructure.
 | | |
 | --- | --- |
 | **Host** | 8 GB RAM and a disk sized to your mailbox. The compose file's memory limits total ~9 GB of *ceilings*, which overcommit fine; the real floor is Postgres + Tika + one agent batch. See [Smaller hosts](#smaller-hosts). |
-| **Disk** | Tens of GB for a large account. `store_raw_mime = false` (the default in this file) roughly halves it; `content_window_months` bounds it properly. |
+| **Disk** | Tens of GB for a large account. `store_raw_mime = false` roughly halves it; `content_window_months` bounds it properly. |
 | **Coolify** | v4.0.0-beta.411 or newer if you want the magic-variable domain wiring; any v4 works if you set the domain in the UI. |
 | **Arch** | amd64 or arm64. The Bridge image tag used here (`:build`) is the source-built multi-arch one — `:latest` repacks the amd64-only .deb. |
 | **A wildcard domain** | Or at least one A record pointing at the Coolify host, for the server's hostname. |
@@ -37,7 +37,7 @@ One thing to know before you start: **plain `docker compose` rejects this file.*
 The agent's config mount uses Coolify's `content:` extension, which is not a
 Compose key — Coolify strips it and writes the file out before Docker sees any of
 it. That is also what prevents Docker from silently creating a *directory* where
-`config.toml` should be on a first deploy. `docker-compose.yml` remains the one you
+`meerail.toml` should be on a first deploy. `docker-compose.yml` remains the one you
 run locally.
 
 ## 1. Create the resource
@@ -82,7 +82,7 @@ Deploy. Expect it to take a while — Tika's image is large and both meerail ima
 build from source.
 
 Four services come up healthy and **the agent will not**: it has a placeholder
-`config.toml` at this point and no Bridge account to talk to. Its logs saying it
+`meerail.toml` at this point and no Bridge account to talk to. Its logs saying it
 cannot authenticate are the expected state until step 6.
 
 ## 5. Log Bridge in
@@ -138,10 +138,16 @@ Then start the `bridge` service again in Coolify. Its log should reach
 
 ## 6. Fill in the agent config
 
-The compose file declares `/app/agent/config.toml` as a Coolify file mount with a
+The compose file declares `/app/meerail.toml` as a Coolify file mount with a
 placeholder body, so after the first deploy it appears under the resource's
 **Storages** tab. Edit it there — not in the repository, where the password would
 be committed.
+
+It carries only an `[agent]` section. On this stack the `server` service is
+configured entirely from its environment block (the variables you set in step 2)
+and mounts no file at all — the precedence in
+[README § Configuration](README.md#configuration) is built for exactly that — so
+`[database]` and `[server]` here would be read by nothing.
 
 Only two things to change, both from what `info` printed:
 
@@ -154,13 +160,12 @@ self-signed certificate is issued for 127.0.0.1 while we reach it as `bridge` �
 hop that is container-to-container on the host's own bridge network and never
 touches the wire.
 
-Note what is *absent* from that file: `database_url` and `tika_url`. The compose
-file passes both as environment variables instead, and `agent/config.py` only
-`setdefault`s the file's values into the environment, so an environment value wins.
-That is deliberate — it keeps the Postgres password in one place (Coolify's
-`POSTGRES_PASSWORD`) rather than also hand-copied into a file that then drifts. Add
-either key back to `config.toml` and it takes precedence again, which is the usual
-way this ends up broken.
+Note what is *absent* from that file: `[database].url` and `agent.tika_url`. The
+compose file passes both as environment variables instead, and the environment
+outranks `meerail.toml`. That is deliberate — it keeps the Postgres password in one
+place (Coolify's `POSTGRES_PASSWORD`) rather than also hand-copied into a file that
+then drifts. Adding either key back to the Storages file achieves nothing: the
+environment still wins.
 
 Redeploy the agent. Watch its logs: it creates the schema, backfills, and the
 account appears in the UI on its own after the first successful sync.
@@ -182,13 +187,13 @@ The limits in the compose file assume ~8 GB. On 4 GB, in this order:
 
 1. `tika` → `image: apache/tika:latest`, drop `build:`, limit `1g`. Loses OCR of
    scanned PDFs and images; ordinary text extraction is unaffected.
-2. `agent` → `batch_size = 25` in `config.toml`, limit `1g`. The peak is one batch
+2. `agent` → `batch_size = 25` in the Storages file, limit `1g`. The peak is one batch
    of complete raw MIME messages held in memory at once, so this scales roughly
    linearly and costs only extra round trips.
 3. `db` → `shared_buffers=256MB`, `effective_cache_size=1GB`,
    `maintenance_work_mem=256MB`, limit `1500m`.
 
-Disk is the other axis: `content_window_months = 24` in `config.toml` keeps only the
+Disk is the other axis: `content_window_months = 24` in the Storages file keeps only the
 last two years of message *content*. Older mail stays listed, threaded and
 searchable by subject and correspondent, and the window slides — already-stored mail
 is stripped back to headers as it passes out of it. Nothing is deleted from Proton.
@@ -266,9 +271,9 @@ docker exec -it <db-container> \
   psql -U meerail -d meerail -c "ALTER USER meerail WITH PASSWORD '<what Coolify has>';"
 ```
 
-If it succeeds and only the *agent* is failing, its `config.toml` is overriding the
-environment — see step 6. Delete any `database_url` line from the Storages file and
-redeploy.
+If it succeeds and only the *agent* is failing, check `DATABASE_URL` on the agent
+service itself — the environment is what it uses, and the Storages file cannot
+override it (see step 6).
 
 Third possibility, if both look right: the password contains a URL metacharacter.
 `DATABASE_URL` is a URL, so `@`, `:`, `/`, `?`, `#`, `[` and `]` inside the password
@@ -280,7 +285,7 @@ percent-encode it in the compose file or use a password of letters, digits and
 
 Expected between the first deploy and the end of step 6. The agent restarts on a
 backoff and picks up on its own once Bridge is logged in and the config has the real
-Bridge password — no redeploy needed beyond the one that reloads `config.toml`.
+Bridge password — no redeploy needed beyond the one that reloads `meerail.toml`.
 
 A crash-looping `bridge` does **not** restart the rest of the stack: the agent's
 `depends_on` uses `condition: service_started`, which is satisfied once and not
@@ -295,7 +300,7 @@ container is looping.
 | **Backups** | The `pg-data` volume is the mailbox. `bridge-data` is only a login you can recreate; `mail-data` is scratch space for outgoing attachments. |
 | **Upgrades** | Redeploy. The agent is stateless — its cursors are rows in Postgres — so it resumes mid-backfill without repeating work. |
 | **Postgres major upgrade** | The volume is mounted at `/var/lib/postgresql`, not `.../data`, which is what keeps `pg_upgrade --link` available later. |
-| **Adding an account** | Another `[[account]]` block in the Storages config, and another `init`/`login` against the Bridge volume. |
+| **Adding an account** | Another `[[agent.account]]` block in the Storages config, and another `init`/`login` against the Bridge volume. |
 
 ## Local development is unaffected
 

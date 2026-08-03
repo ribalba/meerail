@@ -200,7 +200,7 @@
             <h3>Keep years of mail, not years of attachments</h3>
             <p>
               A full mailbox runs to tens of gigabytes, most of it mail nobody
-              will open again. Set <code>content_window_months = 24</code> and
+              will open again. Set <code>agent.content_window_months = 24</code> and
               bodies and attachments are kept for recent mail only — older mail
               still syncs as headers, so it lists, threads and answers a search
               for its subject or sender. The window slides: stored mail is walked
@@ -494,8 +494,14 @@ cd meerail</pre>
           <div class="landing-card-body">
             <div class="landing-card-icon"><i class="docker icon"></i></div>
             <h3>2. Run the server</h3>
-            <p>Server, Postgres and Apache Tika, in one command.</p>
-            <pre class="landing-code">cp .env.example .env
+            <p>
+              One <code>meerail.toml</code> configures the whole system — server
+              and agent both read it. Then server, Postgres and Apache Tika, in
+              one command.
+            </p>
+            <pre class="landing-code">cp meerail.example.toml meerail.toml
+chmod 600 meerail.toml
+cp .env.example .env
 docker compose up -d</pre>
           </div>
         </article>
@@ -505,15 +511,14 @@ docker compose up -d</pre>
             <div class="landing-card-icon"><i class="sync icon"></i></div>
             <h3>3. Start the agent</h3>
             <p>
-              Copy the example config, then <strong>edit <code>config.toml</code>
-              and put in your own credentials</strong> — the host, ports,
-              username and password for your mail server. For Proton that's the
-              Bridge password shown in the Bridge app, not your Proton password.
-              The agent won't start until they're filled in.
+              <strong>Edit the <code>[[agent.account]]</code> block in
+              <code>meerail.toml</code></strong> and put in your own credentials
+              — the host, ports, username and password for your mail server. For
+              Proton that's the Bridge password shown in the Bridge app, not your
+              Proton password. The agent won't start until they're filled in.
             </p>
-            <pre class="landing-code">cd agent
-cp config.example.toml config.toml
-$EDITOR config.toml   # your credentials
+            <pre class="landing-code">$EDITOR meerail.toml   # your credentials
+cd agent
 ./run.sh --once</pre>
           </div>
         </article>

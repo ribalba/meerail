@@ -231,10 +231,11 @@ def prune_expired_content(db, cutoff: datetime, limit: int = PRUNE_BATCH) -> int
 def record_content_window(db, months: int) -> None:
     """Publish the agent's window setting for the web app to read.
 
-    The app has no access to agent/config.toml — the two share nothing but the
-    database — and it needs the number to tell someone *why* a body is missing.
-    Writing it here keeps one source of truth: the agent's config, echoed into
-    the database by the process that actually applies it.
+    A split deployment puts the app on another machine, where it has no copy of
+    meerail.toml — the two share nothing but the database — and it needs the
+    number to tell someone *why* a body is missing. Writing it here keeps one
+    source of truth: agent.content_window_months, echoed into the database by
+    the process that actually applies it.
     """
     value = str(max(0, int(months)))
     # Upsert rather than get-then-add: every account thread calls this once per

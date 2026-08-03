@@ -181,7 +181,7 @@ def test_prune_leaves_undated_mail_alone(account):
 
 
 def test_the_window_the_agent_applies_reaches_the_reader(account):
-    """The app cannot read agent/config.toml, so the agent publishes the number."""
+    """A split-deployment app has no meerail.toml, so the agent publishes the number."""
     email, aid = account["email"], account["id"]
     raw = make_message(f"<{uuid.uuid4().hex}@t>", "Explain yourself", "sender@y.com", email,
                        "body", T0)

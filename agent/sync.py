@@ -17,7 +17,7 @@ from core.models import utcnow
 import commands
 import log
 from actions import drain_actions
-from config import AccountConfig, AgentConfig
+from core.config import AccountConfig, Settings
 from imap import Bridge, Suspended
 
 
@@ -416,7 +416,7 @@ def index_once(months: int = 0, report: bool = False) -> tuple[int, int, int]:
         db.close()
 
 
-def run_indexer_forever(cfg: AgentConfig) -> None:
+def run_indexer_forever(cfg: Settings) -> None:
     """Drain attachment text and previews, forever, on a thread of its own.
 
     Split out of the sync pass because the two have nothing to do with each
@@ -498,7 +498,7 @@ def _report_error(email: str, message: str) -> None:
         db.close()
 
 
-def sync_once(account: AccountConfig, cfg: AgentConfig, reconcile: bool = True) -> None:
+def sync_once(account: AccountConfig, cfg: Settings, reconcile: bool = True) -> None:
     """One full pass over every folder for an account.
 
     If the UI has raised a recheck request for this account, the pass rewinds
@@ -604,7 +604,7 @@ def sync_once(account: AccountConfig, cfg: AgentConfig, reconcile: bool = True) 
         bridge.logout()
 
 
-def run_account_forever(account: AccountConfig, cfg: AgentConfig) -> None:
+def run_account_forever(account: AccountConfig, cfg: Settings) -> None:
     """Continuous loop: initial backfill, then IDLE for changes."""
     backoff = 5
     wake = commands.wake_event(account.email)

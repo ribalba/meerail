@@ -7,7 +7,7 @@ import re
 import smtplib
 import ssl
 
-from config import AccountConfig
+from core.config import AccountConfig
 
 _EOL = re.compile(rb"\r\n|\r|\n")
 

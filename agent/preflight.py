@@ -17,7 +17,7 @@ import sys
 import time
 from dataclasses import dataclass
 
-from config import AccountConfig, AgentConfig
+from core.config import AccountConfig, Settings
 
 # Anything slower than this is broken for our purposes; without it a silently
 # dropped packet hangs the check until the OS gives up (minutes).
@@ -87,12 +87,13 @@ def _friendly(exc: Exception) -> str:
     return f"{type(root).__name__}: {first}"
 
 
-def check_config_permissions(cfg: AgentConfig) -> Result:
+def check_config_permissions(cfg: Settings) -> Result:
     """The config holds mail passwords in plaintext, so nobody else may read it."""
     name = "Config file"
     path = cfg.config_path
     if path is None:
-        return Result(name, True, "path unknown — skipped", warn=True)
+        return Result(name, True, "no meerail.toml — configured from the environment, "
+                                  "so there is no file to check", warn=True)
 
     # Windows has no POSIX mode bits; Python synthesises st_mode as 0666 (or
     # 0444 when read-only), which would fail the group/other test below for
@@ -125,10 +126,11 @@ def check_config_permissions(cfg: AgentConfig) -> Result:
     return Result(name, True, f"{path}\n         mode {mode:04o} — owner only")
 
 
-def check_database(cfg: AgentConfig) -> Result:
+def check_database(cfg: Settings) -> Result:
     """Connect, round-trip a query, and report whether the schema is present."""
-    # Imported here, not at module top: core.config snapshots the environment on
-    # import, and load_config must have populated it first (see main.py).
+    # Imported here, not at module top: core.database builds its engine at
+    # import time off get_settings(), which must not run before main.py has had
+    # a chance to set MEERAIL_CONFIG from --config.
     from sqlalchemy import inspect, text
 
     from core.database import engine
@@ -162,7 +164,7 @@ def check_database(cfg: AgentConfig) -> Result:
     return Result("Database", True, detail + f"\n         schema present ({len(tables)} tables)")
 
 
-def check_tika(cfg: AgentConfig) -> Result:
+def check_tika(cfg: Settings) -> Result:
     """Tika is optional-ish: without it, attachments simply aren't searchable."""
     import httpx
 
@@ -253,7 +255,7 @@ def check_smtp(account: AccountConfig) -> Result:
             pass
 
 
-def run(cfg: AgentConfig) -> int:
+def run(cfg: Settings) -> int:
     """Run every check, print a report, and return a process exit code."""
     print("meerail-agent connection test\n")
 

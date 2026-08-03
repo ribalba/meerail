@@ -13,7 +13,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agent"))
 import imap as agent_imap  # noqa: E402
-from config import AccountConfig  # noqa: E402
+from core.config import AccountConfig  # noqa: E402
 from imap import Bridge, Suspended, _SUSPEND_GAP, _IDLE_SLICE  # noqa: E402
 
 

@@ -162,8 +162,8 @@ def _store_content(db: Session, msg: Message, parsed: ParsedEmail, raw: bytes) -
     msg.content_status = "full"
     # size_bytes, the body, the attachments and search_text are all derived
     # above, so the raw copy is purely for future features — and it is the
-    # bulk of the database. settings.store_raw_mime (STORE_RAW_MIME /
-    # store_raw_mime in the agent config) leaves the column NULL instead.
+    # bulk of the database. settings.store_raw_mime (agent.store_raw_mime in
+    # meerail.toml, or STORE_RAW_MIME) leaves the column NULL instead.
     msg.raw_mime = raw if get_settings().store_raw_mime else None
 
     needs_extract = any(

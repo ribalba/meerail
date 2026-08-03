@@ -218,10 +218,14 @@ __marimo__/
 data/
 .venv-test/
 
-# Local Proton Bridge credentials (copy agent/config.example.toml to create it).
+# The whole system's configuration — holds Proton Bridge credentials in
+# plaintext (copy meerail.example.toml to create it).
+/meerail.toml
+# Pre-unification layout; still ignored so an un-migrated checkout cannot commit
+# its credentials. `python -m core.config migrate` folds it into meerail.toml.
 /agent/config.toml
 # Written on the Coolify host from the `content:` block in
 # docker-compose.coolify.yml, inside the deployment checkout. Holds a Bridge
 # password, so it must never come back the other way.
-/coolify/agent-config.toml
+/coolify/meerail.toml
 electron/.DS_Store

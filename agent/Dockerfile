@@ -26,7 +26,7 @@ ENV PYTHONPATH=/app
 
 WORKDIR /app/agent
 
-# config.toml is bind-mounted at runtime and deliberately never baked in — it
-# holds Bridge passwords in plaintext. ENTRYPOINT (not CMD) so that flags pass
-# through: `docker compose run --rm agent --test`.
+# meerail.toml is bind-mounted at /app/meerail.toml at runtime and deliberately
+# never baked in — it holds Bridge passwords in plaintext. ENTRYPOINT (not CMD)
+# so that flags pass through: `docker compose run --rm agent --test`.
 ENTRYPOINT ["python", "main.py"]

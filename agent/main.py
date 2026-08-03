@@ -17,6 +17,7 @@ Run it through ``run.sh`` (which builds the venv) or directly:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import threading
 from pathlib import Path
@@ -28,12 +29,18 @@ _REPO_ROOT = str(Path(__file__).resolve().parent.parent)
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from config import load_config  # noqa: E402  (must follow the sys.path bootstrap)
+# noqa: E402 throughout — these must follow the sys.path bootstrap above.
+from core.config import (  # noqa: E402
+    DEFAULT_CONFIG_PATH,
+    LEGACY_AGENT_CONFIG,
+    config_file_path,
+    get_settings,
+)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="meerail-agent")
-    parser.add_argument("--config", default=None, help="path to config.toml")
+    parser.add_argument("--config", default=None, help="path to meerail.toml")
     parser.add_argument("--once", action="store_true", help="sync once and exit")
     parser.add_argument("--test", action="store_true",
                         help="check every connection (database, Tika, IMAP, SMTP) and exit")
@@ -41,11 +48,23 @@ def main() -> int:
                         help="render previews for already-stored attachments, then exit")
     args = parser.parse_args()
 
-    # Must precede any core.* import: loading the config publishes DATABASE_URL
-    # and TIKA_URL into the environment, which is what core.config reads.
-    cfg = load_config(args.config)
+    # Must precede the first get_settings() — and so any core.* import that
+    # reaches one, which is why core.database and sync are imported below rather
+    # than at the top of the file.
+    if args.config:
+        os.environ["MEERAIL_CONFIG"] = args.config
+
+    if config_file_path() is None and LEGACY_AGENT_CONFIG.exists():
+        print(f"{LEGACY_AGENT_CONFIG} is no longer read — the server and the agent now "
+              f"share one {DEFAULT_CONFIG_PATH}.\n"
+              f"Fold this install's .env and agent config into it with:\n"
+              f"\n    python -m core.config migrate\n", file=sys.stderr)
+        return 1
+
+    cfg = get_settings()
     if not cfg.accounts:
-        print("No [[account]] entries in config.", file=sys.stderr)
+        where = cfg.config_path or "the environment"
+        print(f"No [[agent.account]] entries in {where}.", file=sys.stderr)
         return 1
 
     # Before init_db: --test is read-only and must not create the schema, so that

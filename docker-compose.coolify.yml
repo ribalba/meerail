@@ -230,8 +230,8 @@ services:
       # so it warns rather than blocks, but the file does hold a mail password
       # in plaintext on the host either way.
       - type: bind
-        source: ./coolify/agent-config.toml
-        target: /app/agent/config.toml
+        source: ./coolify/meerail.toml
+        target: /app/meerail.toml
         read_only: true
         content: |
           # Edit this in Coolify: resource → Storages → this file. The Bridge
@@ -239,17 +239,19 @@ services:
           # are issued by Bridge and printed by `info` during the login step in
           # COOLIFY.md. Redeploy the agent after changing anything here.
 
-          # database_url and tika_url are deliberately NOT set here — the
-          # environment block below supplies both, and load_config()'s
-          # os.environ.setdefault means an environment value wins over this file.
-          # That keeps the Postgres password in exactly one place (Coolify's
-          # POSTGRES_PASSWORD) instead of also being hand-copied into a file that
-          # then drifts out of step with it, which shows up as
-          # `password authentication failed for user "meerail"` in the db log.
-          #
-          # Setting either of them here would take this file back over, since
-          # config.toml wins wherever it says anything.
+          # Only [agent] here. The `server` service on this stack is configured
+          # entirely from its environment block (Coolify's UI is where you set
+          # those), and mounts no file — so [database] and [server] would be read
+          # by nothing. See meerail.example.toml for the full set.
 
+          # [database].url is deliberately absent: the environment block below
+          # supplies it, and the environment outranks this file. That keeps the
+          # Postgres password in exactly one place (Coolify's POSTGRES_PASSWORD)
+          # instead of also being hand-copied here, where it would drift out of
+          # step and show up as `password authentication failed for user
+          # "meerail"` in the db log. Setting it here would achieve nothing —
+          # the environment wins either way.
+          [agent]
           poll_interval      = 30
           reconcile_interval = 900
           # 50, not the 200 the laptop stack uses. The memory high-water mark of
@@ -268,7 +270,7 @@ services:
           # already-stored mail is stripped back as the window slides past it.
           content_window_months = 12
 
-          [[account]]
+          [[agent.account]]
           email         = "you@proton.me"
           # socat inside the Bridge container listens on 25/143 and forwards to
           # Bridge's own 127.0.0.1:1025/1143, so these are the plain ports.
@@ -289,11 +291,15 @@ services:
           imap_read_timeout    = 60
           # addresses = ["alias@proton.me", "you@customdomain.com"]
     environment:
-      # The single source of truth for where the agent writes, and the reason
-      # config.toml above sets neither. core.config reads both of these straight
-      # from the environment, and agent/config.py only *setdefault*s the file's
-      # values into it — so an environment value set here wins, and the Postgres
+      # Where the agent writes and what it extracts with — both container
+      # topology, and both absent from the file above for that reason. The
+      # environment outranks meerail.toml, so these win, and the Postgres
       # password lives in one place rather than two that can drift apart.
+      #
+      # Nothing else belongs in this block. A variable set here overrides the
+      # file unconditionally, so `STORE_RAW_MIME: ${STORE_RAW_MIME:-false}` and
+      # friends would quietly beat whatever the operator wrote above — which is
+      # exactly the confusion this layout was rearranged to end (issue #1).
       #
       # If POSTGRES_PASSWORD contains any of : / ? # [ ] @ it must be
       # percent-encoded here (and in `server` below), because this is a URL and
@@ -301,11 +307,6 @@ services:
       # - _ . ~ sidesteps the whole question.
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-meerail}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-meerail}
       TIKA_URL: http://tika:9998
-      # config.toml wins over both of these where it sets the key, and the file
-      # above does set both — they are here so the UI can still override an
-      # agent whose config predates them.
-      STORE_RAW_MIME: ${STORE_RAW_MIME:-false}
-      CONTENT_WINDOW_MONTHS: ${CONTENT_WINDOW_MONTHS:-0}
     deploy:
       resources:
         limits:

@@ -15,7 +15,7 @@ import imaplib_compat  # noqa: F401  (patches imaplib for imapclient on 3.14+)
 from imapclient import IMAPClient, SocketTimeout, tls
 
 import log
-from config import AccountConfig
+from core.config import AccountConfig
 
 _MSGID_RE = re.compile(rb"<[^>]+>")
 # The Date line out of a header block. Unfolded values only: a Date split across

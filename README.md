@@ -71,7 +71,7 @@ that shaped the architecture.
 | **Python** | 3.11 or newer on the host — only for the agent, and only outside Docker. 3.11 is the floor (`tomllib`); 3.13/3.14 are tested. |
 | **Node** | 20+, only if you want the Electron desktop app rather than the browser. |
 | **RAM** | ~6 GB free for the stack as shipped. Postgres is capped at 10 GB and Tika at 3 GB in `docker-compose.yml`, tuned for a ~32 GB host — lower `shared_buffers` and the `deploy.resources.limits` if your machine is smaller. |
-| **Disk** | Sized to your mailbox. Raw MIME plus attachment bytes plus the trigram index runs to tens of GB for a large account — [the content window](#the-content-window) and `STORE_RAW_MIME` are the two knobs that bound it. |
+| **Disk** | Sized to your mailbox. Raw MIME plus attachment bytes plus the trigram index runs to tens of GB for a large account — [the content window](#the-content-window) and `agent.store_raw_mime` are the two knobs that bound it. |
 | **Mail access** | Proton Mail Bridge running and unlocked, **or** any IMAP+SMTP account. Gmail needs 2-Step Verification, an App Password and IMAP enabled — your normal password will not work. |
 
 Tika's `latest-full` image bundles Tesseract and is a multi-GB pull; it is what OCRs
@@ -86,21 +86,25 @@ below has the per-OS detail, including PowerShell commands for Windows and how t
 agent running at boot.
 
 ```bash
-# 1. Start the backing services + web app (Postgres, Tika, server). Postgres and
+# 1. One config file for the whole system — server and agent both read it.
+#    Fill in your Bridge host/ports + credentials under [[agent.account]].
+cp meerail.example.toml meerail.toml
+chmod 600 meerail.toml               # it holds your mail password in plaintext
+cp .env.example .env                 # just the Postgres container's credentials
+
+# 2. Start the backing services + web app (Postgres, Tika, server). Postgres and
 #    Tika are published on 127.0.0.1, which is where the agent looks for them.
-cp .env.example .env
 docker compose up -d
 
-# 2. Run the agent next to Proton Bridge — it does the syncing and the parsing,
+# 3. Run the agent next to Proton Bridge — it does the syncing and the parsing,
 #    writing straight into Postgres.
 cd agent
-cp config.example.toml config.toml   # fill in your Bridge host/ports + credentials
 ./run.sh --once                       # first full sync; then run ./run.sh to stay live
 
-# 3. Open the app — accounts the agent syncs appear automatically
+# 4. Open the app — accounts the agent syncs appear automatically
 open http://localhost:8000
 
-# 4. (optional) Native desktop app instead of the browser
+# 5. (optional) Native desktop app instead of the browser
 cd electron && npm install && npm start
 ```
 
@@ -129,12 +133,12 @@ host` does not change that; it joins the VM's namespace. Hence: native agent on 
 Everything can be containerised, including the agent.
 
 ```bash
-cp .env.example .env
+cp meerail.example.toml meerail.toml   # Bridge host/ports + credentials
+chmod 600 meerail.toml                 # it holds your password in plaintext
+cp .env.example .env                   # Postgres container credentials only
 
-cp agent/config.example.toml agent/config.toml      # Bridge host/ports + credentials
-chmod 600 agent/config.toml                         # it holds your password in plaintext
-make agent-docker                                   # whole stack + agent, host network
-make agent-test                                     # verify every connection
+make agent-docker                      # whole stack + agent, host network
+make agent-test                        # verify every connection
 ```
 
 `make agent-docker` brings up Postgres, Tika, the server *and* the agent with the
@@ -153,12 +157,12 @@ Stack in Docker Desktop, agent on your host Python.
 
 ```bash
 brew install --cask docker                # if you don't have Docker Desktop
+cp meerail.example.toml meerail.toml      # Bridge host/ports + credentials
+chmod 600 meerail.toml
 cp .env.example .env
 make up                                   # Postgres, Tika, server — the first two
                                           # published on 127.0.0.1 for the agent
 cd agent
-cp config.example.toml config.toml        # Bridge host/ports + credentials
-chmod 600 config.toml
 ./run.sh --test                           # check every connection first
 ./run.sh --once                           # first full sync
 ./run.sh                                  # then stay live
@@ -188,11 +192,11 @@ Stack in Docker Desktop (WSL2 backend), agent natively in PowerShell. There is n
 `run.sh` equivalent, so the venv is built by hand once:
 
 ```powershell
+copy meerail.example.toml meerail.toml    # then edit: Bridge host/ports + credentials
 copy .env.example .env
 docker compose up -d
 
 cd agent
-copy config.example.toml config.toml      # then edit: Bridge host/ports + credentials
 py -3 -m venv .venv
 .\.venv\Scripts\pip install -r requirements.txt
 $env:PYTHONPATH = (Resolve-Path ..).Path  # the agent imports the shared `core` package
@@ -273,54 +277,92 @@ the layout above is built to avoid; that file opens by saying so.
 
 ## Configuration
 
-Two files, and neither is committed — both are gitignored so credentials cannot be pushed
-by accident.
+**One file: `meerail.toml`.** The server and the agent both read it — the server takes
+`[database]` and `[server]`, the agent takes `[database]` and `[agent]`, and each ignores
+the other's section. Copy from
+[`meerail.example.toml`](meerail.example.toml) and `chmod 600` it: it holds your mail
+password in plaintext, and the agent's `--test` warns you if the permissions are loose. It
+is gitignored, so credentials cannot be pushed by accident.
 
-### `.env` — the server stack
+Every setting can also be given as an environment variable of the same name in upper case
+— `server.password` is `SERVER_PASSWORD`, `database.url` is `DATABASE_URL`,
+`agent.store_raw_mime` is `STORE_RAW_MIME`. The order is:
 
-Copy from [`.env.example`](.env.example). Every key has a working localhost default, so an
-untouched copy runs.
+```
+environment  >  .env  >  meerail.toml  >  built-in default
+```
 
-| Key | Default | What it does |
-| --- | --- | --- |
-| `DATABASE_URL` | local Postgres | Only used for a *native* server run; compose builds its own from the `POSTGRES_*` keys below. |
-| `POSTGRES_USER` / `_PASSWORD` / `_DB` | `meerail` | Credentials for the bundled Postgres container. |
-| `SECRET_KEY` | `dev-insecure-…` | Signs tokens and encrypts any server-side stored credentials. **Change it** before exposing the app: `python -c "import secrets;print(secrets.token_urlsafe(48))"`. |
-| `SERVER_PASSWORD` | *(empty)* | Empty means no auth — correct for a localhost app. Set it (**with TLS**) if the server is reachable from anywhere else: the UI then shows a password screen, and a successful login holds a signed session cookie for `SESSION_MAX_AGE_DAYS`. Scripted clients send it as `Authorization: Bearer <password>`. Failed logins are rate-limited per address (5 per 15 minutes). |
-| `SESSION_MAX_AGE_DAYS` | `30` | How long a browser login lasts before the password is asked again. Changing `SERVER_PASSWORD` or `SECRET_KEY` logs every browser out immediately. |
-| `DATA_DIR` | `./data` | Scratch space for staging outgoing attachments. Mail bytes live in Postgres. |
-| `TIKA_URL` | `http://127.0.0.1:9998` | Attachment text extraction endpoint, called by the agent. |
-| `DEFAULT_SEARCH_YEARS` | `0` | Default search window; `0` searches everything. The UI can override per query. |
-| `CONTACTS_SCAN_YEARS` | `1` | How far back to scan addresses for compose autocomplete; `0` is all time. |
-| `STORE_RAW_MIME` | `true` | Keep each message's original RFC822 bytes in `messages.raw_mime` — held for future features, and roughly half the database. `false` ingests without them. Read by the ingesting process: the containerised agent via [`docker-compose.agent.yml`](docker-compose.agent.yml), a native one via `store_raw_mime` in `agent/config.toml` (which wins if set). |
-| `CONTENT_WINDOW_MONTHS` | `0` | Keep the *content* of mail sent within this many months; `0` keeps everything. See [The content window](#the-content-window). Same two homes as `STORE_RAW_MIME`. |
+The environment winning is what lets a remote server run with **no file at all**: drop the
+bind mount from [`docker-compose.yml`](docker-compose.yml) and pass `DATABASE_URL` and
+`SECRET_KEY` in the environment instead. It is also why the compose files set only the
+handful of values that are genuinely container topology — a variable with a
+`${VAR:-default}` fallback is *always* set, so listing one there would silently override
+whatever you wrote in the file.
 
-### `agent/config.toml` — mail accounts
+`.env` still exists, but only for the part that cannot live in TOML: `docker compose` reads
+it to expand `${...}`, and the Postgres image takes its credentials from the environment and
+nowhere else. Copy [`.env.example`](.env.example) and leave it at the three `POSTGRES_*`
+keys unless you specifically want a per-machine override.
 
-Copy from [`agent/config.example.toml`](agent/config.example.toml) and `chmod 600` it — it
-holds your mail password in plaintext, and `--test` will warn you if the permissions are
-loose. Top-level keys set `database_url`, `tika_url`, `poll_interval` (seconds between IDLE
-cycles), `reconcile_interval` (full flag/prune sweep), `batch_size`, `store_raw_mime`
-(`false` stops keeping each message's original bytes — see `STORE_RAW_MIME` above; it takes
-effect for mail synced from then on, and existing rows keep their copy) and
-`content_window_months` (below).
+### `[database]`
 
-Then one `[[account]]` block per address — IMAP and SMTP host/port/security, username,
-password, `verify_cert` (`false` for Bridge's self-signed cert, `true` for a real one), an
-optional `batch_size` that overrides the global one for that account (Gmail answers a
-200-message fetch with UIDs missing or by dropping the connection — `25` is a good starting
-point there), and an optional `addresses = [...]` list of aliases to offer in the composer's
-*From*. Accounts
-register themselves in the app on first sync; there is nothing to add in the UI. The example
-file carries a commented-out Gmail block alongside the Proton one.
+| Key | Env | Default | What it does |
+| --- | --- | --- | --- |
+| `url` | `DATABASE_URL` | local Postgres | The only channel between the agent and the web app. Containers on the compose network are handed `db:5432` in their environment, which overrides this. If you change `POSTGRES_PASSWORD` in `.env`, change it here too — the Postgres image only takes credentials from the environment, so that one value genuinely does live in two places. |
+
+### `[server]`
+
+| Key | Env | Default | What it does |
+| --- | --- | --- | --- |
+| `secret_key` | `SECRET_KEY` | `dev-insecure-…` | Signs tokens and encrypts any server-side stored credentials. **Change it** before exposing the app: `python -c "import secrets;print(secrets.token_urlsafe(48))"`. |
+| `password` | `SERVER_PASSWORD` | *(empty)* | Empty means no auth — correct for a localhost app. Set it (**with TLS**) if the server is reachable from anywhere else: the UI then shows a password screen, and a successful login holds a signed session cookie for `session_max_age_days`. Scripted clients send it as `Authorization: Bearer <password>`. Failed logins are rate-limited per address (5 per 15 minutes). |
+| `session_max_age_days` | `SESSION_MAX_AGE_DAYS` | `30` | How long a browser login lasts before the password is asked again. Changing `password` or `secret_key` logs every browser out immediately. |
+| `default_search_years` | `DEFAULT_SEARCH_YEARS` | `0` | Default search window; `0` searches everything. The UI can override per query. |
+| `contacts_scan_years` | `CONTACTS_SCAN_YEARS` | `1` | How far back to scan addresses for compose autocomplete; `0` is all time. |
+| `max_attachment_bytes` | `MAX_ATTACHMENT_BYTES` | `104857600` | Per-attachment cap for outgoing uploads. |
+| `data_dir` | `DATA_DIR` | `./data` | Scratch space for staging outgoing attachments. Mail bytes live in Postgres. Every container overrides it to `/data`. |
+
+### `[agent]`
+
+| Key | Env | Default | What it does |
+| --- | --- | --- | --- |
+| `tika_url` | `TIKA_URL` | `http://127.0.0.1:9998` | Attachment text extraction endpoint, called by the agent. |
+| `poll_interval` | `POLL_INTERVAL` | `30` | Seconds between IDLE cycles. |
+| `reconcile_interval` | `RECONCILE_INTERVAL` | `900` | Seconds between full flag/prune sweeps. |
+| `batch_size` | `BATCH_SIZE` | `200` | UIDs per fetch/ingest batch. An account may override it. |
+| `store_raw_mime` | `STORE_RAW_MIME` | `true` | Keep each message's original RFC822 bytes in `messages.raw_mime` — held for future features, and roughly half the database. `false` ingests without them. Takes effect for mail synced from then on; existing rows keep their copy. |
+| `content_window_months` | `CONTENT_WINDOW_MONTHS` | `0` | Keep the *content* of mail sent within this many months; `0` keeps everything. See [The content window](#the-content-window). |
+
+Then one `[[agent.account]]` block per address — IMAP and SMTP host/port/security, username
+(defaults to `email`), password, `verify_cert` (`false` for Bridge's self-signed cert, `true`
+for a real one), an optional `batch_size` that overrides the global one for that account
+(Gmail answers a 200-message fetch with UIDs missing or by dropping the connection — `25` is
+a good starting point there), and an optional `addresses = [...]` list of aliases to offer in
+the composer's *From*. Accounts register themselves in the app on first sync; there is
+nothing to add in the UI. The example file carries a commented-out Gmail block alongside the
+Proton one.
+
+### Upgrading from the two-file layout
+
+Before this, settings lived in `.env` *and* `agent/config.toml`, with `STORE_RAW_MIME` and
+`CONTENT_WINDOW_MONTHS` in both ([issue #1](https://github.com/ribalba/meerail/issues/1)).
+`agent/config.toml` is no longer read. Fold an existing install into one file with:
+
+```bash
+python -m core.config migrate
+```
+
+It reads your `.env` and `agent/config.toml`, writes `meerail.toml` at mode 0600 with the
+values that install was actually running with, and tells you what to do next. The agent
+refuses to start until you have run it.
 
 ### The content window
 
 A full mailbox is tens of GB, and most of it is mail nobody will open again. Set
-`content_window_months` (or `CONTENT_WINDOW_MONTHS`) to keep the *content* of recent mail
-only:
+`agent.content_window_months` to keep the *content* of recent mail only:
 
 ```toml
+[agent]
 content_window_months = 24   # bodies and attachments for the last two years
 ```
 
@@ -350,7 +392,7 @@ on `PYTHONPATH` (the agent imports `core`) and passes arguments through:
 | *(none)* | Stay live: IDLE, sync, drain the action queue. |
 | `--once` | One full sync pass, then exit. Use this first. |
 | `--test` | Check Postgres, Tika, IMAP and SMTP for every account, report, exit. Run it before anything else. |
-| `--config PATH` | Use a config file other than `agent/config.toml`. |
+| `--config PATH` | Use a config file other than the repository's `meerail.toml`. |
 | `--backfill-previews` | Render previews for attachments already stored, then exit. |
 
 On Linux the same thing runs containerised with `make agent-docker` / `make agent-test` /

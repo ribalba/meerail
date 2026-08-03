@@ -120,6 +120,7 @@ test: test-up
 	@DATABASE_URL="$(TEST_DATABASE_URL)" \
 	 MEERAIL_URL="$(TEST_MEERAIL_URL)" \
 	 TIKA_URL="$(TEST_TIKA_URL)" \
+	 MEERAIL_CONFIG= \
 	 $(PYTEST) tests/ $(PYTEST_ARGS); \
 	 status=$$?; \
 	 $(TEST_COMPOSE) down -v --remove-orphans; \
@@ -136,7 +137,8 @@ test: test-up
 # browser is missing: .venv-test/bin/playwright install chromium
 SHOOT_ENV = DATABASE_URL="$(TEST_DATABASE_URL)" \
             MEERAIL_URL="$(TEST_MEERAIL_URL)" \
-            TIKA_URL="$(TEST_TIKA_URL)"
+            TIKA_URL="$(TEST_TIKA_URL)" \
+            MEERAIL_CONFIG=
 
 screenshots: test-up
 	@$(SHOOT_ENV) .venv-test/bin/python website/screenshots/seed.py

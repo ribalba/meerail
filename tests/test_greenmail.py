@@ -57,11 +57,13 @@ def _run_agent(config_path: Path) -> None:
 
 
 def _write_config(tmp_path: Path, email: str) -> Path:
-    config = tmp_path / "config.toml"
+    config = tmp_path / "meerail.toml"
     config.write_text(
-        f'database_url = "{DATABASE_URL}"\ntika_url = "{TIKA_URL}"\n'
+        f'[database]\nurl = "{DATABASE_URL}"\n\n'
+        f'[agent]\ntika_url = "{TIKA_URL}"\n'
         'poll_interval = 30\nbatch_size = 200\n\n'
-        f'[[account]]\nemail = "{email}"\nimap_host = "127.0.0.1"\nimap_port = {IMAP_PORT}\n'
+        f'[[agent.account]]\nemail = "{email}"\nimap_host = "127.0.0.1"\n'
+        f'imap_port = {IMAP_PORT}\n'
         'imap_security = "plain"\nsmtp_host = "127.0.0.1"\nsmtp_port = 3025\n'
         f'smtp_security = "plain"\nusername = "{email}"\npassword = "x"\nverify_cert = false\n'
     )

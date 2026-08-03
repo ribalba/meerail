@@ -22,15 +22,17 @@ agent isn't running, nothing new arrives.
    ```
 
    That puts Postgres on `127.0.0.1:5432` and Tika on `127.0.0.1:9998` — the
-   addresses `config.example.toml` already points at, and the ones a
+   addresses `meerail.example.toml` already points at, and the ones a
    natively-run agent needs, since it is not on the compose network.
 
 3. Configure and run:
 
    ```bash
-   cp config.example.toml config.toml
-   $EDITOR config.toml            # Bridge host/ports/credentials + database_url
-   chmod 600 config.toml          # it holds your password in plaintext
+   # One file for the whole system, at the repository root — the server reads
+   # the same one. Upgrading? Run `python -m core.config migrate` instead.
+   cp ../meerail.example.toml ../meerail.toml
+   $EDITOR ../meerail.toml        # [[agent.account]] credentials + [database] url
+   chmod 600 ../meerail.toml      # it holds your password in plaintext
    ./run.sh --test                # check every connection before syncing
    ./run.sh --once                # one full sync pass (good first run)
    ./run.sh                       # continuous: backfill + live IDLE
@@ -70,9 +72,9 @@ password doesn't hide the state of the rest.
 
 Three things it deliberately reports on rather than trusting your config:
 
-- **`config.toml` must not be readable by anyone but you.** It stores mail
+- **`meerail.toml` must not be readable by anyone but you.** It stores mail
   passwords in plaintext, so any group or other permission bit fails the check.
-  `chmod 600 config.toml` (or `400`) fixes it.
+  `chmod 600 meerail.toml` (or `400`) fixes it.
 
 - **Tika being unreachable is a warning, not an error.** Mail still syncs; you
   just lose text extraction from attachments, so they won't be searchable.
@@ -125,7 +127,7 @@ docker compose -f docker-compose.yml -f docker-compose.agent.yml up -d
 
 `network_mode: host` gives the container the host's network namespace, so
 `127.0.0.1` inside it *is* your machine: Bridge, Postgres and Tika are all
-reachable and `config.toml` needs no changes. `restart: unless-stopped` brings
+reachable and `meerail.toml` needs no changes. `restart: unless-stopped` brings
 the agent back after a reboot, which is the thing `run.sh` won't do for you.
 
 The host namespace is also why the base file publishes `db` and `tika` on
@@ -135,10 +137,10 @@ so those names do not resolve and their container ports are not reachable;
 what forces the whole arrangement — it listens on loopback only, so an agent
 sitting on the compose network could not reach it at any address. Syncing a
 remote mailbox instead (Gmail, Fastmail, plain IMAP)? Then none of this applies:
-put the agent on `networks: [meerail]` and point `database_url`/`tika_url` at
-`db` and `tika`.
+put the agent on `networks: [meerail]` and point `database.url`/`agent.tika_url`
+at `db` and `tika`.
 
-`config.toml` must exist before the first `up` — it is bind-mounted read-only,
+`meerail.toml` must exist before the first `up` — it is bind-mounted read-only,
 and Docker silently creates a *directory* in its place if the file is missing.
 It is never copied into the image; credentials stay on the host.
 
@@ -182,10 +184,10 @@ terminal left open. The rest of the commands:
 | --- | --- |
 | `./service.sh status` | Running? With what PID? Plus the last few log lines. |
 | `./service.sh logs` | `tail -f` the log. |
-| `./service.sh restart` | Pick up an edited `config.toml`. |
+| `./service.sh restart` | Pick up an edited `meerail.toml`. |
 | `./service.sh stop` | Stop it, but keep it installed. `start` resumes. |
 | `./service.sh uninstall` | Stop it and delete the plist. |
-| `./service.sh install --config PATH` | Run against a config other than `agent/config.toml`. |
+| `./service.sh install --config PATH` | Run against a config other than the repository's `meerail.toml`. |
 
 It writes `~/Library/LaunchAgents/de.meerail.agent.plist` and logs to
 `~/Library/Logs/meerail-agent.log`. `install` is idempotent — re-run it after
@@ -258,8 +260,8 @@ Four details that bite:
   running without you logged in has nothing to connect to.
 
 `chmod 600` has no NTFS equivalent, so `--test` reports the config-permission
-check as a warning on Windows instead of inspecting it. Keep `config.toml` in
-your own profile directory and check its ACLs with `icacls config.toml` if the
+check as a warning on Windows instead of inspecting it. Keep `meerail.toml` in
+your own profile directory and check its ACLs with `icacls meerail.toml` if the
 machine has other users.
 
 ## How it works
@@ -325,14 +327,14 @@ a pass that dies partway leaves the request standing and runs again.
   merely deaf. With the timeout the stall surfaces as a normal failure: logged,
   recorded, and retried under the usual backoff. The read timeout applies per
   operation, so a large fetch trips it only if the server goes fully silent.
-- Multiple accounts: add more `[[account]]` blocks. Each runs in its own thread.
+- Multiple accounts: add more `[[agent.account]]` blocks. Each runs in its own thread.
 - Multiple sender addresses: Proton lets one account own several addresses. List
   them per account with `addresses = ["alias@…", "you@customdomain.com"]`; the
   agent reports them on sync and they appear in the app's compose **From**
   dropdown. The primary `email` is always sendable and need not be listed.
 - Non-Proton providers work too — the agent speaks standard IMAP/SMTP. See the
-  commented Gmail example in `config.example.toml` (requires an App Password,
+  commented Gmail example in `meerail.example.toml` (requires an App Password,
   not your Google password).
-- `database_url` uses the psycopg3 driver (`postgresql+psycopg://`). The agent
+- `database.url` uses the psycopg3 driver (`postgresql+psycopg://`). The agent
   runs on your host Python, so its pins are newer than you might expect —
   older ones have no wheels for current interpreters.

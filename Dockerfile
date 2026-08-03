@@ -14,10 +14,15 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY core ./core
 COPY app ./app
 
-# Staging for outgoing attachments; mail bytes live in Postgres.
+# Staging for outgoing attachments; mail bytes live in Postgres. /data is where
+# the volume lands, so this is container topology rather than configuration —
+# which is why it is the one setting still baked in here.
+#
+# DATABASE_URL deliberately is NOT: the environment outranks meerail.toml, so a
+# default baked into the image would override the mounted file for everyone
+# instead of only filling a gap. The compose files set it explicitly.
 RUN mkdir -p /data
-ENV DATABASE_URL=postgresql+psycopg://meerail:meerail@db:5432/meerail \
-    DATA_DIR=/data
+ENV DATA_DIR=/data
 
 EXPOSE 8000
 

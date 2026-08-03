@@ -76,7 +76,7 @@ def hint(exc: Exception) -> str:
                 "Backing off; it clears on its own.")
     if "authentication failed" in text or "invalid credentials" in text:
         return ("Bridge rejected the password. Copy it again from the Bridge UI "
-                "(Mailbox details) into agent/config.toml — it is not your Proton "
+                "(Mailbox details) into meerail.toml — it is not your Proton "
                 "password and it changes when the account is re-added.")
     if isinstance(exc, ConnectionRefusedError) or "connection refused" in text:
         return "Nothing is listening there — Bridge, Postgres or Tika is not up yet."

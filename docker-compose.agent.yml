@@ -4,7 +4,7 @@
 #
 # `network_mode: host` hands the container the host's network namespace, which
 # is the entire point: the agent speaks to Proton Bridge, Postgres and Tika over
-# 127.0.0.1, so every address in agent/config.toml keeps working unchanged — no
+# 127.0.0.1, so every address in meerail.toml keeps working unchanged — no
 # host.docker.internal, no rewriting hosts to compose service names.
 #
 # That namespace is why the base file publishes db and tika on the host's
@@ -24,8 +24,8 @@
 # Run the agent natively on those platforms — agent/README.md has launchd and
 # Task Scheduler recipes.
 #
-# Prerequisite: agent/config.toml must exist before the first `up`, or Docker
-# creates a *directory* at that path and the agent starts with no config.
+# Prerequisite: meerail.toml must exist before the first `up`, or Docker creates
+# a *directory* at that path and the agent starts with no config.
 services:
   agent:
     build:
@@ -42,31 +42,21 @@ services:
       tika:
         condition: service_started
     volumes:
-      # Read-only — the agent never writes its config. The 0600 permission check
+      # The same file the server mounts — one configuration for the whole
+      # system. Read-only: the agent never writes it. The 0600 permission check
       # in preflight.py reads the host file's mode straight through the mount.
-      - ./agent/config.toml:/app/agent/config.toml:ro
-    environment:
-      # Keep the original RFC822 bytes of every message in messages.raw_mime.
-      # Nothing reads them yet — they are stored for future features — and they
-      # are roughly half of what the database holds, so set STORE_RAW_MIME=false
-      # in .env to ingest without them. Only affects mail synced from then on.
-      #
-      # store_raw_mime in agent/config.toml overrides this, so the file stays
-      # the single source of truth for anyone who set it there.
-      STORE_RAW_MIME: ${STORE_RAW_MIME:-true}
-      # Only keep the content of mail sent within this many months (0 = all of
-      # it). Older mail is stored as headers alone, and stored mail is stripped
-      # back to headers as the window slides past it — the sliding is why this
-      # keeps working after the first pass. Nothing is deleted upstream.
-      # content_window_months in agent/config.toml overrides this.
-      CONTENT_WINDOW_MONTHS: ${CONTENT_WINDOW_MONTHS:-0}
+      - ./meerail.toml:/app/meerail.toml:ro
+    # No `environment:` block. This container shares the host's network
+    # namespace, so the loopback addresses in meerail.toml already reach
+    # Postgres and Tika — there is no topology to override, and anything set
+    # here would outrank the file rather than merely default it.
     # The peak here is sync.py's `raws = bridge.fetch_raw(need_raw)`, which holds
     # a whole chunk of complete raw MIME messages in memory at once — batch_size
     # messages, with no cap on how big any of them is. A chunk that happens to
     # collect many large attachments is what pushes this over.
     #
-    # 6GB is sized for the default batch_size=200. Lower batch_size in
-    # agent/config.toml rather than raising this: it cuts the peak roughly
+    # 6GB is sized for the default batch_size=200. Lower agent.batch_size in
+    # meerail.toml rather than raising this: it cuts the peak roughly
     # linearly and costs only a few more round trips.
     deploy:
       resources:

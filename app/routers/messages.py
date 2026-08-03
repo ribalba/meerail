@@ -170,10 +170,10 @@ def _recipients(db: DBSession, message_pk: int) -> dict[str, list[dict]]:
 def content_window_months(db: DBSession) -> int:
     """The agent's content window, as it last published it. 0 = keep everything.
 
-    The app cannot read agent/config.toml — the two share nothing but the
-    database — so the agent writes the number there each pass and this reads it
-    back. Used only to explain a missing body, so an unset or unparseable value
-    is not an error: the reader just says less.
+    On a split deployment the app has no copy of meerail.toml — the two share
+    nothing but the database — so the agent writes the number there each pass
+    and this reads it back. Used only to explain a missing body, so an unset or
+    unparseable value is not an error: the reader just says less.
     """
     row = db.get(Setting, ingest.CONTENT_WINDOW_KEY)
     try:
