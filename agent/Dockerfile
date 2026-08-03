@@ -5,6 +5,16 @@
 # namespace to see any of them. See docker-compose.agent.yml.
 FROM python:3.13-slim
 
+# See the server Dockerfile: label only, never ENV, so the copied VERSION file
+# stays the single runtime source of the number.
+ARG MEERAIL_VERSION=dev
+LABEL org.opencontainers.image.title="meerail-agent" \
+      org.opencontainers.image.description="meerail agent — IMAP/SMTP, parsing and ingest; owns the write path" \
+      org.opencontainers.image.version="${MEERAIL_VERSION}" \
+      org.opencontainers.image.source="https://github.com/ribalba/meerail" \
+      org.opencontainers.image.url="https://meerail.eu" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later"
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1
@@ -19,6 +29,10 @@ RUN pip install --no-cache-dir -r agent/requirements.txt
 # `core` is shared with the server: models, parsing, threading, ingest, previews.
 COPY core ./core
 COPY agent ./agent
+
+# Read by core/version.py (BASE_DIR is /app); the agent logs it on startup, so a
+# support question can start from what is actually running.
+COPY VERSION ./VERSION
 
 # main.py bootstraps this itself, but set it so `docker compose run` with an
 # overridden entrypoint still resolves `core`.

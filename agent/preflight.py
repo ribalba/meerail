@@ -18,6 +18,7 @@ import time
 from dataclasses import dataclass
 
 from core.config import AccountConfig, Settings
+from core.version import VERSION
 
 # Anything slower than this is broken for our purposes; without it a silently
 # dropped packet hangs the check until the OS gives up (minutes).
@@ -257,7 +258,7 @@ def check_smtp(account: AccountConfig) -> Result:
 
 def run(cfg: Settings) -> int:
     """Run every check, print a report, and return a process exit code."""
-    print("meerail-agent connection test\n")
+    print(f"meerail-agent {VERSION} — connection test\n")
 
     results = [check_config_permissions(cfg), check_database(cfg), check_tika(cfg)]
     for r in results:

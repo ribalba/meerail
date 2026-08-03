@@ -227,3 +227,137 @@ def mailbox_total(email):
     _, body = api("GET", "/api/sync/status")
     st = next(r for r in body["accounts"] if r["email"] == email)
     return next(m["total"] for m in st["mailboxes"] if m["role"] == "inbox")
+
+
+# --- Filing something while the agent is away --------------------------------
+#
+# Archiving removes the message from the folder it was in and queues the move;
+# the server's copy of it in the target folder only exists once the agent has
+# run that move and the next pass has ingested it. That is a poll interval away
+# with a connection and days away without one — and for all of it the message
+# used to be in no folder at all.
+
+
+def test_archived_mail_appears_in_the_target_folder_immediately(account):
+    """It must be in Archive the moment you press it, not when the agent gets
+    round to it — meerail is expected to spend days with no connection."""
+    email, aid = account["email"], account["id"]
+    tok = "OFFARCH" + uuid.uuid4().hex[:6]
+    mid, _ = ingest_one(email, aid, tok)
+    dbfixture.ingest_raw_message(email, make_message(
+        f"<seed-{uuid.uuid4().hex}@t>", "Seed", "x@y.com", email, "seed", T0),
+        uid=1, folder="Archive", role_hint="\\Archive")
+
+    _, boxes = api("GET", "/api/mailboxes")
+    mine = next(a for a in boxes["accounts"] if a["email"] == email)["mailboxes"]
+    inbox = next(m for m in mine if m["role"] == "inbox")
+    archive = next(m for m in mine if m["role"] == "archive")
+
+    _, r = api("GET", f"/api/search?q={tok}&account_id={aid}")
+    thread_id = r["rows"][0]["thread_id"]
+    code, body = api("POST", f"/api/messages/threads/{thread_id}/archive?account_id={aid}")
+    assert code == 200, body
+
+    # Gone from the inbox, and already in Archive — with no agent involved.
+    _, rows = api("GET", f"/api/messages?mailbox_id={inbox['id']}&limit=50")
+    assert not [x for x in rows["rows"] if tok in x["subject"]]
+    _, rows = api("GET", f"/api/messages?mailbox_id={archive['id']}&limit=50")
+    assert [x for x in rows["rows"] if tok in x["subject"]]
+
+    # And the move is still queued for the agent, addressed by the source UID.
+    moves = [m for m in _actions(email) if m["type"] == "move"]
+    assert [m for m in moves if m["payload"]["to_folder"] == "Archive"]
+
+
+def test_the_optimistic_copy_survives_a_sync_and_is_replaced_by_the_real_one(account):
+    """Two ways this could undo itself, both of which used to: the vanished
+    sweep deleting a placement the server has never heard of, and the server's
+    own copy landing beside it as a duplicate."""
+    email, aid = account["email"], account["id"]
+    tok = "OFFSYNC" + uuid.uuid4().hex[:6]
+    rfc_id = f"os-{uuid.uuid4().hex}@t"
+    raw = make_message(f"<{rfc_id}>", f"Subject {tok}", "x@y.com", email, f"{tok} body", T0)
+    dbfixture.ingest_raw_message(email, raw, uid=7)
+    dbfixture.ingest_raw_message(email, make_message(
+        f"<seed-{uuid.uuid4().hex}@t>", "Seed", "x@y.com", email, "seed", T0),
+        uid=1, folder="Archive", role_hint="\\Archive")
+
+    _, r = api("GET", f"/api/search?q={tok}&account_id={aid}")
+    api("POST", f"/api/messages/threads/{r['rows'][0]['thread_id']}/archive?account_id={aid}")
+    assert dbfixture.location_count(email, "Archive") == 2      # seed + the new one
+
+    # A sync pass reconciles Archive while the move is still queued. The server
+    # lists only its own seed, and that must not take the archived message back
+    # out of the folder it was just filed into.
+    assert dbfixture.set_present(email, "Archive", [1]) == 0
+    assert dbfixture.location_count(email, "Archive") == 2
+
+    # The agent applies the move; the next pass ingests the server's copy under
+    # a real UID. One placement, not two.
+    dbfixture.record_placement(email, rfc_id, uid=42, folder="Archive",
+                               role_hint="\\Archive")
+    assert dbfixture.location_count(email, "Archive") == 2      # seed + the real one
+    _, boxes = api("GET", "/api/mailboxes")
+    archive = next(m["id"] for a in boxes["accounts"] for m in a["mailboxes"]
+                   if a["email"] == email and m["role"] == "archive")
+    _, rows = api("GET", f"/api/messages?mailbox_id={archive}&limit=50")
+    assert len([x for x in rows["rows"] if tok in x["subject"]]) == 1
+
+
+def test_filing_twice_before_the_agent_runs_re_aims_the_one_move(account):
+    """Archive then trash, both offline. The server still has the message where
+    it started, so there is only ever one move to make — to wherever it ended
+    up. A second one would address it by a UID no server has heard of."""
+    email, aid = account["email"], account["id"]
+    tok = "OFFTWICE" + uuid.uuid4().hex[:6]
+    ingest_one(email, aid, tok)
+    for folder, role in (("Archive", "\\Archive"), ("Trash", "\\Trash")):
+        dbfixture.ingest_raw_message(email, make_message(
+            f"<seed-{uuid.uuid4().hex}@t>", "Seed", "x@y.com", email, "seed", T0),
+            uid=1, folder=folder, role_hint=role)
+
+    _, r = api("GET", f"/api/search?q={tok}&account_id={aid}")
+    thread_id = r["rows"][0]["thread_id"]
+    api("POST", f"/api/messages/threads/{thread_id}/archive?account_id={aid}")
+
+    _, boxes = api("GET", "/api/mailboxes")
+    mine = next(a for a in boxes["accounts"] if a["email"] == email)["mailboxes"]
+    archive = next(m for m in mine if m["role"] == "archive")
+    _, rows = api("GET", f"/api/messages?mailbox_id={archive['id']}&limit=50")
+    row = next(x for x in rows["rows"] if tok in x["subject"])
+
+    code, body = api("POST", f"/api/messages/{row['id']}/trash"
+                             f"?source_mailbox_id={archive['id']}")
+    assert code == 200, body
+
+    moves = [m for m in _actions(email) if m["type"] in ("move", "delete")]
+    assert len(moves) == 1                        # re-aimed, not stacked
+    assert moves[0]["payload"]["to_folder"] == "Trash"
+    # The source is still the folder the server actually has it in.
+    assert moves[0]["payload"]["from_folder"] == "INBOX"
+
+
+def test_reading_a_message_that_is_still_being_moved_queues_no_bad_uid(account):
+    """Marking read while the move is queued must not send the agent an IMAP
+    command against a UID that only exists here."""
+    email, aid = account["email"], account["id"]
+    tok = "OFFREAD" + uuid.uuid4().hex[:6]
+    ingest_one(email, aid, tok)
+    dbfixture.ingest_raw_message(email, make_message(
+        f"<seed-{uuid.uuid4().hex}@t>", "Seed", "x@y.com", email, "seed", T0),
+        uid=1, folder="Archive", role_hint="\\Archive")
+
+    _, r = api("GET", f"/api/search?q={tok}&account_id={aid}")
+    api("POST", f"/api/messages/threads/{r['rows'][0]['thread_id']}/archive?account_id={aid}")
+    _, boxes = api("GET", "/api/mailboxes")
+    archive = next(m["id"] for a in boxes["accounts"] for m in a["mailboxes"]
+                   if a["email"] == email and m["role"] == "archive")
+    _, rows = api("GET", f"/api/messages?mailbox_id={archive}&limit=50")
+    row = next(x for x in rows["rows"] if tok in x["subject"])
+
+    api("POST", f"/api/messages/{row['id']}/mark?seen=1")
+
+    _, detail = api("GET", f"/api/messages/{row['id']}")
+    assert detail["seen"] is True                 # read locally, as pressed
+    for a in _actions(email):
+        assert a["payload"].get("uid", 1) > 0, f"queued a local-only UID: {a}"

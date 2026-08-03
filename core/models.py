@@ -406,6 +406,12 @@ class PendingAction(Base):
 
     Types: setflags | move | delete | send. Payload carries the specifics
     (e.g. which flags, target folder, or the outbound message id).
+
+    A row leaves this queue by succeeding, and by no other route: ``attempts``
+    and ``error`` say how it is going, not whether it is still wanted. The agent
+    spaces the retries out from the attempt count (agent/actions.py) and keeps
+    going for as long as it takes — days offline, a mail server down all
+    weekend. See ``status`` for the one exception, which is historical.
     """
 
     __tablename__ = "pending_actions"
@@ -420,9 +426,12 @@ class PendingAction(Base):
     )
     type: Mapped[str] = mapped_column(String(32), nullable=False)
     payload: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
-    # pending | leased | done | error
+    # pending | leased | done. "error" is written by nothing current: it is what
+    # the version with a five-attempt cap left on rows it gave up on, and those
+    # rows are still here — agent --requeue-abandoned puts them back.
     status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
     attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # The last failure, kept while the row goes on being retried — not a verdict.
     error: Mapped[str | None] = mapped_column(Text)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
@@ -434,6 +443,11 @@ class Outbound(Base):
 
     The server builds the RFC822 MIME (``raw_mime``); a PendingAction of type
     ``send`` tells the agent to relay those bytes via SMTP.
+
+    "queued" is where a message stays until it has actually been sent, however
+    long that takes and however many attempts it costs. ``error`` alongside it
+    is the last thing that went wrong, not a state — the bytes are still here
+    and the agent is still going to send them.
     """
 
     __tablename__ = "outbound"
@@ -442,7 +456,7 @@ class Outbound(Base):
     account_id: Mapped[int] = mapped_column(
         ForeignKey("accounts.id", ondelete="CASCADE"), index=True, nullable=False
     )
-    # draft | queued | sent | error
+    # draft | queued | sent. "error" is historical, as on PendingAction.status.
     state: Mapped[str] = mapped_column(String(16), default="draft", nullable=False)
 
     to_addrs: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)

@@ -9,7 +9,7 @@ from core.database import get_db
 from core.events import publish_command
 from ..deps import require_ui_auth
 from ..syncstate import account_state
-from core.models import Account, Attachment, Mailbox, Message, utcnow
+from core.models import Account, Attachment, Mailbox, Message, Outbound, utcnow
 
 router = APIRouter(prefix="/api/sync", tags=["sync"], dependencies=[Depends(require_ui_auth)])
 
@@ -115,7 +115,43 @@ def sync_status(db: DBSession = Depends(get_db)):
         "accounts": out,
         "healthy": all(a["state"] in ("ok", "backfilling") for a in out),
         "indexing": _indexing_status(db),
+        "outbox": _outbox_status(db),
     }
+
+
+def _outbox_status(db) -> dict:
+    """Mail written here and not yet on its way out.
+
+    Sending is not something the server can do — it hands the message to the
+    agent, which relays it over SMTP whenever it next can. That is normally a
+    second or two and can be days, because the agent is expected to be offline
+    for days; until this existed, the difference between the two was invisible
+    from the app. A message queued against a wrong SMTP port sat in exactly the
+    same silence as one already delivered (issue #7).
+
+    ``error`` is the last thing that went wrong on the oldest queued message,
+    and it does not mean the message has been given up on — nothing gives up on
+    a queued message. It is there so the UI can say *why* the count is not
+    going down.
+    """
+    queued, oldest = db.execute(
+        select(func.count(Outbound.id), func.min(Outbound.created_at))
+        .where(Outbound.state == "queued")
+    ).one()
+    error = db.scalar(
+        select(Outbound.error)
+        .where(Outbound.state == "queued", Outbound.error.is_not(None))
+        .order_by(Outbound.created_at)
+        .limit(1)
+    ) if queued else None
+    # Written by no current version: what the agent's old five-attempt cap left
+    # behind. Surfaced because those messages are still here and still unsent,
+    # and `meerail-agent --requeue-abandoned` puts them back.
+    abandoned = db.scalar(
+        select(func.count(Outbound.id)).where(Outbound.state == "error")
+    ) or 0
+    return {"queued": queued or 0, "oldest_at": oldest, "error": error,
+            "abandoned": abandoned}
 
 
 def _indexing_status(db) -> dict:

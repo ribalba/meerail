@@ -152,6 +152,79 @@ App.status = (function () {
     </div>`;
   }
 
+  // --- Outbox ---
+  // Sending is not something the app does: it writes the message and the agent
+  // relays it over SMTP the next time it can. That is a second on a working
+  // setup and days on a laptop that is shut, so "how many are still waiting" is
+  // a real question the UI could not answer at all before — a message queued
+  // against a wrong SMTP port looked exactly like one already delivered.
+  //
+  // The strip is therefore a count first and a warning second. It appears for
+  // the second or two after any send, which is normal and must not look like a
+  // fault; it turns red only once a send has actually failed, which is the case
+  // where the number will not come down on its own.
+  function outbox() {
+    return (latest && latest.outbox) || null;
+  }
+
+  // Two lengths of the same sentence. The sidebar is ~26 characters wide before
+  // it ellipsises, and a label that truncates to "2 messages waiting to send …"
+  // hides the very half that matters — so the strip says the short one and the
+  // modal, which has the room, says the whole thing.
+  function outboxLabel(ob, long) {
+    const n = ob.queued;
+    if (!n) return `${num(ob.abandoned)} unsent — an older agent gave up on them`;
+    const what = long ? (n === 1 ? "1 message" : `${num(n)} messages`) : num(n);
+    return ob.error ? `${what} waiting — not going out` : `${what} waiting to send`;
+  }
+
+  function renderOutbox() {
+    const strip = $("#outbox-notice");
+    if (!strip) return;
+    const ob = outbox();
+    if (!ob || (!ob.queued && !ob.abandoned)) {
+      strip.hidden = true;
+      strip.innerHTML = "";
+      return;
+    }
+    const stuck = !!(ob.error || (!ob.queued && ob.abandoned));
+    strip.hidden = false;
+    strip.classList.toggle("stuck", stuck);
+    strip.title = ob.error ? `Last error: ${ob.error}` : "Waiting for the agent to send";
+    strip.innerHTML =
+      `<span class="ob-icon">${App.icon(stuck ? "warning" : "sent", 14)}</span>` +
+      `<span class="ob-text">${App.esc(outboxLabel(ob))}</span>`;
+  }
+
+  function outboxBlock() {
+    const ob = outbox();
+    if (!ob || (!ob.queued && !ob.abandoned)) return "";
+    const stuck = !!(ob.error || (!ob.queued && ob.abandoned));
+    // Nothing here is a lost message, and the wording has to say so: the queue
+    // is retried for as long as it takes, so the honest reading of a stuck
+    // outbox is "not sent yet", never "not sent".
+    const sub = ob.queued
+      ? (ob.error
+          ? `Still queued and still being retried — nothing is lost. The agent tries
+             again on a backoff, and sends as soon as the cause below is fixed.`
+          : `Handed to the agent, which sends it over SMTP on its next pass.`)
+      : `These were given up on by an older agent and never sent. They are still
+         here — put them back in the queue by running the agent once with
+         <code>--requeue-abandoned</code>: <code>bash meerail.sh requeue</code> if
+         you installed with that script, <code>agent/run.sh --requeue-abandoned</code>
+         from a checkout.`;
+    const oldest = ob.queued && ob.oldest_at
+      ? ` · oldest ${App.esc(App.relTime(ob.oldest_at))}` : "";
+    return `<div class="ag-outbox ${stuck ? "stuck" : ""}">
+      <div class="ob-head">
+        ${App.icon(stuck ? "warning" : "sent", 15)}
+        <span>${App.esc(outboxLabel(ob, true))}${oldest}</span>
+      </div>
+      <div class="ob-sub">${sub}</div>
+      ${ob.error ? `<pre>${App.esc(ob.error)}</pre>` : ""}
+    </div>`;
+  }
+
   // "A mail pass is running somewhere" — drives the toolbar spinner. `active`
   // is the agent's own flag, cleared in the finally block of the pass, so it
   // survives a crash mid-folder. Mail only: attachment indexing has its own
@@ -166,6 +239,7 @@ App.status = (function () {
     try {
       latest = await App.api.syncStatus();
       renderIndicator();
+      renderOutbox();
       renderStrip();
       if (isOpen()) renderModal();
     } catch (_) {
@@ -403,12 +477,15 @@ App.status = (function () {
     // Above the per-account cards: the queue is global, so it belongs to the
     // whole agent rather than to any one address.
     body.innerHTML =
+      outboxBlock() +
       indexBlock() +
       `<ul class="ag-list">${accounts.map(accountCard).join("")}</ul>` +
       `<p class="muted small">The agent syncs on its own schedule and writes
        straight to the database; these figures are read back from what it has
        stored. If something looks stuck, check the agent's log — it prints every
-       failure — or run <code>meerail-agent --test</code>.</p>`;
+       failure — or check every connection it needs with
+       <code>bash meerail.sh test</code> (<code>agent/run.sh --test</code> from a
+       checkout).</p>`;
   }
 
   function isOpen() { return !$("#agent-modal").hidden; }
@@ -434,6 +511,9 @@ App.status = (function () {
       if (e.target.id === "agent-modal") close();
     });
     $("#agent-warning").addEventListener("click", open);
+    // Same destination as the warning strip: the modal is where the outbox says
+    // how long it has been waiting and what the last attempt hit.
+    $("#outbox-notice").addEventListener("click", open);
     // Delegated: the modal body is re-rendered on every poll, so per-button
     // listeners would not survive.
     $("#agent-body").addEventListener("click", (e) => {

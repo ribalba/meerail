@@ -345,8 +345,11 @@ App.shell = (function () {
 
   function connectSSE() {
     const es = new EventSource("/api/stream");
-    ["accounts", "messages", "flags", "cursor", "present", "folders", "extract"].forEach((t) =>
-      es.addEventListener(t, scheduleRefresh));
+    // "outbox" fires when a message is queued to send and when the agent has
+    // been round to try: the count in the sidebar is only honest if it moves
+    // without waiting out a poll.
+    ["accounts", "messages", "flags", "cursor", "present", "folders", "extract",
+     "outbox"].forEach((t) => es.addEventListener(t, scheduleRefresh));
     // "agent" fires when the agent's health changes. It rides the same debounce
     // as the rest; the status refresh happens inside it. Note that this can only
     // ever deliver good news promptly — an agent that has died sends nothing at
@@ -614,6 +617,10 @@ App.shell = (function () {
       App.tasks.init();
       App.status.init();
       App.stats.init();
+      // Last of the initialisers and deliberately fire-and-forget: an update
+      // notice is the least urgent thing on the page, and it must not be able
+      // to delay or fail the boot of the parts that show mail.
+      App.update.init();
       connectSSE();
       sidebar = await App.api.mailboxes();
       renderSidebar();

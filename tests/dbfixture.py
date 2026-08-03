@@ -88,6 +88,15 @@ def set_content_window(months: int) -> None:
         ingest.record_content_window(db, months)
 
 
+def register_folder(email: str, name: str = "INBOX", uidvalidity: int = 1) -> int:
+    """Re-register a folder as the start of a sync pass does. Returns its cursor."""
+    with session() as db:
+        account = ingest.get_or_create_account(db, email)
+        mailbox = _mailbox(db, account, name, uidvalidity=uidvalidity)
+        db.flush()
+        return mailbox.last_uid
+
+
 def create_folder(email: str, name: str, role_hint: str = "") -> int:
     """Register a folder the way a sync pass's LIST would. Returns its id."""
     with session() as db:
@@ -231,3 +240,14 @@ def location_count(email: str, folder: str) -> int:
         if mb is None:
             return 0
         return db.query(MessageLocation).filter(MessageLocation.mailbox_id == mb.id).count()
+
+
+
+
+def record_send_failure(outbound_id: int, error: str) -> None:
+    """What the agent writes after a failed send attempt: still queued, with the
+    reason on the row. See agent/actions.py _settle."""
+    with session() as db:
+        ob = db.get(Outbound, outbound_id)
+        ob.state = "queued"
+        ob.error = error

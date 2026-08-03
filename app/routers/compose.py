@@ -20,8 +20,10 @@ from sqlalchemy.orm import Session as DBSession
 
 from core.config import get_settings
 from core.database import get_db
+from core.events import publish_command
+from .. import events
 from ..deps import require_ui_auth
-from core.models import Account, Message, Outbound, PendingAction, Recipient, utcnow
+from core.models import Account, Attachment, Message, Outbound, PendingAction, Recipient, utcnow
 from core.mail.parse import html_to_text, normalize_subject
 
 router = APIRouter(prefix="/api/compose", tags=["compose"], dependencies=[Depends(require_ui_auth)])
@@ -113,6 +115,50 @@ def delete_attachment(staging_id: str):
     """Discard a staged attachment when the composer no longer references it."""
     _staged_path(staging_id).unlink(missing_ok=True)
     return Response(status_code=204)
+
+
+def _stage_bytes(filename: str, payload: bytes) -> str:
+    """Put bytes we already hold into the outbox staging area, as if uploaded."""
+    staging_id = f"{uuid.uuid4().hex}__{_safe(filename or 'file')}"
+    (settings.outbox_dir / staging_id).write_bytes(payload)
+    return staging_id
+
+
+def _forward_attachments(db: DBSession, msg: Message) -> tuple[list[dict], int]:
+    """Stage the original's attachments so a forward carries them too.
+
+    Forwarding a message and losing the invoice that was the point of it is the
+    kind of quiet failure the recipient discovers, not the sender. So the copies
+    are staged exactly like uploads: they arrive as chips in the composer, they
+    can be removed one by one, and /send bakes them in through the same path.
+    They also get discarded through it — closing the composer deletes them.
+
+    Inline parts are skipped, matching what the reader lists as attachments:
+    they are the signature logos and tracking pixels of the body, and the body
+    goes into a forward as quoted plain text where a cid: reference means
+    nothing. Pruned messages keep their attachment rows with the payload
+    emptied (see store.strip_content); those cannot be forwarded, and the second
+    return value is how many were left behind so the composer can say so.
+    """
+    rows = db.execute(
+        select(Attachment.filename, Attachment.content_type, Attachment.size_bytes,
+               Attachment.content)
+        .where(Attachment.message_pk == msg.id, Attachment.is_inline.is_(False))
+        .order_by(Attachment.id)
+    ).all()
+    staged: list[dict] = []
+    missing = 0
+    for att in rows:
+        if not att.content:
+            missing += 1
+            continue
+        staged.append({
+            "id": _stage_bytes(att.filename, att.content),
+            "filename": att.filename or "file",
+            "content_type": att.content_type or "application/octet-stream",
+            "size": att.size_bytes or len(att.content),
+        })
+    return staged, missing
 
 
 def _attach_staged(m: EmailMessage, staging_ids: list[str]) -> list[Path]:
@@ -221,6 +267,14 @@ def send(req: SendRequest, db: DBSession = Depends(get_db)):
         except OSError:
             pass
 
+    # The outbox count is on screen now, so it has to move when something lands
+    # in it — in this window and in any other one that is open.
+    events.publish({"type": "outbox", "queued": 1})
+    # And ask the agent to drain now rather than at the end of its poll
+    # interval: a message that sends in a second should not sit visibly in the
+    # outbox for thirty.
+    publish_command({"type": "refresh", "email": account.email})
+
     return {"id": outbound.id, "state": outbound.state}
 
 
@@ -325,12 +379,14 @@ def reply_context(message_id: int, mode: str = "reply", db: DBSession = Depends(
     quoted = _quote(msg)
 
     if mode == "forward":
+        attachments, missing = _forward_attachments(db, msg)
         return {
             "account_id": msg.account_id, "from_address": from_address, "to": [], "cc": [],
             "subject": ("" if normalize_subject(base_subj).startswith("fwd") else "Fwd: ") + base_subj,
             "body_text": f"\n\n---------- Forwarded message ----------\nFrom: {_format_sender(msg)}"
                          f"\nSubject: {base_subj}\n\n{msg.body_text or html_to_text(msg.body_html)}",
             "in_reply_to": None, "references": [],
+            "attachments": attachments, "attachments_missing": missing,
         }
 
     to = [msg.from_addr]

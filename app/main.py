@@ -8,20 +8,27 @@ from fastapi.staticfiles import StaticFiles
 from . import events
 from core.config import get_settings
 from core.database import engine, init_db
+from core.version import VERSION
 from .routers import (
     accounts, actions, analytics, auth, compose, contacts, mailboxes, messages, search,
-    stream, sync, tasks,
+    stream, sync, tasks, version,
 )
 from .workers import contacts_loop
 
 settings = get_settings()
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
-app = FastAPI(title="meerail", version="0.2.0")
+# One version number for the whole project, read from the VERSION file at the
+# repository root (core/version.py) — the same one the images are tagged with.
+app = FastAPI(title="meerail", version=VERSION)
 
 
 @app.on_event("startup")
 async def _startup() -> None:
+    # Staging for outgoing attachments — the only thing left on disk, and the
+    # server is the only process that writes it (core/config.py says why the
+    # shared loader no longer does).
+    settings.outbox_dir.mkdir(parents=True, exist_ok=True)
     init_db()
     events.set_loop(asyncio.get_running_loop())
     # Mail ingest (and its Tika extraction) runs in the agent; the app only
@@ -42,6 +49,7 @@ app.include_router(analytics.router)
 app.include_router(sync.router)
 app.include_router(tasks.router)
 app.include_router(stream.router)
+app.include_router(version.router)
 
 
 @app.get("/healthz")

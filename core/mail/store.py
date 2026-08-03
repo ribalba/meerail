@@ -111,6 +111,82 @@ def _queue_flag_catchup(
     ))
 
 
+# --- placements the server has not seen yet ----------------------------------
+#
+# Archiving a message removes it from the folder it was in and queues the move
+# for the agent; the copy in the target folder only exists once the agent has
+# run the move against IMAP and the next pass has ingested it. Between those two
+# moments the message used to be in no folder at all — invisible in the source,
+# invisible in the target. On a machine with a connection that is seconds away
+# nobody noticed. On one that is offline for a day, the mail you filed is simply
+# gone from the app until it comes back.
+#
+# So the move writes the target placement immediately, carrying a UID of its
+# own: negative, because IMAP UIDs are positive and the sign alone says "this
+# one is ours, not the server's", and -message_pk because a message has at most
+# one placement per folder, which makes it unique exactly where the constraint
+# needs it to be.
+#
+# Everything that reads placements treats it as an ordinary row — it lists,
+# counts, threads and searches like any other, which is the point. The three
+# places that must know the difference are: upsert_location below, which drops
+# it the moment the real one arrives; prune_vanished, which must not read "the
+# server never mentioned this UID" as "deleted" for a UID the server has never
+# been told about; and the UI's action routes, which must not queue IMAP
+# commands against it.
+
+
+def pending_uid(message_pk: int) -> int:
+    """The UID a placement carries while the move that creates it is queued."""
+    return -message_pk
+
+
+def is_pending(loc: MessageLocation) -> bool:
+    """Is this placement one we wrote ourselves, ahead of the server?"""
+    return loc.imap_uid < 0
+
+
+def place_pending(
+    db: Session, msg: Message, mailbox_id: int, flags_from: MessageLocation | None = None
+) -> MessageLocation:
+    """Put a message in a folder before the server knows about it.
+
+    Flags come from the placement being moved, so a message archived after it
+    was read stays read on the way there.
+
+    Goes through ``msg.locations`` rather than a query, because the caller
+    reaches this once per placement and a message under three Proton labels is
+    archived out of all three into the same folder — three calls, one row. A
+    SELECT would not see the row the first call has only added (autoflush is
+    off), and the second would hit the unique constraint.
+    """
+    uid = pending_uid(msg.id)
+    loc = next((item for item in msg.locations
+                if item.mailbox_id == mailbox_id and item.imap_uid == uid), None)
+    if loc is None:
+        loc = MessageLocation(mailbox_id=mailbox_id, imap_uid=uid)
+        msg.locations.append(loc)
+    if flags_from is not None:
+        loc.seen = flags_from.seen
+        loc.flagged = flags_from.flagged
+        loc.answered = flags_from.answered
+        loc.draft = flags_from.draft
+        loc.keywords = flags_from.keywords
+    return loc
+
+
+def _drop_pending_placement(db: Session, message_pk: int, mailbox_id: int) -> None:
+    """Retire the optimistic placement now that the real one has landed."""
+    loc = db.execute(
+        select(MessageLocation).where(
+            MessageLocation.mailbox_id == mailbox_id,
+            MessageLocation.imap_uid == pending_uid(message_pk),
+        )
+    ).scalar_one_or_none()
+    if loc is not None:
+        db.delete(loc)
+
+
 def upsert_location(
     db: Session, message_pk: int, mailbox_id: int, uid: int, flags: dict
 ) -> MessageLocation:
@@ -139,6 +215,12 @@ def upsert_location(
             _queue_flag_catchup(db, message_pk, mailbox_id, uid, ahead)
     loc.message_pk = message_pk
     _apply_flags(loc, flags)
+    # The real placement has arrived, so the one we wrote while the move was
+    # queued has done its job. Dropped after _local_state has been read above,
+    # which is how a message archived and then read keeps its read state: the
+    # optimistic row is where that state was living.
+    if uid > 0:
+        _drop_pending_placement(db, message_pk, mailbox_id)
     return loc
 
 

@@ -34,9 +34,11 @@ Run meerail-agent in the background, as a launchd LaunchAgent (macOS only).
   ./service.sh stop        stop + unload, but keep the plist
   ./service.sh start       load it again after a stop
   ./service.sh uninstall   stop, unload, delete the plist
+  ./service.sh requeue     put work an older agent gave up on back in the
+                           queue, once — the service keeps running
 
   --config PATH            run the agent against a config other than
-                           the repository's meerail.toml (install only)
+                           the repository's meerail.toml (install, requeue)
 USAGE
 }
 
@@ -99,6 +101,18 @@ PLIST_EOF
 unload() { launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true; }
 
 load() { launchctl bootstrap "$DOMAIN" "$PLIST"; }
+
+# The --config the installed plist was written with, or empty if it has none
+# (or there is no plist). PlistBuddy prints ProgramArguments one indented entry
+# per line, so the value is simply the line after the flag.
+installed_config() {
+  [ -f "$PLIST" ] || return 0
+  /usr/libexec/PlistBuddy -c 'Print :ProgramArguments' "$PLIST" 2>/dev/null \
+    | awk '/^[[:space:]]*--config[[:space:]]*$/ {
+             if (getline line > 0) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", line); print line }
+             exit
+           }'
+}
 
 require_plist() {
   if [ ! -f "$PLIST" ]; then
@@ -178,6 +192,24 @@ cmd_status() {
   return 0
 }
 
+cmd_requeue() {
+  # A one-shot next to the service rather than anything done *to* it: the flag
+  # resets rows and exits, and the running agent drains them on its next pass.
+  # So no stop/start, and no complaint if the service isn't installed at all.
+  local config="${CONFIG_PATH:-}"
+  if [ -z "$config" ]; then
+    # Fall back to whatever the installed plist runs with. Without this, an
+    # install done with --config would requeue against the *default* config —
+    # a different database than the service it is meant to be fixing.
+    config="$(installed_config)"
+  fi
+  if [ -n "$config" ]; then
+    ./run.sh --config "$config" --requeue-abandoned
+  else
+    ./run.sh --requeue-abandoned
+  fi
+}
+
 cmd_logs() {
   if [ ! -f "$LOG" ]; then
     echo "No log yet at $LOG — has it started? ./service.sh status" >&2
@@ -204,6 +236,7 @@ case "$COMMAND" in
   restart)   cmd_restart ;;
   status)    cmd_status ;;
   logs)      cmd_logs ;;
+  requeue)   cmd_requeue ;;
   *)
     usage
     exit 2 ;;

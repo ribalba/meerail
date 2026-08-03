@@ -160,9 +160,10 @@
             <div class="landing-card-icon"><i class="server icon"></i></div>
             <h3>Self-hosted and open source</h3>
             <p>
-              One <code>docker compose up</code> gets you the server, Postgres and
-              attachment text extraction. Your mail stays on your machine, and the
-              whole thing is open source as the
+              One script gets you the server, Postgres and attachment text
+              extraction — even Proton Bridge runs as a container, so the same
+              install works on macOS, Windows and Linux. Your mail stays on your
+              machine, and the whole thing is open source as the
               <a href="https://github.com/ribalba/meerail" target="_blank" rel="noopener">meerail</a>
               project.
             </p>
@@ -465,8 +466,9 @@ curl -o ~/.claude/skills/meerail/SKILL.md \
     <section id="start" class="landing-features">
       <h2 class="landing-section-title">Get started</h2>
       <p class="landing-section-lede">
-        Two pieces: the server in Docker, and a small agent that sits next to your
-        mail bridge and speaks IMAP so your credentials never leave the host.
+        One script, three containers, and your mail. You need
+        <strong>Docker</strong> with the Compose plugin — nothing else, on any
+        operating system.
       </p>
 
       <div class="landing-grid">
@@ -474,17 +476,18 @@ curl -o ~/.claude/skills/meerail/SKILL.md \
           <div class="landing-card-body">
             <div class="landing-card-wide-inner">
               <div class="landing-card-wide-copy">
-                <div class="landing-card-icon"><i class="git icon"></i></div>
-                <h3>1. Check out the code</h3>
+                <div class="landing-card-icon"><i class="terminal icon"></i></div>
+                <h3>1. Run the installer</h3>
                 <p>
-                  Everything below runs from the repository, so start by cloning it.
-                  You need <strong>git</strong> and <strong>Docker</strong> with the
-                  Compose plugin; the rest comes out of the containers.
+                  It checks Docker, asks where your mail lives, sizes the stack
+                  to the memory your machine actually has, and pulls the
+                  published images. No clone, no build, no Python — everything
+                  it writes lands in <code>~/.meerail</code>.
                 </p>
               </div>
               <div class="landing-card-wide-aside">
-                <pre class="landing-code">git clone https://github.com/ribalba/meerail.git
-cd meerail</pre>
+                <pre class="landing-code">curl -fsSL https://raw.githubusercontent.com/ribalba/meerail/main/meerail.sh -o meerail.sh
+bash meerail.sh</pre>
               </div>
             </div>
           </div>
@@ -492,34 +495,33 @@ cd meerail</pre>
 
         <article class="landing-card">
           <div class="landing-card-body">
-            <div class="landing-card-icon"><i class="docker icon"></i></div>
-            <h3>2. Run the server</h3>
+            <div class="landing-card-icon"><i class="shield alternate icon"></i></div>
+            <h3>2. Proton Mail? Bridge comes with it</h3>
             <p>
-              One <code>meerail.toml</code> configures the whole system — server
-              and agent both read it. Then server, Postgres and Apache Tika, in
-              one command.
+              Choose Proton and the installer runs <strong>Bridge as a
+              container</strong> next to the rest of the stack, then walks you
+              through its one-time login. Because the agent reaches it over
+              Docker's own network, this works exactly the same on macOS and
+              Windows as on Linux.
             </p>
-            <pre class="landing-code">cp meerail.example.toml meerail.toml
-chmod 600 meerail.toml
-cp .env.example .env
-docker compose up -d</pre>
+            <pre class="landing-code">&gt;&gt;&gt; login    # your Proton account
+&gt;&gt;&gt; info     # the credentials Bridge made
+&gt;&gt;&gt; exit</pre>
           </div>
         </article>
 
         <article class="landing-card">
           <div class="landing-card-body">
-            <div class="landing-card-icon"><i class="sync icon"></i></div>
-            <h3>3. Start the agent</h3>
+            <div class="landing-card-icon"><i class="envelope icon"></i></div>
+            <h3>3. Or any other mailbox</h3>
             <p>
-              <strong>Edit the <code>[[agent.account]]</code> block in
-              <code>meerail.toml</code></strong> and put in your own credentials
-              — the host, ports, username and password for your mail server. For
-              Proton that's the Bridge password shown in the Bridge app, not your
-              Proton password. The agent won't start until they're filled in.
+              The agent speaks plain IMAP and SMTP, so Gmail, Fastmail, iCloud
+              or your own server work just as well — type your address and the
+              installer fills in that provider's servers. Most of them want an
+              app password rather than your normal one, and it says so.
             </p>
-            <pre class="landing-code">$EDITOR meerail.toml   # your credentials
-cd agent
-./run.sh --once</pre>
+            <pre class="landing-code">bash meerail.sh test   # database, Tika,
+                       # IMAP and SMTP</pre>
           </div>
         </article>
 
@@ -527,8 +529,36 @@ cd agent
           <div class="landing-card-body">
             <div class="landing-card-icon"><i class="globe icon"></i></div>
             <h3>4. Open your mail</h3>
-            <p>Accounts the agent syncs show up on their own.</p>
+            <p>
+              Accounts show up on their own as the first sync walks your
+              mailbox. <code>bash meerail.sh update</code> takes you to the next
+              release; the app tells you when there is one.
+            </p>
             <pre class="landing-code">open http://localhost:8000</pre>
+          </div>
+        </article>
+
+        <article class="landing-card landing-card-wide">
+          <div class="landing-card-body">
+            <div class="landing-card-wide-inner">
+              <div class="landing-card-wide-copy">
+                <div class="landing-card-icon"><i class="git icon"></i></div>
+                <h3>Prefer to build it yourself?</h3>
+                <p>
+                  Clone the repository and the same stack builds from source,
+                  with the agent on your own Python if you want it there. That
+                  is the path to take if you are going to change meerail rather
+                  than just run it — the README has the per-platform detail.
+                </p>
+              </div>
+              <div class="landing-card-wide-aside">
+                <pre class="landing-code">git clone https://github.com/ribalba/meerail.git
+cd meerail
+cp meerail.example.toml meerail.toml
+chmod 600 meerail.toml
+docker compose up -d</pre>
+              </div>
+            </div>
           </div>
         </article>
 

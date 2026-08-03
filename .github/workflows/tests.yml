@@ -7,8 +7,14 @@
 name: tests
 
 on:
+  # Every branch except main. main is covered by images.yml, which calls this
+  # workflow and then publishes the images only if it passed — running here on
+  # main as well would just build the same stack twice for the same commit.
   push:
+    branches-ignore: [main]
   pull_request:
+  # Lets images.yml gate a Docker Hub push on a green suite.
+  workflow_call:
 
 jobs:
   test:

@@ -267,7 +267,7 @@ def _sync_new(db, bridge: Bridge, account, mailbox, batch: int,
 
 
 def _reconcile(db, bridge: Bridge, mailbox, batch: int,
-               beat: "Heartbeat | None" = None) -> None:
+               beat: "Heartbeat | None" = None, email: str | None = None) -> None:
     """Push flag changes for known UIDs and prune the ones that vanished.
 
     The one loop in a pass that reports nothing on its own: it walks every UID
@@ -282,8 +282,42 @@ def _reconcile(db, bridge: Bridge, mailbox, batch: int,
         ingest.update_flags(db, mailbox, [{"uid": u, "flags": f} for u, f in flags.items()])
         if beat is not None:
             beat.beat()
-    ingest.prune_vanished(db, mailbox, uids)
+    if _uid_list_is_trustworthy(bridge, uids, mailbox, email):
+        ingest.prune_vanished(db, mailbox, uids)
     db.commit()
+
+
+def _uid_list_is_trustworthy(bridge: Bridge, uids: list[int], mailbox,
+                             email: str | None) -> bool:
+    """Is this SEARCH answer solid enough to delete local mail on the strength of?
+
+    Pruning is the only place the agent removes stored mail on its own, and its
+    entire evidence is "the server did not list this UID". That is a sound
+    argument only when the server actually answered — and the failure that
+    matters is not a connection that drops (the pass dies and nothing is
+    deleted) but one that stays up and answers short.
+
+    Proton Bridge is a local server that keeps serving while it cannot reach
+    Proton, and a mailbox it has not finished loading answers SEARCH with a
+    fraction of what it holds, or with nothing. Taking that at face value
+    deletes mail that exists, on a machine that is merely offline.
+
+    SELECT's own EXISTS count is the check: it came from the same server moments
+    earlier and it is the server's own statement of how many messages the folder
+    holds. A SEARCH that returns fewer UIDs than that has not finished
+    answering, whatever the reason, and this pass does not get to delete
+    anything. More is fine — mail can arrive between the two commands.
+
+    The genuinely empty folder still prunes: EXISTS is 0, SEARCH returns
+    nothing, 0 >= 0, and the placements go.
+    """
+    exists = bridge.exists
+    if len(uids) >= exists:
+        return True
+    log.warn(f"{mailbox.imap_name}: the server listed {len(uids)} message(s) but says it "
+             f"holds {exists} — not removing anything from this folder until it answers "
+             f"in full", email)
+    return False
 
 
 def _extract_all(db, limit_batches: int = 200, on_batch=None) -> int:
@@ -533,9 +567,14 @@ def sync_once(account: AccountConfig, cfg: Settings, reconcile: bool = True) -> 
             log.info("full recheck requested — rewinding all folder cursors", account.email)
 
         # Write-back first: apply any queued flag/move/delete/send actions.
-        drained = drain_actions(db, bridge, account_row)
-        if drained:
-            log.info(f"applied {drained} queued action(s)", account.email)
+        # Anything that failed has already logged why; the counts here only make
+        # sure the summary never reads as "applied" for a queue that did not
+        # fully apply.
+        applied, failed = drain_actions(db, bridge, account_row)
+        if failed:
+            log.warn(f"{applied} queued action(s) applied, {failed} failed", account.email)
+        elif applied:
+            log.info(f"applied {applied} queued action(s)", account.email)
 
         # Recomputed per pass, not per process: the window slides, and an agent
         # that has been up for weeks would otherwise still be fetching against
@@ -544,6 +583,14 @@ def sync_once(account: AccountConfig, cfg: Settings, reconcile: bool = True) -> 
         ingest.record_content_window(db, cfg.content_window_months)
 
         folders = bridge.list_folders()
+        if not folders:
+            # Not fatal and not silent. A Bridge that is still starting, signed
+            # out, or sitting on a machine that has been offline for days
+            # answers LIST with nothing; the pass has nothing to do, and
+            # prune_mailboxes refuses to read it as "every folder was deleted".
+            log.warn("the server listed no folders — nothing was synced, and nothing "
+                     "was removed. Is this account loaded and signed in in Bridge?",
+                     account.email)
         progress = PassProgress(len(folders))
         beat = Heartbeat(db, account_row, progress)
         for i, f in enumerate(folders):
@@ -561,7 +608,7 @@ def sync_once(account: AccountConfig, cfg: Settings, reconcile: bool = True) -> 
             # A recheck reconciles unconditionally: flags and vanished messages
             # are as much a part of "is everything still right" as the bodies.
             if reconcile or recheck_at:
-                _reconcile(db, bridge, mailbox, batch, beat)
+                _reconcile(db, bridge, mailbox, batch, beat, account.email)
 
         # LIST completed and every returned folder synced successfully, so it
         # is now safe to treat absent rows as folders removed/renamed upstream.

@@ -147,6 +147,7 @@ _SECTION_KEYS: dict[str, dict[str, str]] = {
         "contacts_scan_years": "contacts_scan_years",
         "data_dir": "data_dir",
         "max_attachment_bytes": "max_attachment_bytes",
+        "update_check": "update_check",
     },
     "agent": {
         "tika_url": "tika_url",
@@ -289,6 +290,13 @@ class Settings(BaseSettings):
     # Per-attachment cap for outgoing (compose) uploads, in bytes.
     max_attachment_bytes: int = 100 * 1024 * 1024  # 100 MB
 
+    # Once a day, ask github.com whether a newer meerail has been released, and
+    # let the UI say so. This is the only outbound request the server makes;
+    # false means it makes none. It sends nothing but the request itself — no
+    # identifier, no mailbox statistics, no version — so the far end learns only
+    # that some IP asked for a file. See app/updates.py.
+    update_check: bool = True
+
     # --- [agent] --------------------------------------------------------------
     # Apache Tika endpoint for attachment text extraction.
     tika_url: str = "http://localhost:9998"
@@ -376,8 +384,12 @@ def get_settings() -> Settings:
     # Not a source-provided value: this records where the file was actually read
     # from, which no environment variable should be able to misreport.
     settings.config_path = config_file_path()
-    for d in (settings.data_dir, settings.outbox_dir):
-        d.mkdir(parents=True, exist_ok=True)
+    # data_dir is not created here. It is a server-only directory (compose sets
+    # DATA_DIR on the `server` service alone), and creating it from the shared
+    # loader meant the agent died on a path it never touches — a stale
+    # DATA_DIR=/data in .env killed a native `agent/main.py` with a read-only
+    # filesystem error before it read a single setting it cares about. The
+    # server makes it at startup instead; see app/main.py.
     return settings
 
 

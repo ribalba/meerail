@@ -8,6 +8,13 @@ Postgres. Your Bridge credentials stay here on the host.
 The web app never fetches or parses mail — it only reads the database. So if the
 agent isn't running, nothing new arrives.
 
+> **This page is the native agent, run from a checkout.** The
+> [`meerail.sh`](../meerail.sh) install runs the agent as a container instead,
+> with Proton Bridge as a container beside it, and the two talk over Docker's
+> network rather than a host loopback — which is what makes that path identical
+> on macOS, Windows and Linux. Nothing below applies to it; `meerail.sh logs
+> agent` and `meerail.sh test` are its equivalents of the commands here.
+
 ## Setup
 
 1. Make sure Proton Bridge is running and note its **IMAP/SMTP ports and the
@@ -187,6 +194,7 @@ terminal left open. The rest of the commands:
 | `./service.sh restart` | Pick up an edited `meerail.toml`. |
 | `./service.sh stop` | Stop it, but keep it installed. `start` resumes. |
 | `./service.sh uninstall` | Stop it and delete the plist. |
+| `./service.sh requeue` | Put work an older agent gave up on back in the queue, once. Runs alongside the service — it does not stop it — and picks up the plist's own `--config` if it was installed with one. |
 | `./service.sh install --config PATH` | Run against a config other than the repository's `meerail.toml`. |
 
 It writes `~/Library/LaunchAgents/de.meerail.agent.plist` and logs to

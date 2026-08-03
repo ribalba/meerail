@@ -1,0 +1,235 @@
+# meerail — the turnkey stack. Prebuilt images, no clone, no build, any OS.
+#
+# This is the file `meerail.sh` downloads and drives; docker-compose.yml beside
+# it is the developer's stack, which builds from this checkout instead. They are
+# kept separate rather than merged behind profiles because they disagree on the
+# two things that matter most:
+#
+#   * **Where the images come from.** Everything here is pulled from Docker Hub
+#     at a pinned tag (`${MEERAIL_VERSION}`), so an install is reproducible and
+#     an upgrade is `docker compose pull`.
+#   * **Where Proton Bridge is.** The developer stack runs the agent against a
+#     Bridge on the host's loopback, which is why it needs host networking and
+#     is Linux-only. Here Bridge is a container on the compose network, so the
+#     agent reaches it at `bridge:143` like any other service — and that is the
+#     whole reason this works identically on macOS, Windows and Linux. Docker
+#     Desktop's VM boundary stops mattering when nothing has to cross it.
+#
+# Everything tunable is an environment variable with a default, because the file
+# is meant to be pulled fresh on upgrade rather than hand-edited: `meerail.sh`
+# writes the answers into `.env` beside it, and that file is yours.
+#
+# Bridge only starts under the `proton` profile (COMPOSE_PROFILES=proton in
+# .env, which the installer sets when you choose Proton Mail). A Gmail or
+# Fastmail install never pulls it.
+name: meerail
+
+services:
+  db:
+    image: postgres:18
+    # Sized from the host's RAM by meerail.sh and written into .env. The
+    # defaults here are the small end — a laptop — rather than the developer
+    # stack's 32 GB-host numbers, because an installer that OOMs a machine on
+    # first run is worse than one that is a little slow.
+    command:
+      - postgres
+      # --- memory ---
+      - -c
+      - shared_buffers=${PG_SHARED_BUFFERS:-1GB}
+      - -c
+      - effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-3GB}
+      - -c
+      - work_mem=${PG_WORK_MEM:-32MB}
+      - -c
+      - maintenance_work_mem=${PG_MAINTENANCE_WORK_MEM:-512MB}
+      # --- write path: bulk ingest generates far more WAL than the 1GB default ---
+      - -c
+      - max_wal_size=${PG_MAX_WAL_SIZE:-4GB}
+      - -c
+      - min_wal_size=1GB
+      - -c
+      - checkpoint_completion_target=0.9
+      - -c
+      - wal_compression=lz4
+      # raw_mime/body_html/search_text all live in TOAST; lz4 is several times
+      # faster than the pglz default at a similar ratio.
+      - -c
+      - default_toast_compression=lz4
+      # --- SSD assumptions; the defaults still cost for spinning rust ---
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - effective_io_concurrency=200
+      - -c
+      - max_parallel_workers_per_gather=${PG_PARALLEL_WORKERS:-2}
+      - -c
+      - max_parallel_maintenance_workers=${PG_PARALLEL_WORKERS:-2}
+    # Docker's default 64MB /dev/shm silently caps parallel query workers.
+    shm_size: ${PG_SHM_SIZE:-512mb}
+    deploy:
+      resources:
+        limits:
+          # Must stay comfortably above shared_buffers + shm + a maintenance
+          # work_mem while a GIN index builds, or the postmaster gets OOM-killed
+          # mid-backfill. meerail.sh keeps that relationship when it sizes them.
+          memory: ${PG_MEM_LIMIT:-3g}
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-meerail}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-meerail}
+      POSTGRES_DB: ${POSTGRES_DB:-meerail}
+    networks: [meerail]
+    # Deliberately NOT published. In this stack every client of the database is
+    # a container on this network, so there is nothing for a host port to serve
+    # except a route past the host firewall to a database holding all your mail.
+    # `meerail.sh psql` goes in through `docker compose exec`.
+    volumes:
+      # Postgres 18+ wants a single mount at /var/lib/postgresql (not .../data),
+      # which is also what makes a future in-place pg_upgrade --link possible.
+      - pg-data:/var/lib/postgresql
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-meerail} -d ${POSTGRES_DB:-meerail}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  tika:
+    # Apache Tika (full, with Tesseract) plus the JPEG2000 ImageIO jars — see
+    # tika/Dockerfile for why the stock image cannot ship them. Multi-GB pull;
+    # it is what OCRs scanned PDFs and image attachments.
+    image: ${MEERAIL_IMAGE_TIKA:-ribalba/meerail-tika}:${MEERAIL_VERSION:-latest}
+    networks: [meerail]
+    environment:
+      # This image's entrypoint ignores JAVA_OPTS; JAVA_TOOL_OPTIONS is read by
+      # the JVM itself. Without a heap cap a JVM under a cgroup limit gets
+      # OOM-killed at the ceiling instead of collecting.
+      JAVA_TOOL_OPTIONS: "-XX:MaxRAMPercentage=60"
+    deploy:
+      resources:
+        limits:
+          # ~60% heap, the rest for metaspace/threads and Tesseract, which does
+          # its OCR in native memory outside the heap entirely.
+          memory: ${TIKA_MEM_LIMIT:-3g}
+    restart: unless-stopped
+
+  server:
+    image: ${MEERAIL_IMAGE_SERVER:-ribalba/meerail-server}:${MEERAIL_VERSION:-latest}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      # 127.0.0.1 by default: the UI is unauthenticated unless you set
+      # server.password, so it must not reach the network until you have said
+      # it should. meerail.sh asks, and writes MEERAIL_BIND=0.0.0.0 only if you
+      # answer yes — and refuses to unless a password is set.
+      - "${MEERAIL_BIND:-127.0.0.1}:${MEERAIL_PORT:-8000}:8000"
+    networks: [meerail]
+    # Only container topology. Everything else — secret_key, server.password,
+    # the search windows — comes from the mounted meerail.toml, and must not be
+    # named here: the environment outranks that file, so an entry with a
+    # ${VAR:-default} fallback would silently override whatever you wrote.
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-meerail}:${POSTGRES_PASSWORD:-meerail}@db:5432/${POSTGRES_DB:-meerail}
+      DATA_DIR: /data
+    volumes:
+      # One configuration for the whole system, shared with the agent, and
+      # read-only because neither process writes it. It must exist before the
+      # first `up` or Docker creates a *directory* at that path — meerail.sh
+      # writes it before it ever calls compose.
+      - ./meerail.toml:/app/meerail.toml:ro
+      - mail-data:/data
+    deploy:
+      resources:
+        limits:
+          memory: ${SERVER_MEM_LIMIT:-2g}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  agent:
+    image: ${MEERAIL_IMAGE_AGENT:-ribalba/meerail-agent}:${MEERAIL_VERSION:-latest}
+    depends_on:
+      db:
+        condition: service_healthy
+      tika:
+        condition: service_started
+    networks: [meerail]
+    # python is PID 1 here and installs no SIGTERM handler, so signals with a
+    # default action are ignored; tini forwards them and `stop` returns promptly
+    # instead of waiting out the 10s kill timer.
+    init: true
+    environment:
+      # Same reasoning as the server: only the addresses that are a fact about
+      # this topology rather than a preference. The mailbox host and port are
+      # *not* here — they are per-account and live in meerail.toml, which is
+      # what lets one install mix a Bridge container with a Gmail account.
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-meerail}:${POSTGRES_PASSWORD:-meerail}@db:5432/${POSTGRES_DB:-meerail}
+      TIKA_URL: http://tika:9998
+    volumes:
+      # The 0600 check in agent/preflight.py reads the host file's mode straight
+      # through this mount, which is why `meerail.sh` chmods it.
+      - ./meerail.toml:/app/meerail.toml:ro
+    deploy:
+      resources:
+        limits:
+          # The peak is sync.py's `raws = bridge.fetch_raw(need_raw)` — a whole
+          # batch of complete raw MIME messages held at once, with no cap on how
+          # big any one of them is. If this OOMs, lower agent.batch_size in
+          # meerail.toml rather than raising the limit: it cuts the peak roughly
+          # linearly and costs only a few more round trips.
+          memory: ${AGENT_MEM_LIMIT:-4g}
+    # Cursors live in the database, so the agent is stateless and a restart
+    # resumes exactly where it left off.
+    restart: unless-stopped
+
+  bridge:
+    # Proton Mail Bridge, containerised — the community image, pinned. Only
+    # starts under the `proton` profile.
+    #
+    # Bridge cannot take credentials from the environment (2FA is why), so the
+    # login is a one-time interactive session against this same container and
+    # its volume:
+    #
+    #     docker compose --profile proton run --rm bridge init
+    #       >>> login          # Proton address, password, 2FA if you use it
+    #       >>> info           # prints the IMAP/SMTP username and password
+    #       >>> exit
+    #
+    # `meerail.sh` walks you through exactly that and then asks for the two
+    # values `info` printed. They are Bridge's own generated credentials, not
+    # your Proton password — Bridge is what holds the account.
+    #
+    # Inside the container Bridge listens on 143 (IMAP) and 25 (SMTP), both
+    # STARTTLS with a self-signed certificate, hence verify_cert = false in the
+    # generated meerail.toml. Nothing is published to the host: the agent is the
+    # only client and it is on this network. Add a `ports:` entry if you want to
+    # point another mail client at it too.
+    # The `-build` tag, not the plain one, and that is load-bearing: Proton ship
+    # an amd64 .deb and nothing else, so the tags built from that package
+    # (`3.19.0-1`, `latest`) have an amd64 manifest only. Pulling one on an
+    # Apple Silicon Mac fails outright — "no matching manifest for
+    # linux/arm64/v8". The `-build` tags compile Bridge from source and publish
+    # amd64, arm64, armv7 and riscv64, so this runs natively on every machine
+    # meerail claims to support. Pin the version; do not drift to `build`.
+    image: ${BRIDGE_IMAGE:-shenxn/protonmail-bridge:3.19.0-build}
+    profiles: ["proton"]
+    networks: [meerail]
+    volumes:
+      # The account, its keys and its cached state. Losing this volume means
+      # logging in again — it is not a copy of your mail.
+      - bridge-data:/root
+    restart: unless-stopped
+
+networks:
+  meerail:
+    driver: bridge
+
+volumes:
+  pg-data:
+  mail-data:
+  bridge-data:

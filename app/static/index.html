@@ -28,6 +28,16 @@
       </div>
       <!-- Only shown when the agent has stopped syncing; opens the status modal. -->
       <button class="agent-warning" id="agent-warning" hidden></button>
+      <!-- Mail written but not yet handed to a mail server. Hidden while the
+           outbox is empty, which on a working setup is nearly always: sending
+           takes a second when the agent is up, and days when it is not. Opens
+           the status modal, where the reason lives. -->
+      <button class="outbox-notice" id="outbox-notice" hidden></button>
+      <!-- Shown only when the server has seen a newer release than it runs.
+           Filled by app.update.js, which also hides it once dismissed for that
+           version. Below the agent warning on purpose: a stalled sync is a
+           problem, an available update is not. -->
+      <div class="update-notice" id="update-notice" hidden></div>
       <nav class="mailbox-tree" id="mailbox-tree"></nav>
       <!-- Live sync progress, rendered by app.status.js while a pass is running.
            Hidden between passes — the modal keeps the last-pass tallies. Sits
@@ -192,6 +202,20 @@
             button appears on the reading pane and on every message: the subject
             becomes the task title, the body its text, and any attachments you
             tick are uploaded with it. Leave the field empty to remove it.
+          </p>
+        </div>
+
+        <h3 class="settings-heading">About</h3>
+        <div class="settings-section">
+          <!-- Filled by app.update.js from /api/version — the answer to "which
+               version am I running", which is where every bug report starts. -->
+          <p class="about-version" id="about-version">—</p>
+          <p class="muted small">
+            Once a day the server asks github.com whether a newer meerail has
+            been released, and says so in the sidebar if one has. It sends
+            nothing about you or your mail — only the request itself. Set
+            <code>update_check = false</code> under <code>[server]</code> in
+            <code>meerail.toml</code> to stop it making that request at all.
           </p>
         </div>
       </div>
@@ -446,6 +470,7 @@
   <script src="/static/js/app.compose.js"></script>
   <script src="/static/js/app.tasks.js"></script>
   <script src="/static/js/app.status.js"></script>
+  <script src="/static/js/app.update.js"></script>
   <script src="/static/js/app.stats.js"></script>
   <script src="/static/js/app.keys.js"></script>
   <script src="/static/js/app.split.js"></script>

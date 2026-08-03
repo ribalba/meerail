@@ -495,6 +495,16 @@ class Bridge:
         return (int(uidvalidity) if uidvalidity else None,
                 int(uidnext) if uidnext else None)
 
+    @property
+    def exists(self) -> int:
+        """Messages the last SELECT said this folder holds.
+
+        The server's own count, from the same command that opened the folder —
+        which makes it the one thing a SEARCH answer can be checked against
+        before anything is deleted on the strength of it. See sync._reconcile.
+        """
+        return self._exists
+
     def new_uids(self, last_uid: int) -> list[int]:
         # `UID n:*` has no defined answer on a folder with no messages — there is
         # no highest UID for `*` to mean. Bridge replies "SEARCH failed: no such

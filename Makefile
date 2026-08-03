@@ -17,7 +17,22 @@ TEST_MEERAIL_URL = http://127.0.0.1:18000
 TEST_TIKA_URL = http://127.0.0.1:59998
 PYTEST ?= .venv-test/bin/pytest
 
-.PHONY: help up down logs build infra dev venv agent agent-docker agent-test agent-logs agent-service agent-service-status agent-service-stop desktop psql fmt test test-up test-down test-psql screenshots
+# --- release images ----------------------------------------------------------
+#
+# The three images `meerail.sh` pulls. VERSION is the single source of the
+# number: it tags the images, stamps their OCI labels, and is what a running
+# server compares itself against to notice an update (core/version.py).
+DOCKER_ORG ?= ribalba
+VERSION    := $(shell cat VERSION)
+# Both architectures the project claims to support: Intel/AMD servers and
+# Apple Silicon. Nothing here is compiled per-arch — the Python deps all ship
+# aarch64 wheels — so the emulated half is not as slow as it sounds.
+PLATFORMS  ?= linux/amd64,linux/arm64
+# A named builder, because the default `docker` driver cannot do multi-platform
+# builds at all. Created on demand by the buildx target below.
+BUILDER    ?= meerail
+
+.PHONY: help up down logs build infra dev venv agent agent-docker agent-test agent-logs agent-service agent-service-status agent-service-stop desktop psql fmt test test-up test-down test-psql screenshots version buildx images images-push
 
 help:
 	@echo "meerail targets:"
@@ -41,6 +56,9 @@ help:
 	@echo "  make test-down - tear the test stack down, discarding its data"
 	@echo "  make test-psql - psql shell on the test database"
 	@echo "  make screenshots - reseed the demo mailbox and re-shoot the website images"
+	@echo "  make version     - print the version everything is tagged with"
+	@echo "  make images      - build the three release images for this machine only"
+	@echo "  make images-push - build them for amd64+arm64 and push to Docker Hub"
 
 up:
 	$(COMPOSE) up --build
@@ -139,6 +157,55 @@ SHOOT_ENV = DATABASE_URL="$(TEST_DATABASE_URL)" \
             MEERAIL_URL="$(TEST_MEERAIL_URL)" \
             TIKA_URL="$(TEST_TIKA_URL)" \
             MEERAIL_CONFIG=
+
+# --- release images ----------------------------------------------------------
+#
+# CI does this on every push to main (.github/workflows/images.yml); these
+# targets are the same commands by hand, for a one-off or a fork.
+#
+# `images` and `images-push` differ in more than the push: a multi-platform
+# build cannot be loaded into the local image store (there is no such thing as
+# a local multi-arch image without the containerd store), so a build you want
+# to *run* is this machine's architecture only, and a build you want to
+# *publish* goes straight from the builder to the registry. Hence two targets
+# rather than one with a flag.
+
+version:
+	@echo $(VERSION)
+
+# Idempotent: creates the builder the first time, selects it afterwards.
+buildx:
+	@docker buildx inspect $(BUILDER) >/dev/null 2>&1 \
+	  || docker buildx create --name $(BUILDER) --driver docker-container --bootstrap
+	@docker buildx use $(BUILDER)
+
+# Native-architecture build, loaded locally — what you want before pushing
+# anything, and what `docker compose -f docker-compose.hub.yml up` will find if
+# you point MEERAIL_IMAGE_* at it.
+images:
+	docker build --build-arg MEERAIL_VERSION=$(VERSION) \
+	  -t $(DOCKER_ORG)/meerail-server:$(VERSION) -t $(DOCKER_ORG)/meerail-server:latest .
+	docker build --build-arg MEERAIL_VERSION=$(VERSION) -f agent/Dockerfile \
+	  -t $(DOCKER_ORG)/meerail-agent:$(VERSION) -t $(DOCKER_ORG)/meerail-agent:latest .
+	docker build --build-arg MEERAIL_VERSION=$(VERSION) \
+	  -t $(DOCKER_ORG)/meerail-tika:$(VERSION) -t $(DOCKER_ORG)/meerail-tika:latest ./tika
+	@echo
+	@echo "Built $(DOCKER_ORG)/meerail-{server,agent,tika}:$(VERSION) for this machine."
+
+# Publishes. Needs `docker login` first, and push rights on $(DOCKER_ORG).
+# Every image gets both tags in one go, so :latest and :$(VERSION) can never
+# point at different builds.
+images-push: buildx
+	docker buildx build --platform $(PLATFORMS) --build-arg MEERAIL_VERSION=$(VERSION) \
+	  -t $(DOCKER_ORG)/meerail-server:$(VERSION) -t $(DOCKER_ORG)/meerail-server:latest --push .
+	docker buildx build --platform $(PLATFORMS) --build-arg MEERAIL_VERSION=$(VERSION) \
+	  -f agent/Dockerfile \
+	  -t $(DOCKER_ORG)/meerail-agent:$(VERSION) -t $(DOCKER_ORG)/meerail-agent:latest --push .
+	docker buildx build --platform $(PLATFORMS) --build-arg MEERAIL_VERSION=$(VERSION) \
+	  -t $(DOCKER_ORG)/meerail-tika:$(VERSION) -t $(DOCKER_ORG)/meerail-tika:latest --push ./tika
+	@echo
+	@echo "Pushed $(DOCKER_ORG)/meerail-{server,agent,tika}:$(VERSION) (+ :latest) for $(PLATFORMS)."
+	@echo "Installs notice the new version within a day; 'meerail.sh update' takes it now."
 
 screenshots: test-up
 	@$(SHOOT_ENV) .venv-test/bin/python website/screenshots/seed.py

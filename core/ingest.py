@@ -26,6 +26,7 @@ from .mail.parse import strip_nuls
 from .mail.store import (
     ingest_location_only,
     ingest_raw,
+    is_pending,
     rebuild_search_text,
     recompute_counts,
     strip_content,
@@ -98,22 +99,6 @@ def _delete_orphans(db, message_pks: set[int]) -> None:
                 db.delete(msg)
 
 
-def _clear_mailbox(db, mailbox: Mailbox) -> int:
-    """Remove every placement in a mailbox and its now-orphaned content."""
-    locs = db.execute(
-        select(MessageLocation).where(MessageLocation.mailbox_id == mailbox.id)
-    ).scalars().all()
-    affected = {loc.message_pk for loc in locs}
-    for loc in locs:
-        db.delete(loc)
-    db.flush()
-    _delete_orphans(db, affected)
-    mailbox.last_uid = 0
-    mailbox.total_count = 0
-    mailbox.unread_count = 0
-    return len(locs)
-
-
 def register_folder(db, account: Account, imap_name: str, role_hint: str = "",
                     uidvalidity: int | None = None, uidnext: int | None = None,
                     sort_order: int = 0) -> Mailbox:
@@ -136,12 +121,29 @@ def register_folder(db, account: Account, imap_name: str, role_hint: str = "",
         events.publish({"type": "folders", "account": account.email, "added": 1})
     else:
         # A UIDVALIDITY change invalidates every UID-to-message placement, not
-        # just the cursor. Reusing the old rows would silently point new UIDs at
-        # old content until a later reconciliation happened to clean them up.
+        # just the cursor: the numbers we hold no longer refer to the messages
+        # they were recorded against.
+        #
+        # What that does NOT license is deleting the mail. This used to wipe the
+        # folder — every placement, and with the last placement of each message
+        # its content — and then re-fetch from scratch. Bridge changes
+        # UIDVALIDITY for its own reasons (a re-login, a reinstall, a rebuilt
+        # local cache), so an ordinary Tuesday could empty a mailbox and refill
+        # it over the next hour. On a machine that then went offline, or where
+        # the fetch failed, or where the mail had since been deleted upstream,
+        # it did not refill at all.
+        #
+        # Rewinding the cursor gets to the same place without the hole. The pass
+        # re-walks every UID; content already held is matched by Message-ID and
+        # only gains a placement, so nothing is re-downloaded and nothing is
+        # gone in the meantime. The stale placements are removed by the ordinary
+        # vanished sweep, which deletes only what the server has positively
+        # confirmed is not there (see sync._uid_list_is_trustworthy). Until then
+        # a message can appear twice in one folder, which is the right way round
+        # for this trade: a duplicate is visible and self-correcting, a deletion
+        # is neither.
         if mb.uidvalidity is not None and uidvalidity is not None and mb.uidvalidity != uidvalidity:
-            removed = _clear_mailbox(db, mb)
-            events.publish({"type": "present", "folder": mb.imap_name,
-                            "removed": removed, "total": 0})
+            mb.last_uid = 0
         if mb.role == "custom":
             mb.role = derive_role(imap_name, role_hint)
     if uidvalidity is not None:
@@ -324,7 +326,16 @@ def update_flags(db, mailbox: Mailbox, items: list[dict]) -> int:
 
 def prune_vanished(db, mailbox: Mailbox, present_uids: list[int]) -> int:
     """Drop placements whose UID is gone from the folder, and any message left
-    with no placement at all."""
+    with no placement at all.
+
+    Placements the user has made but the server has not seen yet are exempt.
+    They carry a UID the server was never told about (see store.pending_uid), so
+    "the server did not list it" says nothing about them — and reading it as a
+    deletion would take the archived message straight back out of the folder it
+    was just filed into, which is the disappearance this whole mechanism exists
+    to prevent. The move that created them is still in the queue; when it lands,
+    the real placement replaces them.
+    """
     present = set(present_uids)
     locs = db.execute(
         select(MessageLocation).where(MessageLocation.mailbox_id == mailbox.id)
@@ -332,6 +343,8 @@ def prune_vanished(db, mailbox: Mailbox, present_uids: list[int]) -> int:
     affected: set[int] = set()
     removed = 0
     for loc in locs:
+        if is_pending(loc):
+            continue
         if loc.imap_uid not in present:
             affected.add(loc.message_pk)
             db.delete(loc)
@@ -346,7 +359,22 @@ def prune_vanished(db, mailbox: Mailbox, present_uids: list[int]) -> int:
 
 
 def prune_mailboxes(db, account: Account, present_names: set[str]) -> int:
-    """Remove folders absent from the server's successful LIST response."""
+    """Remove folders absent from the server's successful LIST response.
+
+    An empty LIST is never taken as evidence. Proton Bridge answers LIST from
+    whatever it has loaded, and a Bridge that is still starting, signed out, or
+    running on a machine that has been offline for days answers it with nothing
+    — preflight already warns about exactly that ("the server listed no
+    folders"). Acting on that answer would delete every folder for the account
+    and, with the last placement of each message, the mail itself: a local
+    mailbox wiped because a laptop was opened on a train. There is no reading of
+    "the server told me about no folders at all" that means "the user deleted
+    all their folders", so the only safe response is to leave everything alone
+    and let a later pass, against a server that is actually answering, decide.
+    """
+    if not present_names:
+        return 0
+
     missing = db.execute(
         select(Mailbox).where(
             Mailbox.account_id == account.id,

@@ -67,8 +67,8 @@ that shaped the architecture.
 
 | | |
 | --- | --- |
-| **Docker** | Engine 24+ with the Compose v2 plugin (`docker compose`, not `docker-compose`). Docker Desktop on macOS/Windows. |
-| **Python** | 3.11 or newer on the host — only for the agent, and only outside Docker. 3.11 is the floor (`tomllib`); 3.13/3.14 are tested. |
+| **Docker** | Engine 24+ with the Compose v2 plugin (`docker compose`, not `docker-compose`). Docker Desktop on macOS/Windows. The only hard requirement for the [`meerail.sh`](#install-the-quick-way) install. |
+| **Python** | 3.11 or newer on the host — only for the agent, and only when running it outside Docker (the clone-and-build path). 3.11 is the floor (`tomllib`); 3.13/3.14 are tested. |
 | **Node** | 20+, only if you want the Electron desktop app rather than the browser. |
 | **RAM** | ~6 GB free for the stack as shipped. Postgres is capped at 10 GB and Tika at 3 GB in `docker-compose.yml`, tuned for a ~32 GB host — lower `shared_buffers` and the `deploy.resources.limits` if your machine is smaller. |
 | **Disk** | Sized to your mailbox. Raw MIME plus attachment bytes plus the trigram index runs to tens of GB for a large account — [the content window](#the-content-window) and `agent.store_raw_mime` are the two knobs that bound it. |
@@ -79,11 +79,54 @@ scanned PDFs and image attachments. Switch to `apache/tika:latest` in
 [`docker-compose.yml`](docker-compose.yml) if you want a much smaller image and can live
 without OCR — text extraction still works, images just come back empty.
 
-## Quick start
+## Install: the quick way
 
-The short path, on Linux or macOS. **[Running it on your platform](#running-it-on-your-platform)**
-below has the per-OS detail, including PowerShell commands for Windows and how to keep the
-agent running at boot.
+No clone, no build, no Python on your machine — one script that asks what it needs, writes
+a configuration, and runs the published containers.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ribalba/meerail/main/meerail.sh -o meerail.sh
+bash meerail.sh
+```
+
+It checks Docker is there, asks where your mail lives, sizes Postgres and Tika to the
+memory Docker actually has, pulls `ribalba/meerail-{server,agent,tika}` from Docker Hub and
+starts them. Everything it writes lives in `~/.meerail` (override with `MEERAIL_HOME`);
+your mail lives in Docker volumes.
+
+**Proton Mail works here too, on every OS.** Choose Proton and the installer runs
+[Bridge as a container](docker-compose.hub.yml) beside the rest of the stack and walks you
+through its one-time interactive login. The agent then reaches it at `bridge:143` over the
+compose network — so the "Docker Desktop can't see Bridge on your loopback" problem that
+shapes the clone-based install below simply does not arise. Any other IMAP/SMTP account
+works the same way, with Gmail, Fastmail and iCloud servers filled in automatically from
+your address.
+
+Afterwards:
+
+```bash
+bash meerail.sh status      # containers, version, URL
+bash meerail.sh logs agent  # watch the first sync work through your mailbox
+bash meerail.sh test        # check every connection: database, Tika, IMAP, SMTP
+bash meerail.sh requeue     # re-queue anything an older agent gave up on
+bash meerail.sh update      # pull the newest release and restart
+bash meerail.sh config      # edit meerail.toml, then restart
+bash meerail.sh help        # everything else
+```
+
+Windows: run it inside WSL2 or Git Bash, with Docker Desktop running.
+
+The running app tells you when a new version is out — a strip in the sidebar, from a
+once-a-day check the server makes against this repository. It sends nothing about you or
+your mail, and `update_check = false` under `[server]` turns the request off entirely.
+
+## Quick start from a clone
+
+The developer path: build the images from this checkout and run the agent on your own
+Python. Use this if you are changing meerail, not just running it.
+**[Running it on your platform](#running-it-on-your-platform)** below has the per-OS
+detail, including PowerShell commands for Windows and how to keep the agent running at
+boot.
 
 ```bash
 # 1. One config file for the whole system — server and agent both read it.
@@ -113,10 +156,13 @@ for building desktop installers, and [`tests/README.md`](tests/README.md) for th
 
 ## Running it on your platform
 
-The split is the same everywhere: **the stack runs in Docker, and Proton Bridge runs
-natively** — Bridge is a desktop app that listens on `127.0.0.1` and cannot be
-containerised. The only question each platform answers differently is *where the agent
-runs*, because the agent has to reach Bridge on that loopback.
+This section is about the **clone-and-build** install. If you used
+[`meerail.sh`](#install-the-quick-way) none of it applies: Bridge runs as a container
+there, everything is on one Docker network, and the three platforms are the same install.
+
+From a clone the split is: **the stack runs in Docker, and Proton Bridge runs natively** —
+as a desktop app it listens on `127.0.0.1`, and only a container sharing that loopback can
+reach it. The only question each platform answers differently is *where the agent runs*.
 
 |             | Postgres · Tika · server | agent                               | desktop app         |
 | ----------- | ------------------------ | ----------------------------------- | ------------------- |
@@ -321,6 +367,7 @@ keys unless you specifically want a per-machine override.
 | `contacts_scan_years` | `CONTACTS_SCAN_YEARS` | `1` | How far back to scan addresses for compose autocomplete; `0` is all time. |
 | `max_attachment_bytes` | `MAX_ATTACHMENT_BYTES` | `104857600` | Per-attachment cap for outgoing uploads. |
 | `data_dir` | `DATA_DIR` | `./data` | Scratch space for staging outgoing attachments. Mail bytes live in Postgres. Every container overrides it to `/data`. |
+| `update_check` | `UPDATE_CHECK` | `true` | Once a day, fetch [`VERSION`](VERSION) from this repository's default branch and let the UI say so if it is newer than the running build. The only outbound request the server makes, and it carries nothing but the request — no identifier, no version, no statistics. `false` makes no request at all. See [Versions and releases](#versions-and-releases). |
 
 ### `[agent]`
 
@@ -382,6 +429,46 @@ Nothing is deleted from your mail server. Widening the window applies to new mai
 immediately; to pull back content for mail that was already skipped, widen it and then run a
 full recheck from the UI's agent-status panel, which re-walks every folder.
 
+### What meerail deletes, and when
+
+Short version: your mail is deleted when you delete it, when your mail server says it is
+gone, or when you delete the whole account. Nothing else removes a message, and nothing
+removes one because a connection failed.
+
+| What | When | |
+| --- | --- | --- |
+| A message you trash or archive | You pressed it | Leaves the folder locally at once and is applied to IMAP on the next pass. With no Trash folder on the account, "delete" is an IMAP expunge — permanent, on the server. |
+| Mail deleted on your phone or in webmail | The server no longer lists its UID | meerail mirrors the server; a message deleted elsewhere goes here too. Only ever on a UID list the server has confirmed in full — see below. |
+| A folder | It is gone from the server's `LIST` | Its messages go with it, unless they are also filed elsewhere. Never on an empty `LIST`. |
+| Bodies and attachments of old mail | `content_window_months` is set | Headers stay; the mail still lists, threads and searches. Off by default. See [The content window](#the-content-window). |
+| Everything for an account | `DELETE /api/accounts/{id}` | The one command that removes an account's mail wholesale. No button in the UI calls it. |
+
+Being offline is never a reason to delete anything, and the agent is written for machines
+that are: a laptop that is opened twice a week, a Bridge that has not signed in yet, a mail
+server that has been down since Friday.
+
+- **A connection that fails deletes nothing** — the pass ends and the next one picks up.
+- **A connection that answers *short* also deletes nothing.** This is the one that bites:
+  Proton Bridge keeps serving while it cannot reach Proton, so it will answer `LIST` with no
+  folders, or a folder's `SEARCH` with a fraction of what it holds. The agent checks every
+  UID list against the message count `SELECT` reported before it removes anything, and an
+  empty `LIST` is never read as "every folder was deleted". It logs what it saw and leaves
+  your mail alone.
+- **A new `UIDVALIDITY` does not empty the folder.** Bridge changes it for its own reasons —
+  a re-login, a rebuilt cache. The agent re-walks the folder instead; mail it already holds
+  is matched by `Message-ID` and keeps its content.
+- **Filing works offline.** Archive and trash move the message in the app the moment you
+  press them, not when the agent gets round to applying it. The copy you see in Archive is
+  written locally and replaced by the server's own once the move lands; file the same
+  message twice before that and it is still one move, to wherever it ended up.
+- **Queued work is never dropped.** Marks, moves and above all messages you have sent sit in
+  the queue until they succeed, retried on a backoff for as long as it takes. Nothing
+  expires them.
+- **The outbox is on screen.** A strip under the sidebar toolbar counts what is written but
+  not yet sent — normally for the second it takes, and for as long as it takes when the
+  agent is away. It turns red once an attempt has actually failed; opening it shows how long
+  the oldest message has been waiting and what the last attempt hit.
+
 ### Running the agent
 
 `agent/run.sh` builds the venv, keeps it in step with `requirements.txt`, puts the repo root
@@ -394,6 +481,7 @@ on `PYTHONPATH` (the agent imports `core`) and passes arguments through:
 | `--test` | Check Postgres, Tika, IMAP and SMTP for every account, report, exit. Run it before anything else. |
 | `--config PATH` | Use a config file other than the repository's `meerail.toml`. |
 | `--backfill-previews` | Render previews for attachments already stored, then exit. |
+| `--requeue-abandoned` | Put back anything an older agent gave up on — including mail it queued to send and never did. Earlier versions stopped after five failed attempts; nothing does now. The agent names what it finds on every start; this is the command that sends it. |
 
 On Linux the same thing runs containerised with `make agent-docker` / `make agent-test` /
 `make agent-logs`; on macOS, `agent/service.sh install` (`make agent-service`) puts it in
@@ -432,6 +520,40 @@ on shifted ports (55432 / 18000), runs unit and integration tests — including 
 pass against a GreenMail IMAP server — and discards the volume whichever way pytest went.
 `make test-up` / `make test-down` / `make test-psql` drive that stack by hand. See
 [`tests/README.md`](tests/README.md).
+
+### Versions and releases
+
+One number, in one file: [`VERSION`](VERSION) at the repository root. Nothing else declares
+it — `core/version.py` reads that file, the images are tagged with it, their
+`org.opencontainers.image.version` label carries it, `/api/version` reports it, and
+`meerail.sh` pins to it.
+
+Pushing to main is the release. [`.github/workflows/images.yml`](.github/workflows/images.yml)
+runs the test suite, and only if it passes builds all three images for `linux/amd64` and
+`linux/arm64` and pushes them to Docker Hub:
+
+| Image | What it is |
+| --- | --- |
+| `ribalba/meerail-server` | the web app |
+| `ribalba/meerail-agent` | the mail pipeline |
+| `ribalba/meerail-tika` | Apache Tika (full, with OCR) plus the JPEG2000 jars |
+
+Each gets three tags: `:<version>`, `:<version>-<sha>` (immutable, for pinning to one exact
+build) and `:latest`. So `:<version>` moves with main until `VERSION` is bumped, and cutting
+a release is editing that one file — CI republishes under the new number, and every running
+install notices within a day because `app/updates.py` compares itself against `VERSION` on
+main. Publishing needs `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` repository secrets; the
+job is skipped on forks.
+
+By hand — for a fork, or to check a build before it ships:
+
+```bash
+make version         # what everything will be tagged with
+make images          # build all three for this machine, no push
+make images-push     # buildx amd64+arm64 and push (needs docker login)
+```
+
+`DOCKER_ORG=you make images-push` publishes to your own namespace instead.
 
 ## Status
 

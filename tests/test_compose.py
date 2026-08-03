@@ -433,3 +433,69 @@ def test_forward_context(account):
     assert ctx["subject"].startswith("Fwd:")
     assert ctx["to"] == []
     assert "Forwarded message" in ctx["body_text"]
+    assert ctx["attachments"] == []          # nothing was attached to forward
+
+
+def test_forward_carries_the_attachments(account):
+    """A forward goes out with the original's files, not just its text."""
+    email, aid = account["email"], account["id"]
+    token = "FWDATT" + uuid.uuid4().hex[:6]
+    raw = make_message(f"<{uuid.uuid4().hex}@t>", f"Subj {token}", "sender@ex.com", email,
+                       f"{token} body text", T0, pdf_text="FWDATT report")
+    dbfixture.ingest_raw_message(email, raw, uid=871)
+    _, found = api("GET", f"/api/search?q={token}&account_id={aid}")
+    mid = found["rows"][0]["id"]
+
+    _, ctx = api("GET", f"/api/compose/reply-context/{mid}?mode=forward")
+    assert [a["filename"] for a in ctx["attachments"]] == ["report.pdf"]
+    assert ctx["attachments"][0]["content_type"] == "application/pdf"
+    assert ctx["attachments"][0]["size"] > 0
+    assert ctx["attachments_missing"] == 0
+
+    # The composer sends the staged ids back like any other attachment.
+    code, _ = api("POST", "/api/compose/send", {
+        "account_id": aid, "to": ["dest@example.com"], "subject": ctx["subject"],
+        "body_text": ctx["body_text"], "attachments": [a["id"] for a in ctx["attachments"]]})
+    assert code == 200
+
+    oid = dbfixture.pending_actions(email, "send")[0]["payload"]["outbound_id"]
+    mime = dbfixture.outbound_mime(oid)
+    assert "report.pdf" in mime and "application/pdf" in mime
+
+
+def test_the_outbox_count_reports_what_is_still_waiting(account):
+    """The UI's outbox strip reads this: sending is the agent's job, so between
+    pressing send and the agent relaying it there is a real interval — seconds
+    with a connection, days without one — and it used to be invisible."""
+    aid = account["id"]
+    _, before = api("GET", "/api/sync/status")
+    start = before["outbox"]["queued"]
+
+    api("POST", "/api/compose/send", {
+        "account_id": aid, "to": ["dest@example.com"],
+        "subject": "Queued", "body_text": "waiting for the agent"})
+
+    _, after = api("GET", "/api/sync/status")
+    ob = after["outbox"]
+    assert ob["queued"] == start + 1
+    assert ob["oldest_at"]
+    # Nothing has failed, so there is no reason for the strip to go red.
+    assert ob["error"] is None
+    assert ob["abandoned"] == 0
+
+
+def test_a_failing_send_says_why_without_leaving_the_queue(account):
+    """A send that fails keeps its place in the outbox and reports the reason —
+    the state issue #7 had no way of showing at all."""
+    email, aid = account["email"], account["id"]
+    api("POST", "/api/compose/send", {
+        "account_id": aid, "to": ["dest@example.com"],
+        "subject": "Stuck", "body_text": "no smtp here"})
+    oid = dbfixture.pending_actions(email, "send")[0]["payload"]["outbound_id"]
+
+    # What the agent writes when an attempt fails: still queued, with a reason.
+    dbfixture.record_send_failure(oid, "TimeoutError('timed out')")
+
+    _, body = api("GET", "/api/sync/status")
+    assert body["outbox"]["queued"] >= 1
+    assert "timed out" in body["outbox"]["error"]

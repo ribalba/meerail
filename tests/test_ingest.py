@@ -138,18 +138,38 @@ def test_rescan_is_idempotent(account):
     assert dbfixture.message_count(email) == 1
 
 
-def test_uidvalidity_change_replaces_stale_uid_placements(account):
+def test_uidvalidity_change_repoints_the_uid_without_deleting_mail(account):
+    """A new UID epoch re-points the placement — it does not empty the folder.
+
+    Bridge changes UIDVALIDITY for its own reasons (a re-login, a rebuilt
+    cache), and this used to wipe every message in the folder and re-fetch. The
+    content stays now: the cursor is rewound instead, the pass re-walks the
+    folder, and mail still on the server is matched by Message-ID and simply
+    gains its new placement. Nothing is downloaded twice and nothing is missing
+    in between — which is the only version of this that survives a machine that
+    goes offline halfway through.
+    """
     email = account["email"]
     old = make_message(f"<old-{uuid.uuid4().hex}@t>", "Old UID epoch", "x@y.com", email,
                        "old body", T0)
     new = make_message(f"<new-{uuid.uuid4().hex}@t>", "New UID epoch", "x@y.com", email,
                        "new body", T0)
     dbfixture.ingest_raw_message(email, old, uid=1, uidvalidity=10)
+
+    # The pass that meets the new epoch rewinds the cursor, which is what makes
+    # it re-walk the folder instead of picking up where the old numbering left
+    # off — and the mail is all still there while it does.
+    assert dbfixture.register_folder(email, "INBOX", uidvalidity=11) == 0
+    assert dbfixture.location_count(email, "INBOX") == 1
+
     dbfixture.ingest_raw_message(email, new, uid=1, uidvalidity=11)
 
+    # UID 1 now means the new message, and the folder shows exactly that one.
     assert dbfixture.location_count(email, "INBOX") == 1
-    assert dbfixture.message_count(email) == 1
     assert _mb(email, "INBOX")["total"] == 1
+    # The old message's content is still held, ready to be re-placed by the
+    # re-walk rather than re-downloaded.
+    assert dbfixture.message_count(email) == 2
 
 
 def test_removed_folders_and_their_orphaned_messages_are_pruned(account):
@@ -161,6 +181,24 @@ def test_removed_folders_and_their_orphaned_messages_are_pruned(account):
     assert dbfixture.prune_folders(email, {"INBOX"}) == 1
     assert dbfixture.location_count(email, "Old Folder") == 0
     assert dbfixture.message_count(email) == 0
+
+
+def test_a_server_that_lists_nothing_prunes_nothing(account):
+    """An empty LIST is not "the user deleted all their folders".
+
+    Bridge answers LIST from whatever it has loaded, so a Bridge that is still
+    starting, signed out, or on a machine that has been offline for days answers
+    it with nothing. Acting on that would delete every folder for the account
+    and, with the last placement of each message, the mail itself.
+    """
+    email = account["email"]
+    raw = make_message(f"<keep-{uuid.uuid4().hex}@t>", "Still here", "x@y.com", email,
+                       "body", T0)
+    dbfixture.ingest_raw_message(email, raw, uid=1, folder="Archive")
+
+    assert dbfixture.prune_folders(email, set()) == 0
+    assert dbfixture.location_count(email, "Archive") == 1
+    assert dbfixture.message_count(email) == 1
 
 
 def test_unknown_account_is_autoregistered(require_server):

@@ -141,6 +141,9 @@ REQUESTED_AT = "2026-04-01T09:00:00"
 class RecheckBridge:
     """An IMAP server with two folders and nothing new in either."""
 
+    # What SELECT said the folder holds; nothing in it, and SEARCH agrees.
+    exists = 0
+
     def connect(self): pass
     def logout(self): pass
     def list_folders(self):
@@ -224,7 +227,7 @@ def _run_pass(monkeypatch, pending):
     monkeypatch.setattr(agent_sync, "ingest", spy)
     monkeypatch.setattr(agent_sync, "Bridge", lambda _a: RecheckBridge())
     monkeypatch.setattr(agent_sync, "SessionLocal", lambda: DB())
-    monkeypatch.setattr(agent_sync, "drain_actions", lambda *_a: None)
+    monkeypatch.setattr(agent_sync, "drain_actions", lambda *_a: (0, 0))
     agent_sync.sync_once(AccountCfg(), Cfg())
     return spy
 
@@ -256,7 +259,7 @@ def test_account_batch_size_overrides_the_global(monkeypatch):
     monkeypatch.setattr(agent_sync, "ingest", RecheckIngest(None))
     monkeypatch.setattr(agent_sync, "Bridge", lambda _a: RecheckBridge())
     monkeypatch.setattr(agent_sync, "SessionLocal", lambda: DB())
-    monkeypatch.setattr(agent_sync, "drain_actions", lambda *_a: None)
+    monkeypatch.setattr(agent_sync, "drain_actions", lambda *_a: (0, 0))
     batches = []
     monkeypatch.setattr(agent_sync, "_sync_new",
                         lambda _db, _b, _a, _mb, batch, *_r: batches.append(batch) or 0)
@@ -275,7 +278,7 @@ def test_batch_size_falls_back_to_the_global(monkeypatch):
     monkeypatch.setattr(agent_sync, "ingest", RecheckIngest(None))
     monkeypatch.setattr(agent_sync, "Bridge", lambda _a: RecheckBridge())
     monkeypatch.setattr(agent_sync, "SessionLocal", lambda: DB())
-    monkeypatch.setattr(agent_sync, "drain_actions", lambda *_a: None)
+    monkeypatch.setattr(agent_sync, "drain_actions", lambda *_a: (0, 0))
     batches = []
     monkeypatch.setattr(agent_sync, "_sync_new",
                         lambda _db, _b, _a, _mb, batch, *_r: batches.append(batch) or 0)
@@ -350,10 +353,20 @@ def test_progress_counts_uids_walked_not_messages_stored(monkeypatch):
 
 
 class FlagBridge:
-    """A folder of ``count`` UIDs, whose flags are all it will ever be asked for."""
+    """A folder of ``count`` UIDs, whose flags are all it will ever be asked for.
 
-    def __init__(self, count):
+    ``exists`` is what SELECT reported and ``all_uids`` what SEARCH answered;
+    a server that is telling the truth returns the same number twice, and
+    ``short`` is the one that does not.
+    """
+
+    def __init__(self, count, short=0):
         self.uids = list(range(1, count + 1))
+        self._exists = count + short
+
+    @property
+    def exists(self):
+        return self._exists
 
     def all_uids(self):
         return self.uids
@@ -447,3 +460,88 @@ def test_every_folder_the_pass_enters_stamps_liveness(monkeypatch):
     spy = _run_pass(monkeypatch, None)
 
     assert len(spy.touched) == 2           # one per folder entered
+
+
+# --- Deleting local mail -----------------------------------------------------
+#
+# Pruning is the only place the agent removes stored mail on its own, and its
+# whole evidence is "the server did not list this UID". The failure that matters
+# is not a connection that drops — the pass dies and nothing is deleted — but
+# one that stays up and answers short: Proton Bridge keeps serving while it
+# cannot reach Proton, and a mailbox it has not finished loading answers SEARCH
+# with a fraction of what it holds.
+
+
+def _prune_spy(monkeypatch):
+    spy = IngestSpy()
+    spy.pruned = []
+    spy.update_flags = lambda *_a: None
+    spy.prune_vanished = lambda _db, _mb, uids: spy.pruned.append(list(uids))
+    monkeypatch.setattr(agent_sync, "ingest", spy)
+    return spy
+
+
+def test_a_server_that_answers_short_never_deletes_anything(monkeypatch, capsys):
+    """SELECT says 500 messages, SEARCH lists 3. Whatever that is, it is not
+    evidence that 497 messages were deleted."""
+    spy = _prune_spy(monkeypatch)
+
+    agent_sync._reconcile(CountingDB(), FlagBridge(3, short=497), Mailbox(), 100,
+                          email="user@example.com")
+
+    assert spy.pruned == []
+    out = capsys.readouterr().out
+    assert "not removing anything" in out
+
+
+def test_a_folder_that_really_is_empty_still_prunes(monkeypatch):
+    """The guard must not become a reason to keep mail the user deleted
+    elsewhere: an empty folder that the server agrees is empty still prunes."""
+    spy = _prune_spy(monkeypatch)
+
+    agent_sync._reconcile(CountingDB(), FlagBridge(0), Mailbox(), 100)
+
+    assert spy.pruned == [[]]
+
+
+def test_a_complete_answer_prunes_as_before(monkeypatch):
+    spy = _prune_spy(monkeypatch)
+
+    agent_sync._reconcile(CountingDB(), FlagBridge(4), Mailbox(), 100)
+
+    assert spy.pruned == [[1, 2, 3, 4]]
+
+
+def test_mail_arriving_mid_sweep_does_not_block_the_prune(monkeypatch):
+    """SEARCH may legitimately return more than SELECT counted, if mail lands
+    between the two commands. Only *fewer* is suspect."""
+    spy = _prune_spy(monkeypatch)
+
+    agent_sync._reconcile(CountingDB(), FlagBridge(4, short=-2), Mailbox(), 100)
+
+    assert spy.pruned == [[1, 2, 3, 4]]
+
+
+class SilentBridge(RecheckBridge):
+    """Bridge before it has loaded the account: connected, and listing nothing."""
+
+    def list_folders(self):
+        return []
+
+
+def test_a_server_that_lists_no_folders_removes_no_folders(monkeypatch, capsys):
+    """The worst version of the same mistake: an empty LIST would prune every
+    folder for the account, and with the last placement of each message, the
+    mail itself."""
+    spy = RecheckIngest(None)
+    monkeypatch.setattr(agent_sync, "ingest", spy)
+    monkeypatch.setattr(agent_sync, "Bridge", lambda _a: SilentBridge())
+    monkeypatch.setattr(agent_sync, "SessionLocal", lambda: DB())
+    monkeypatch.setattr(agent_sync, "drain_actions", lambda *_a: (0, 0))
+
+    agent_sync.sync_once(AccountCfg(), Cfg())
+
+    # The pass still calls through — ingest.prune_mailboxes is the one that
+    # refuses an empty set (see core.ingest) — but it says what happened.
+    assert spy.pruned == [set()]
+    assert "listed no folders" in capsys.readouterr().out

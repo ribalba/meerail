@@ -1,0 +1,127 @@
+# Build the three release images and push them to Docker Hub.
+#
+# This is what makes `meerail.sh` possible: an install pulls
+# ribalba/meerail-{server,agent,tika} rather than cloning and building, so
+# whatever lands on main has to become an image without anyone remembering to
+# do it.
+#
+# Runs the test suite first, and only publishes if it passed. That gate is the
+# point of the workflow_call in tests.yml — these images install themselves on
+# other people's machines, and "main is briefly broken" must not become "every
+# new install is broken".
+#
+# Tagging, per push to main:
+#
+#   :<VERSION>            what the VERSION file says — what meerail.sh pins to
+#   :<VERSION>-<sha>      immutable, for pinning to one exact build
+#   :latest               the newest build of the default branch
+#
+# So :<VERSION> moves with main until VERSION is bumped, and a release is
+# nothing more than editing that file: CI republishes under the new number, and
+# every running install notices within a day (app/updates.py compares itself
+# against VERSION on main).
+name: images
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      # Neither ends up in an image, and both change often.
+      - "website/**"
+      - "**/*.md"
+  # For re-publishing without a code change — a failed push, a new architecture.
+  workflow_dispatch:
+
+# A second push while the first is still building would race for the same
+# floating tags. Let the newer one win rather than publishing them out of order.
+concurrency:
+  group: images-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The Docker Hub namespace. One place, so a fork changes it once — the
+  # Makefile's DOCKER_ORG is the same knob for a build by hand.
+  DOCKER_ORG: ribalba
+
+jobs:
+  test:
+    # The same suite tests.yml runs, called rather than copied.
+    uses: ./.github/workflows/tests.yml
+
+  build:
+    needs: test
+    # Forks have no Docker Hub credentials, and a fork's main should not try to
+    # publish to ours. Set DOCKERHUB_* secrets and change this to publish your
+    # own.
+    if: github.repository == 'ribalba/meerail'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    strategy:
+      # One job per image so they build in parallel and a failure names the
+      # image that failed. fail-fast off: a broken Tika build should not stop
+      # the server image from publishing.
+      fail-fast: false
+      matrix:
+        include:
+          - name: server
+            context: .
+            dockerfile: Dockerfile
+          - name: agent
+            context: .
+            dockerfile: agent/Dockerfile
+          - name: tika
+            context: ./tika
+            dockerfile: tika/Dockerfile
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read the version
+        id: version
+        run: |
+          echo "value=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      # arm64 is built under emulation. Every Python dependency ships an
+      # aarch64 wheel and Tika is a JVM image, so nothing here is actually
+      # compiled twice — it is the pip install and the file copies that run
+      # slowly, not a toolchain.
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push ${{ matrix.name }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          # Stamps org.opencontainers.image.version in the image labels with
+          # the same number the tag carries — they are read from one file, so
+          # they cannot drift.
+          build-args: |
+            MEERAIL_VERSION=${{ steps.version.outputs.value }}
+          tags: |
+            ${{ env.DOCKER_ORG }}/meerail-${{ matrix.name }}:${{ steps.version.outputs.value }}
+            ${{ env.DOCKER_ORG }}/meerail-${{ matrix.name }}:${{ steps.version.outputs.value }}-${{ steps.version.outputs.sha }}
+            ${{ env.DOCKER_ORG }}/meerail-${{ matrix.name }}:latest
+          # Per-image cache scope: without it the three builds share one scope
+          # and evict each other's layers on every run.
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+
+      - name: Summary
+        run: |
+          {
+            echo "### meerail-${{ matrix.name }} ${{ steps.version.outputs.value }}"
+            echo
+            echo '```'
+            echo "docker pull ribalba/meerail-${{ matrix.name }}:${{ steps.version.outputs.value }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

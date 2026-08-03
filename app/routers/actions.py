@@ -17,7 +17,7 @@ from core.database import get_db
 from core.events import publish_command
 from ..deps import require_ui_auth
 from .messages import _resolve_mailbox_ids
-from core.mail.store import recompute_counts
+from core.mail.store import is_pending, place_pending, recompute_counts
 from core.models import Account, Mailbox, Message, MessageLocation, PendingAction
 
 router = APIRouter(prefix="/api/messages", tags=["actions"], dependencies=[Depends(require_ui_auth)])
@@ -217,11 +217,17 @@ def mark(message_id: int, seen: bool = True, db: DBSession = Depends(get_db)):
         if loc.seen == seen:
             continue
         loc.seen = seen
+        touched.add(loc.mailbox_id)
+        if is_pending(loc):
+            # Nothing to tell the server: this placement is a move that has not
+            # been applied yet, and there is no UID here that IMAP knows. The
+            # flag rides along anyway — upsert_location inherits local state
+            # onto the real placement when it lands, and queues the catch-up.
+            continue
         mb = db.get(Mailbox, loc.mailbox_id)
         _enqueue(db, msg.account_id, msg.id, "setflags", {
             "folder": mb.imap_name, "uid": loc.imap_uid,
             "add": ["\\Seen"] if seen else [], "remove": [] if seen else ["\\Seen"]})
-        touched.add(loc.mailbox_id)
     _recompute(db, touched)
     db.commit()
     events.publish({"type": "flags", "message_id": message_id})
@@ -234,20 +240,63 @@ def flag(message_id: int, flagged: bool = True, db: DBSession = Depends(get_db))
     touched: set[int] = set()
     for loc in msg.locations:
         loc.flagged = flagged
+        touched.add(loc.mailbox_id)
+        if is_pending(loc):
+            continue                      # see mark(), above
         mb = db.get(Mailbox, loc.mailbox_id)
         _enqueue(db, msg.account_id, msg.id, "setflags", {
             "folder": mb.imap_name, "uid": loc.imap_uid,
             "add": ["\\Flagged"] if flagged else [], "remove": [] if flagged else ["\\Flagged"]})
-        touched.add(loc.mailbox_id)
     _recompute(db, touched)
     db.commit()
     events.publish({"type": "flags", "message_id": message_id})
     return {"ok": True, "flagged": flagged}
 
 
+def _retarget_pending(db: DBSession, msg: Message, target: Mailbox | None) -> bool:
+    """Re-aim the move that is already queued for this message. True if it worked.
+
+    Reached when the placement being moved is one we wrote ourselves — the
+    message was archived a moment ago and the agent has not applied that move
+    yet, so as far as the server is concerned the message is still in the folder
+    it started in. Queueing a second move *from* the folder it is optimistically
+    sitting in would address it by a UID no server has ever heard of.
+
+    So the queued move is edited instead: same message, new destination. Filing
+    something twice before the connection comes back is one move, to wherever it
+    ended up.
+    """
+    action = db.execute(
+        select(PendingAction).where(
+            PendingAction.message_pk == msg.id,
+            PendingAction.type.in_(("move", "delete")),
+            PendingAction.status == "pending",
+        ).order_by(PendingAction.created_at.desc())
+    ).scalars().first()
+    if action is None:
+        return False
+    payload = dict(action.payload or {})
+    from_folder = payload.get("from_folder") or payload.get("folder")
+    if target is not None:
+        action.type = "move"
+        action.payload = {"from_folder": from_folder, "uid": payload.get("uid"),
+                          "to_folder": target.imap_name}
+    else:
+        action.type = "delete"
+        action.payload = {"folder": from_folder, "uid": payload.get("uid")}
+    return True
+
+
 def _move_to(db: DBSession, msg: Message, source_mailbox_id: int, target: Mailbox | None,
              touched: set[int] | None = None) -> None:
     """Move exactly one folder placement, preserving the message's other labels.
+
+    The target placement is written straight away rather than waited for. The
+    agent applies the move to IMAP and the next pass ingests the server's copy,
+    which can be a poll interval away with a connection and days away without
+    one; until then the message would be in no folder at all — gone from the
+    list it was archived out of and not yet in the one it was archived into.
+    See core.mail.store.place_pending.
 
     Pass `touched` to collect the affected mailboxes instead of recounting them
     here: bulk callers move thousands of placements out of the same few folders,
@@ -259,17 +308,31 @@ def _move_to(db: DBSession, msg: Message, source_mailbox_id: int, target: Mailbo
     source = db.get(Mailbox, loc.mailbox_id)
     if target is not None and source.id == target.id:
         return
-    if target is not None:
+
+    if is_pending(loc):
+        if not _retarget_pending(db, msg, target):
+            # The agent has just applied the first move and the sync has not yet
+            # brought the real placement back — a window of seconds, in which
+            # there is no UID to address the message by. Refusing is the honest
+            # answer: pressing the key again once the folder settles works.
+            raise HTTPException(status_code=409,
+                                detail="This message is still being moved — try again in a moment")
+    elif target is not None:
         _enqueue(db, msg.account_id, msg.id, "move",
                  {"from_folder": source.imap_name, "uid": loc.imap_uid, "to_folder": target.imap_name})
     else:
         _enqueue(db, msg.account_id, msg.id, "delete",
                  {"folder": source.imap_name, "uid": loc.imap_uid})
+
+    if target is not None:
+        place_pending(db, msg, target.id, loc)
     db.delete(loc)
     if touched is None:
-        _recompute(db, {source.id})
+        _recompute(db, {source.id} | ({target.id} if target is not None else set()))
     else:
         touched.add(source.id)
+        if target is not None:
+            touched.add(target.id)
 
 
 def _role_mailbox(db: DBSession, account_id: int, role: str) -> Mailbox | None:

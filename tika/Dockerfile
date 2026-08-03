@@ -21,4 +21,16 @@ RUN base=https://repo1.maven.org/maven2/com/github/jai-imageio \
  && curl -fsSLO "$base/jai-imageio-jpeg2000/${JAI_VERSION}/jai-imageio-jpeg2000-${JAI_VERSION}.jar"
 
 FROM apache/tika:latest-full
+
+# Versioned and pushed alongside the other two images so that one `meerail.sh`
+# install pulls a set that was built and tested together — this image carries no
+# meerail code of its own, but it is part of the release.
+ARG MEERAIL_VERSION=dev
+LABEL org.opencontainers.image.title="meerail-tika" \
+      org.opencontainers.image.description="Apache Tika (full, with OCR) plus the JPEG2000 ImageIO jars meerail needs" \
+      org.opencontainers.image.version="${MEERAIL_VERSION}" \
+      org.opencontainers.image.source="https://github.com/ribalba/meerail" \
+      org.opencontainers.image.url="https://meerail.eu" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
 COPY --from=jars /tika-extras /tika-extras

@@ -61,12 +61,43 @@ def error(message: str, account: str | None = None) -> None:
 def hint(exc: Exception) -> str:
     """An actionable line for the failures that actually recur in the logs.
 
-    All of these are transient and the retry loop handles them by itself; the
-    point is that the log should say so, rather than leaving you to guess
-    whether `no such user` means your config is wrong. It usually doesn't.
-    """
-    text = str(exc).lower()
+    Two kinds live here. Most are transient — the retry loop handles them by
+    itself, and the point is that the log should say so rather than leaving you
+    to guess whether `no such user` means your config is wrong. It usually
+    doesn't. The rest are config mismatches, which retrying cannot fix and which
+    are worth naming precisely: the security mode is the one people get wrong,
+    because Bridge chooses it per platform and per protocol (macOS answers SMTP
+    with implicit TLS, not STARTTLS) and a mismatch does not say so — it hangs
+    until the timeout, or fails deep inside the TLS handshake.
 
+    The type name is matched alongside the message because smtplib carries the
+    diagnosis in the class rather than the text: SMTPAuthenticationError
+    stringifies to a bare status code and a server blob.
+    """
+    text = f"{type(exc).__name__} {exc}".lower()
+
+    # TLS in the wrong place: a plaintext/STARTTLS client that opened an
+    # implicit-TLS port sees the server's handshake as garbage, and an SSL
+    # client on a plaintext port sees the greeting as a broken record.
+    if ("wrong version number" in text or "record layer failure" in text
+            or "unknown protocol" in text or "packet length too long" in text):
+        return ("The security mode does not match what the server speaks on that "
+                "port. Set imap_security/smtp_security in meerail.toml to match "
+                "Bridge's own settings — on macOS Bridge offers SMTP as \"ssl\", "
+                "not \"starttls\".")
+    if isinstance(exc, TimeoutError) or "timed out" in text or "timeout" in text:
+        return ("Timed out with the connection open. A \"starttls\" client on an "
+                "implicit-TLS port waits for a greeting that never comes, so check "
+                "the port and security mode in meerail.toml against Bridge's "
+                "settings before assuming the server is slow.")
+    if "smtpauthenticationerror" in text:
+        return ("The SMTP server rejected the password. It is the Bridge password "
+                "(Mailbox details), not your Proton password, and it changes when "
+                "the account is re-added.")
+    if "smtpsenderrefused" in text or "smtprecipientsrefused" in text:
+        return ("The server refused the envelope. The From must be an address this "
+                "account may send as — check the addresses under this account in "
+                "meerail.toml and in Bridge.")
     if "no such user" in text:
         return ("Bridge is listening but has not loaded this account yet — it is "
                 "still starting, locked, or the account is signed out in the Bridge UI. "

@@ -350,6 +350,10 @@ App.compose = (function () {
     references = ctx.references || [];
     archivable = !!ctx.archivable;
     updateSendButtons();
+    // A forward opens with the original's attachments already staged (the
+    // server copied them into the outbox). They are ordinary staged files from
+    // here on: removable one by one, and thrown away with the draft.
+    staged = ctx.attachments || [];
     renderAttachments();
     fillFrom(ctx.account_id, ctx.from_address);
     // A reply's From is the alias the original was addressed to — a better
@@ -371,7 +375,14 @@ App.compose = (function () {
     $("#compose-subject").value = ctx.subject || "";
     setHtmlMode(htmlDefault());       // per message, so every draft starts from the setting
     body.setText(withFooter(ctx.body_text, ctx.account_id));
-    show(ctx.title || "New Message");
+    show(ctx.title || "New Message");     // clears the status line, so say this after
+    // An attachment on a message whose content has been pruned is a filename
+    // and nothing else — it cannot go along, and silence would read as if it had.
+    if (ctx.attachments_missing) {
+      const n = ctx.attachments_missing;
+      $("#compose-status").textContent =
+        `${n} attachment${n === 1 ? "" : "s"} could not be forwarded — no longer stored.`;
+    }
     focusBody();
     suggestFrom();          // a forward can open already addressed
   }
@@ -441,6 +452,10 @@ App.compose = (function () {
       // They are no longer part of a draft, even if a follow-up action fails.
       staged = [];
       renderAttachments();
+      // The message is queued, not gone: the agent still has to relay it. The
+      // sidebar's outbox count is the honest version of the "Sent ✓" below, so
+      // read it back now rather than at the next poll.
+      App.status.refresh();
     } catch (e) {
       status.textContent = e.message || "Send failed";
       busy(false);

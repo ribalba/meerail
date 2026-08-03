@@ -66,6 +66,15 @@ contacts_scan_years = 1
 # Per-attachment cap for outgoing (compose) uploads, in bytes.
 max_attachment_bytes = 104857600  # 100 MB
 
+# Once a day, fetch the VERSION file from meerail's default branch and let the
+# UI say so if it is newer than this build (sidebar strip, Settings → About).
+#
+# This is the only outbound request the server ever makes. It sends nothing but
+# the request itself — no identifier, no version, no statistics — so the far end
+# learns that some address asked for a file and nothing else. Set false and it
+# makes no request at all; `meerail.sh update` and the release page still work.
+update_check = true
+
 # Scratch space for outgoing attachment staging; mail bytes live in Postgres.
 # Left unset it is ./data beside this file, and every container overrides it to
 # /data through the environment — so it is usually not worth setting here.

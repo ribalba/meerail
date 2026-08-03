@@ -7,6 +7,7 @@ App.reader = (function () {
   let collapsed = new Set();    // message ids folded shut; everything else is open
   let imagesFor = new Set();    // message ids with remote images loaded
   let plainFor = new Set();     // message ids switched to their plain-text part
+  let allTo = new Set();        // message ids showing their full recipient list
   let keyFocus = false;         // are the arrow keys scrolling this pane?
   // The search that led here, captured when the thread opened. Held rather than
   // read live off the search box so a rerender mid-typing keeps marking the
@@ -425,12 +426,29 @@ App.reader = (function () {
     wrap.className = "thread-msg" + (shut ? " collapsed" : "");
     const av = App.avatarColor(m.from_addr);
     const showImages = imagesFor.has(m.id);
-    const names = (kind) => (m.recipients[kind] || []).map((r) => App.esc(r.name || r.address)).join(", ");
-    const to = names("to");
-    // Cc is part of who was addressed, so it belongs next to To rather than
-    // behind a details toggle — a recipient you cannot see is one you cannot
-    // decide to keep on a reply.
-    const cc = names("cc");
+    // Cc is part of who was addressed, so it sits next to To rather than behind
+    // a details toggle — a recipient you cannot see is one you cannot decide to
+    // keep on a reply. Folded, the pair is one line with whatever fits; opened,
+    // every recipient wraps onto as many lines as it takes, spelled out with
+    // the address, because on a wide mail "who else got this" is exactly the
+    // question a display name on its own cannot answer.
+    const names = (kind, full) => (m.recipients[kind] || [])
+      .map((r) => App.esc(full && r.name && r.address ? `${r.name} <${r.address}>` : (r.name || r.address)))
+      .join(", ");
+    const people = (m.recipients.to || []).length + (m.recipients.cc || []).length;
+    const detail = (full) => {
+      const to = names("to", full);
+      const cc = names("cc", full);
+      return App.esc(m.from_addr) + (to ? " · to " + to : "") + (cc ? " · cc " + cc : "");
+    };
+    // A folded card shows the snippet on this line instead, so there is nothing
+    // to open there.
+    const expandable = !shut && people > 0;
+    const openTo = expandable && allTo.has(m.id);
+    const detailClass = "from-detail" + (shut ? "" : " selectable")
+      + (expandable ? " expandable" : "") + (openTo ? " open" : "");
+    const detailTitle = expandable
+      ? ` title="${openTo ? "Hide the full recipient list" : "Show every recipient"}"` : "";
     // Collapsed, the body's first line is the whole preview. Mail outside the
     // content window has no first line, so it says why instead of nothing.
     const snippet = m.body_text ? m.body_text.slice(0, 140)
@@ -445,8 +463,8 @@ App.reader = (function () {
           <div class="avatar" style="background:${av}">${App.esc(App.initials(m.from_name, m.from_addr))}</div>
           <div class="from-meta">
             <div class="from-name${shut ? "" : " selectable"}">${App.esc(m.from_name || m.from_addr)}</div>
-            <div class="from-detail${shut ? "" : " selectable"}">${shut ? App.esc(snippet)
-              : App.esc(m.from_addr) + (to ? " · to " + to : "") + (cc ? " · cc " + cc : "")}</div>
+            <div class="${detailClass}"${detailTitle}>${
+              shut ? App.esc(snippet) : detail(openTo)}</div>
           </div>
           <div class="msg-date-full${shut ? "" : " selectable"}">${App.esc(App.fmtDateFull(m.date))}</div>
           <span class="msg-chevron">${App.icon("chevron", 16)}</span>
@@ -480,6 +498,32 @@ App.reader = (function () {
       e.preventDefault(); e.stopPropagation(); toggle();
     });
     if (shut) return wrap;
+
+    // The recipient line opens in place rather than through a rerender: a mail
+    // halfway up a long thread must not drag the reading position with it when
+    // you ask who else was on it.
+    const detailEl = wrap.querySelector(".from-detail");
+    if (expandable) {
+      const swap = () => {
+        const full = detailEl.classList.toggle("open");
+        if (full) allTo.add(m.id); else allTo.delete(m.id);
+        detailEl.innerHTML = detail(full);
+        detailEl.title = full ? "Hide the full recipient list" : "Show every recipient";
+        App.highlight.mark(detailEl, marks);
+      };
+      detailEl.setAttribute("role", "button");
+      detailEl.setAttribute("tabindex", "0");
+      detailEl.addEventListener("click", () => {
+        // Selecting an address to copy it out is the other thing this line is
+        // for, and a drag that ends here should not also fold it away.
+        if (window.getSelection().isCollapsed) swap();
+      });
+      detailEl.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        // Enter on the head folds the message — this one is a nested button.
+        e.preventDefault(); e.stopPropagation(); swap();
+      });
+    }
 
     wrap.insertAdjacentHTML("beforeend", msgToolbar(m));
     wrap.querySelector(".msg-toolbar").addEventListener("click", (e) => {
@@ -647,6 +691,7 @@ App.reader = (function () {
     currentThread = data;
     imagesFor = new Set();
     plainFor = new Set();
+    allTo = new Set();
     // Whole conversation open, oldest to newest — folding is something you ask
     // for per message, not a state a thread arrives in.
     collapsed = new Set();

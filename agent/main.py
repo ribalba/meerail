@@ -12,6 +12,7 @@ Run it through ``run.sh`` (which builds the venv) or directly:
   ./main.py --once          # single sync pass over every account, then exit
   ./main.py --test          # check every connection (DB, Tika, IMAP, SMTP) and exit
   ./main.py --config /path/to/config.toml
+  ./main.py --requeue-abandoned   # re-queue work an older agent gave up on
 """
 
 from __future__ import annotations
@@ -46,6 +47,9 @@ def main() -> int:
                         help="check every connection (database, Tika, IMAP, SMTP) and exit")
     parser.add_argument("--backfill-previews", action="store_true",
                         help="render previews for already-stored attachments, then exit")
+    parser.add_argument("--requeue-abandoned", action="store_true",
+                        help="put actions an older agent gave up on (including unsent "
+                             "mail) back in the queue, then exit")
     args = parser.parse_args()
 
     # Must precede the first get_settings() — and so any core.* import that
@@ -76,7 +80,13 @@ def main() -> int:
     import commands
     import log
     from core.database import init_db
+    from core.version import VERSION
     from sync import index_once, run_account_forever, run_indexer_forever, sync_once
+
+    # First line of every run: which build this is. `docker logs` shows nothing
+    # about the image tag it came from, and "which version are you on?" is where
+    # most of the answers start.
+    log.info(f"meerail-agent {VERSION}")
 
     # The agent writes the schema it depends on, so it can run before (or
     # without) the web app ever having started.
@@ -90,6 +100,24 @@ def main() -> int:
     if args.backfill_previews:
         from sync import backfill_previews
         return backfill_previews()
+
+    # Both of these read the queue for work an older agent retired as
+    # permanently failed. Nothing does that any more (agent/actions.py), but the
+    # rows outlive the upgrade, and an unsent message is worth saying out loud
+    # every single run until someone deals with it.
+    import actions
+    from core.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        if args.requeue_abandoned:
+            count = actions.requeue_abandoned(db)
+            log.ok(f"{count} action(s) put back in the queue. Start the agent normally "
+                   "and it will work through them.")
+            return 0
+        actions.report_abandoned(db)
+    finally:
+        db.close()
 
     if args.once:
         failed = 0
