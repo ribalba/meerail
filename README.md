@@ -4,7 +4,7 @@
 
 <h1 align="center">meerail</h1>
 
-<p align="center">The meerkat email program — an email client for power users</p>
+<p align="center">The meerail email program — an email client for power users</p>
 
 ---
 
@@ -117,8 +117,9 @@ bash meerail.sh help        # everything else
 Windows: run it inside WSL2 or Git Bash, with Docker Desktop running.
 
 The running app tells you when a new version is out — a strip in the sidebar, from a
-once-a-day check the server makes against this repository. It sends nothing about you or
-your mail, and `update_check = false` under `[server]` turns the request off entirely.
+once-a-day check the server makes against this repository; the strip links to
+[How to update](#how-to-update). It sends nothing about you or your mail, and
+`update_check = false` under `[server]` turns the request off entirely.
 
 ## Quick start from a clone
 
@@ -267,6 +268,90 @@ The Electron wrapper works here too — `cd electron && npm install && npm start
 `npm run dist` produces an NSIS installer (build it *on* Windows; electron-builder needs
 the native toolchain for that target).
 
+## How to update
+
+The app tells you when a newer version is out — a strip in the sidebar, from a once-a-day
+check the server makes against [`VERSION`](VERSION) on this repository's default branch.
+This is what to do about it. Which of the two paths applies depends on how you installed;
+[Versions and releases](#versions-and-releases) explains what a version *is*.
+
+**Your mail is not at risk either way.** Everything lives in Docker volumes (or your own
+Postgres), not in the images, and the server runs the schema migrations itself on first
+boot. Updating is: pull new images, restart, done. There is no export/import step, and
+downgrading is only safe back to a version whose schema you have not yet migrated past —
+so if you want a way back, snapshot the database first (`docker compose exec db pg_dump …`).
+
+### If you installed with `meerail.sh`
+
+```bash
+bash meerail.sh update      # reads VERSION, pins ~/.meerail/.env to it, pulls, restarts
+bash meerail.sh status      # installed vs. latest, and the containers
+```
+
+`update` also refreshes `~/.meerail/docker-compose.yml` from the release, so a new service
+or a renamed variable comes along with it — this is why you should not update by running
+`docker compose pull` in `~/.meerail` by hand. The script itself is the one thing it does
+not replace; re-download it if a release note says to:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ribalba/meerail/main/meerail.sh -o meerail.sh
+```
+
+Your configuration (`~/.meerail/meerail.toml`) is never touched. New settings take their
+defaults; [Configuration](#configuration) lists them, and `meerail.example.toml` in the
+repository is the annotated reference.
+
+### If you installed from a clone
+
+The images are built from your checkout, so updating is a pull and a rebuild:
+
+```bash
+git pull
+docker compose up -d --build      # rebuild server + tika, restart
+```
+
+Then update the agent to match — it shares the `core` package with the server, and running
+a stale agent against a migrated database is the one combination worth avoiding:
+
+* **native agent** (macOS, Windows, or by choice on Linux): stop it, `cd agent && ./run.sh
+  --once` — `run.sh` reinstalls `requirements.txt` into the venv before it starts — then
+  `./run.sh` to stay live. Under launchd or systemd: `./mac_service.sh restart` (macOS) or
+  `systemctl --user restart meerail-agent` (Linux), after the venv has been refreshed once.
+* **containerised agent** (Linux, `make agent-docker`): `make agent-docker` again rebuilds
+  and restarts it with the rest of the stack.
+
+Check `git log --oneline` for anything that touches `meerail.toml` — if
+`meerail.example.toml` grew a key you care about, copy it across; nothing breaks if you
+don't, since every setting has a default. Migrating from a pre-`meerail.toml` layout is
+[its own section](#upgrading-from-the-two-file-layout).
+
+Then `make agent-test` (or `./run.sh --test`) to confirm database, Tika, IMAP and SMTP all
+still answer, and reload the browser tab — the frontend is served fresh, but a long-open
+tab is still running the old JavaScript.
+
+### Running a specific version, or none
+
+`MEERAIL_VERSION` in `~/.meerail/.env` is what the compose file resolves images against.
+Set it to any published tag to move deliberately rather than to whatever is newest:
+
+```bash
+MEERAIL_VERSION=0.5.0            # a release
+MEERAIL_VERSION=0.5.0-a1b2c3d    # one exact build, immutable
+```
+
+then `docker compose --env-file ~/.meerail/.env -f ~/.meerail/docker-compose.yml up -d`.
+
+To stop being told about updates at all, set `update_check = false` under `[server]` in
+`meerail.toml` and restart — the server then makes no outbound request whatsoever. The
+notice can also just be dismissed in the sidebar, which silences that one version and lets
+the next one speak up.
+
+### Desktop app
+
+The Electron wrapper is a window onto the server, so updating the stack updates what you
+see. The wrapper itself only changes when you rebuild it — `cd electron && npm install &&
+npm run dist` from an updated clone, or reinstall the installer from a newer release.
+
 ## Architecture
 
 ```
@@ -367,7 +452,7 @@ keys unless you specifically want a per-machine override.
 | `contacts_scan_years` | `CONTACTS_SCAN_YEARS` | `1` | How far back to scan addresses for compose autocomplete; `0` is all time. |
 | `max_attachment_bytes` | `MAX_ATTACHMENT_BYTES` | `104857600` | Per-attachment cap for outgoing uploads. |
 | `data_dir` | `DATA_DIR` | `./data` | Scratch space for staging outgoing attachments. Mail bytes live in Postgres. Every container overrides it to `/data`. |
-| `update_check` | `UPDATE_CHECK` | `true` | Once a day, fetch [`VERSION`](VERSION) from this repository's default branch and let the UI say so if it is newer than the running build. The only outbound request the server makes, and it carries nothing but the request — no identifier, no version, no statistics. `false` makes no request at all. See [Versions and releases](#versions-and-releases). |
+| `update_check` | `UPDATE_CHECK` | `true` | Once a day, fetch [`VERSION`](VERSION) from this repository's default branch and let the UI say so if it is newer than the running build. The only outbound request the server makes, and it carries nothing but the request — no identifier, no version, no statistics. `false` makes no request at all. See [How to update](#how-to-update) and [Versions and releases](#versions-and-releases). |
 
 ### `[agent]`
 
@@ -523,6 +608,9 @@ pass against a GreenMail IMAP server — and discards the volume whichever way p
 
 ### Versions and releases
 
+This is what a version *is* and how one gets published; moving an install onto a new one is
+[How to update](#how-to-update).
+
 One number, in one file: [`VERSION`](VERSION) at the repository root. Nothing else declares
 it — `core/version.py` reads that file, the images are tagged with it, their
 `org.opencontainers.image.version` label carries it, `/api/version` reports it, and
@@ -555,49 +643,3 @@ make images-push     # buildx amd64+arm64 and push (needs docker login)
 
 `DOCKER_ORG=you make images-push` publishes to your own namespace instead.
 
-## Status
-
-All six build milestones are complete: **M1** server/infra · **M2** agent + ingest · **M3**
-Apple-Mail read UI · **M4** regex search + analytics · **M5** two-way sync + compose · **M6**
-desktop packaging. Backed by a pytest suite (unit + integration, incl. an end-to-end run against
-a GreenMail IMAP server).
-
-Multiple accounts, a unified inbox, and sending/receiving **file attachments** are all supported.
-
-**Tasks.** Paste a Meerato private URL (`https://host/api/create?token=…`, from Meerato's API
-page) into Settings and an *Add Task* button appears in the reading pane and on every message:
-pick a bucket and a status, and the subject, body and any attachments you tick go across. The
-server proxies the call — Meerato sends no CORS headers, and this keeps the token off the page.
-
-**From follows the recipients.** With more than one address to send as, the composer works out
-which of them you actually write to the people you are addressing from — the mail you have
-already sent them is the evidence — and switches the *From* to it as you add names, saying why
-next to the dropdown. It ranks candidates by how many of the current recipients each address has
-written to, then by how often in the last year, so an account you have since moved off is not
-propped up by its history. Your own choice always wins: touch the dropdown, or open a reply
-(whose *From* is already the alias the original was addressed to), and it stops guessing.
-
-**Send &amp; …** The composer offers two variants next to *Send*. *Send &amp; Archive* appears on a
-reply or forward and files the whole conversation away once the mail is out. *Send &amp; Ticket*
-appears once Meerato is configured: pick a bucket and a date, and the mail lands in Meerato's
-Backlog, moving to *Now* on that day. Both send first — a follow-up that fails is reported
-without the composer pretending the mail did not go.
-
-**HTML messages.** The composer renders markdown as you type without ever removing the
-markers, so the field always shows the exact text that will be sent. The *Send as HTML email*
-button decides what that text travels as: off, the mail is plain text and nothing else, the
-way every mail from here has always gone out; on, the markdown is rendered and the message is
-sent as HTML, so headings, lists, quotes, code and links arrive formatted. The styling is
-inlined, because a mail client is under no obligation to keep a stylesheet. It is a
-per-message choice; Settings only decides which way each new draft opens.
-
-Sending both at once — a `multipart/alternative` carrying the rendering *and* the source, so
-the reader's client can pick — is the textbook answer, and it was the first thing tried here.
-It does not survive delivery: Proton stores one body per message and, handed the pair, keeps
-the plain text and discards the HTML, so the mail arrives as raw markdown. That was measured
-against a correctly formed message — RFC-compliant CRLF endings, plain text first, no stray
-headers on either part — so the price of a formatted message is a real one: a reader who
-cannot render HTML sees the markup. That is what the button is choosing, each time.
-
-Not yet implemented: saving **drafts** (the data model supports it) and CONDSTORE/QRESYNC
-fast-resync (a UID/flag-diff fallback is used).

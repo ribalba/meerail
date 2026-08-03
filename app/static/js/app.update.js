@@ -46,9 +46,11 @@ App.update = (() => {
       return;
     }
 
+    // The link goes to the README's "How to update", not the releases page:
+    // whoever clicks this wants the command for their install, not a changelog.
     box.innerHTML =
-      `<a class="un-text" href="${App.esc(info.releases_url)}" target="_blank" rel="noopener noreferrer"
-          title="meerail ${App.esc(info.latest)} is available — you are running ${App.esc(info.version)}">` +
+      `<a class="un-text" href="${App.esc(info.update_url)}" target="_blank" rel="noopener noreferrer"
+          title="meerail ${App.esc(info.latest)} is available — you are running ${App.esc(info.version)}. How to update.">` +
         `<span class="un-icon">${App.icon("download", 13)}</span>` +
         `<span class="un-label">Update available — ${App.esc(info.latest)}</span>` +
       `</a>` +

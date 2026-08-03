@@ -40,6 +40,7 @@ class Action:
         self.type = type_
         self.payload = payload or {"outbound_id": 1, "mail_from": "me@example.com",
                                    "rcpt_to": ["arne@example.com"]}
+        self.account_id = 1
         self.status = status
         self.attempts = attempts
         self.error = None
@@ -216,6 +217,53 @@ def test_mail_an_older_agent_abandoned_is_found_and_can_be_requeued(capsys):
     assert retired.status == "pending"
     assert retired.attempts == 0
     assert db.outbound.state == "queued"
+
+
+class Client:
+    """An IMAP session that records the commands a move puts to it."""
+
+    def __init__(self):
+        self.calls = []
+
+    def select_folder(self, name):
+        self.calls.append(("select", name))
+
+    def copy(self, uids, to_folder):
+        self.calls.append(("copy", uids, to_folder))
+
+    def delete_messages(self, uids):
+        self.calls.append(("delete", uids))
+
+    def expunge(self):
+        self.calls.append(("expunge",))
+
+
+class RoleDB:
+    """Answers the one lookup a move makes: the role of its source folder."""
+
+    def __init__(self, role):
+        self.role = role
+
+    def scalar(self, _stmt):
+        return self.role
+
+
+@pytest.mark.parametrize("role, filed_by_the_copy", [("all", True), ("custom", False)])
+def test_a_move_out_of_all_mail_stops_at_the_copy(role, filed_by_the_copy):
+    """\\All holds everything the account has, so nothing can be taken out of
+    it: Proton answers the EXPUNGE with "operation not allowed" and the action
+    fails forever over a step that had nothing to do. Archiving from there is
+    the COPY alone. Every other folder still gets the full move."""
+    client = Client()
+    bridge = type("B", (), {"acc": Account(), "ops": lambda _self: client})()
+    action = Action("move", {"uid": 7, "from_folder": "All Mail",
+                             "to_folder": "Archive"})
+
+    agent_actions.apply_action(RoleDB(role), bridge, AccountRow(), action)
+
+    assert ("copy", [7], "Archive") in client.calls
+    assert (("expunge",) in client.calls) is not filed_by_the_copy
+    assert (("delete", [7]) in client.calls) is not filed_by_the_copy
 
 
 @pytest.mark.parametrize("exc, expected", [

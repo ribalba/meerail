@@ -20,7 +20,7 @@ from datetime import timedelta
 from sqlalchemy import select
 
 from core import events
-from core.models import Outbound, PendingAction, utcnow
+from core.models import Mailbox, Outbound, PendingAction, utcnow
 
 import log
 import smtp
@@ -58,6 +58,16 @@ _PER_PASS = 50
 _NAG_AT = 10
 
 
+def _is_all_mail(db, account_id: int, imap_name: str) -> bool:
+    """Is this folder the account's \\All mailbox? Names differ per server
+    ("All Mail", "[Gmail]/All Mail"), so it is the role the sync pass recorded
+    from the SPECIAL-USE flag that decides, not the name."""
+    return db.scalar(
+        select(Mailbox.role).where(Mailbox.account_id == account_id,
+                                   Mailbox.imap_name == imap_name)
+    ) == "all"
+
+
 def apply_action(db, bridge, account, action: PendingAction) -> None:
     t = action.type
     p = action.payload or {}
@@ -76,8 +86,17 @@ def apply_action(db, bridge, account, action: PendingAction) -> None:
     elif t == "move":
         c.select_folder(p["from_folder"])
         c.copy([p["uid"]], p["to_folder"])
-        c.delete_messages([p["uid"]])
-        c.expunge()
+        # \All is not a folder a message can be taken out of. On Proton and
+        # Gmail it is the union of everything the account holds — filing to
+        # Archive or Trash is a label change that the COPY has already made,
+        # and the EXPUNGE that would follow is a step with nothing to do. The
+        # server says so ("EXPUNGE failed: operation not allowed") and the
+        # whole action fails on it, retries, and fails again: 267 archived and
+        # trashed messages piled up in the queue that way, every one of them
+        # already filed on the server.
+        if not _is_all_mail(db, action.account_id, p["from_folder"]):
+            c.delete_messages([p["uid"]])
+            c.expunge()
 
     elif t == "delete":
         c.select_folder(p["folder"])

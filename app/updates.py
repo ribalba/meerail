@@ -40,8 +40,11 @@ log = logging.getLogger(__name__)
 # rate limit worth worrying about, no token, and the response is ~6 bytes.
 LATEST_URL = "https://raw.githubusercontent.com/ribalba/meerail/main/VERSION"
 
-# Where the UI sends someone who wants to know what changed.
-RELEASES_URL = "https://github.com/ribalba/meerail/releases"
+# Where the UI sends someone who has just been told an update exists. Not the
+# releases page: the question that follows the banner is "what do I type", not
+# "what changed", and the answer differs between the meerail.sh install and a
+# clone. The README section covers both, and says what happens to the database.
+UPDATE_URL = "https://github.com/ribalba/meerail#how-to-update"
 
 # A day between checks. Releases are not frequent enough for anything shorter
 # to tell you something new, and this is a call to a third party from every
@@ -125,7 +128,7 @@ async def status() -> dict:
             "latest": None,
             "update_available": False,
             "check_enabled": False,
-            "releases_url": RELEASES_URL,
+            "update_url": UPDATE_URL,
         }
 
     await _refresh_if_stale()
@@ -135,5 +138,5 @@ async def status() -> dict:
         "latest": latest,
         "update_available": bool(latest) and is_outdated(VERSION, str(latest)),
         "check_enabled": True,
-        "releases_url": RELEASES_URL,
+        "update_url": UPDATE_URL,
     }
