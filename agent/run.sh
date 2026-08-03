@@ -3,8 +3,27 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# Python 3.11+ is required. Override the interpreter if `python3` is too old:
+#   PYTHON_INTERPRETER=/usr/bin/python3.13 ./run.sh
+PYTHON_INTERPRETER="${PYTHON_INTERPRETER:-python3}"
+
+if ! command -v "$PYTHON_INTERPRETER" >/dev/null 2>&1; then
+  echo "Error: Python interpreter '$PYTHON_INTERPRETER' was not found." >&2
+  echo "Set PYTHON_INTERPRETER to a Python 3.11+ interpreter, e.g.:" >&2
+  echo "  PYTHON_INTERPRETER=/usr/bin/python3.13 $0 $*" >&2
+  exit 1
+fi
+
+if ! "$PYTHON_INTERPRETER" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
+  version="$("$PYTHON_INTERPRETER" --version 2>&1 || echo "unknown")"
+  echo "Error: Python 3.11 or newer is required, but '$PYTHON_INTERPRETER' is $version." >&2
+  echo "Set PYTHON_INTERPRETER to a Python 3.11+ interpreter, e.g.:" >&2
+  echo "  PYTHON_INTERPRETER=/usr/bin/python3.13 $0 $*" >&2
+  exit 1
+fi
+
 if [ ! -d .venv ]; then
-  python3 -m venv .venv
+  "$PYTHON_INTERPRETER" -m venv .venv
   .venv/bin/pip install --quiet --upgrade pip
 fi
 
