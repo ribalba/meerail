@@ -171,9 +171,22 @@ compose() {
   local profiles
   profiles="$(env_get COMPOSE_PROFILES)"
   if [ -n "$profiles" ]; then
-    docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" --profile "$profiles" "$@"
+    compose_docker --profile "$profiles" "$@"
   else
+    compose_docker "$@"
+  fi
+}
+
+compose_docker() {
+  # --env-file only when there is one to pass. An install always has it; a
+  # checkout driven by `docker compose up` / `make up` does not, and compose
+  # already reads a `.env` sitting beside the compose file without being told.
+  # Naming a file that is not there is a hard error, so this cannot be
+  # unconditional.
+  if [ -f "$ENV_FILE" ]; then
     docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+  else
+    docker compose -f "$COMPOSE_FILE" "$@"
   fi
 }
 
@@ -182,6 +195,42 @@ configured() { [ -f "$COMPOSE_FILE" ] && [ -f "$ENV_FILE" ] && [ -f "$CONFIG_FIL
 require_configured() {
   configured || die "meerail is not set up yet on this machine. Run: bash $0 setup"
 }
+
+# Where the stack being operated on lives, and where files written for it go.
+# The install under ~/.meerail is the normal answer; the block below is the
+# other one.
+STACK_HOME="$MEERAIL_HOME"
+
+require_stack() {
+  # Not everyone got here through `setup`. This script also ships inside the
+  # repository, and running the stack straight out of a checkout — `make up`, or
+  # plain `docker compose up` — is the documented developer path, which leaves
+  # no ~/.meerail at all. For anything that just needs the database up and does
+  # not touch the install's own files, the checkout's compose file will do: it
+  # defines the same `db` service, on the same image, holding the same mail.
+  #
+  # Deliberately not extended to the rest of the commands. `update` rewrites the
+  # compose file and pins a version in .env, `uninstall` removes volumes,
+  # `config` edits credentials — all of them are about an *install*, and pointing
+  # them at somebody's checkout would do something they did not ask for.
+  configured && return 0
+  if [ -f "$SELF_DIR/docker-compose.yml" ]; then
+    COMPOSE_FILE="$SELF_DIR/docker-compose.yml"
+    CONFIG_FILE="$SELF_DIR/meerail.toml"
+    # No ~/.meerail/.env in a checkout. Left empty rather than pointed at
+    # $SELF_DIR/.env, because compose finds that one on its own.
+    ENV_FILE=""
+    STACK_HOME="$SELF_DIR"
+    return 0
+  fi
+  die "meerail is not set up yet on this machine, and there is no docker-compose.yml next to this script. Run: bash $0 setup"
+}
+
+# Postgres credentials, as the compose file will have seen them: the install's
+# .env first, then the environment (which is where a checkout would set them),
+# then the default both files fall back to.
+pg_user() { local v; v="$(env_get POSTGRES_USER)"; printf '%s' "${v:-${POSTGRES_USER:-meerail}}"; }
+pg_db()   { local v; v="$(env_get POSTGRES_DB)";   printf '%s' "${v:-${POSTGRES_DB:-meerail}}"; }
 
 env_get() {  # read one KEY=value back out of .env
   [ -f "$ENV_FILE" ] || return 0
@@ -772,6 +821,142 @@ cmd_requeue() {
   compose run --rm agent --requeue-abandoned
 }
 
+# --- backup and restore -------------------------------------------------------
+#
+# One file, compressed while it is produced rather than afterwards: `pg_dump
+# -Fc` hands every block it reads to zstd before anything reaches a disk, so
+# there is never an uncompressed intermediate to find room for. A backup only
+# ever costs the space of the backup.
+#
+# Why zstd level 19 with `long`, measured on a real 36GB mailbox — a 232MB
+# slice of `messages` + `attachments`, the two tables that are 99% of it,
+# single-threaded as pg_dump compresses (it rejects zstd's `workers`):
+#
+#   gzip -9                102MB     11s
+#   zstd -6  --long         72MB      3s
+#   zstd -12 --long         72MB     14s
+#   zstd -19  (no long)     87MB     86s
+#   zstd -19 --long         64MB    197s
+#   xz -9                   63MB    320s
+#
+# Two things fall out of that. Long-distance matching is free and worth having
+# at any level — mail repeats itself a long way apart (the same attachment on
+# twenty messages, the same quoted thread down a hundred replies), further than
+# the 8MB window level 19 would otherwise use. And level 19 is the only level
+# that then pulls decisively ahead: 11% smaller than 6 or 12, for something like
+# 60x the CPU. That is the trade this defaults to, because a backup is written
+# once and kept; if you would rather have the hour back, set
+#
+#   MEERAIL_BACKUP_COMPRESS=zstd:level=12,long
+#
+# in the environment. Anything pg_dump's -Z accepts works there. Whatever the
+# setting, the archive records what it used and pg_restore just reads it — the
+# choice never has to be repeated at restore time.
+#
+# `--no-owner --no-privileges` so the dump does not carry this cluster's role
+# names into the next one — a restore onto a fresh install, or someone else's,
+# then needs no matching roles to exist.
+
+backup_filename() { printf 'meerail-%s.dump' "$(date +%Y%m%d-%H%M%S)"; }
+
+cmd_backup() {
+  require_stack
+  local target="${1:-}" file
+  if [ -z "$target" ]; then
+    mkdir -p "$STACK_HOME/backups"
+    file="$STACK_HOME/backups/$(backup_filename)"
+  elif [ -d "$target" ]; then
+    file="${target%/}/$(backup_filename)"
+  else
+    mkdir -p "$(dirname "$target")"
+    file="$target"
+  fi
+
+  head1 "Backup"
+  # Only the database has to be up. pg_dump reads a snapshot of its own, so the
+  # server and the agent can go on working straight through it; what you get is
+  # the mailbox exactly as it was the moment the dump began, not a smear of the
+  # minutes it took.
+  compose up -d --wait db >/dev/null
+  info "writing $file"
+  info "The rest of the stack can keep running — this dumps a consistent snapshot."
+  info "A full mailbox takes its time: it is compressing as hard as it can, on purpose."
+
+  # `.part` until it is complete, so an interrupted or failed dump can never be
+  # mistaken for a backup — by you, or by `restore`.
+  if ! compose exec -T db pg_dump -U "$(pg_user)" -d "$(pg_db)" \
+        --format=custom --compress="${MEERAIL_BACKUP_COMPRESS:-zstd:level=19,long}" \
+        --no-owner --no-privileges > "$file.part"; then
+    rm -f "$file.part"
+    die "pg_dump failed — nothing was written."
+  fi
+  mv "$file.part" "$file"
+  ok "$file ($(du -h "$file" | cut -f1))"
+  say ""
+  info "Restore it with: bash $0 restore $file"
+  info "Your configuration is not in there — $CONFIG_FILE is a separate file, and it holds"
+  info "your mail passwords, so copy it somewhere safe yourself."
+}
+
+cmd_restore() {
+  require_stack
+  local file="${1:-}"
+  [ -n "$file" ] || die "usage: $0 restore <file.dump>"
+  [ -f "$file" ] || die "No such file: $file"
+  # Every pg_dump custom archive starts with this. Checking it here means a
+  # wrong path — a .toml, a truncated download, an empty `.part` — is caught
+  # before the database is dropped rather than after.
+  [ "$(head -c 5 "$file")" = "PGDMP" ] \
+    || die "$file is not a pg_dump archive (no PGDMP header). Not dropping the database for it."
+  need_tty
+
+  head1 "Restore"
+  warn "This replaces meerail's database with the contents of"
+  warn "  $file"
+  warn "Every message, account and sync cursor currently in it is dropped."
+  say ""
+  ask_yn "Replace the database?" n || { info "Nothing was changed."; return 0; }
+
+  local user db svc
+  user="$(pg_user)"; db="$(pg_db)"
+
+  # Stop the writers first: the drop below would otherwise evict them
+  # mid-transaction, and the agent would spend the restore reconnecting to a
+  # database that keeps disappearing underneath it.
+  #
+  # One at a time, because compose refuses the whole command over a name it does
+  # not know — and which names exist depends on where the stack came from. A
+  # checkout has no `agent` or `bridge` service (they live in overlay files), and
+  # an install without the proton profile has no `bridge`. Together they would
+  # mean nothing at all gets stopped.
+  for svc in server agent bridge; do
+    compose stop "$svc" >/dev/null 2>&1 || true
+  done
+  compose up -d --wait db >/dev/null
+
+  info "recreating the database"
+  # WITH (FORCE) disconnects whatever is still attached — a psql someone left
+  # open, a container slow to stop, an agent running natively next to Bridge
+  # rather than in compose — instead of failing the drop.
+  compose exec -T db psql -U "$user" -d postgres -q \
+    -c "DROP DATABASE IF EXISTS $db WITH (FORCE)" \
+    -c "CREATE DATABASE $db OWNER $user" \
+    || die "Could not recreate the database."
+
+  info "restoring — expect this to take longer than the backup did, most of it rebuilding indexes"
+  # Reading the archive from stdin rules out `-j`, but that matters less than it
+  # sounds: Postgres 18 builds even the big trigram index with parallel workers
+  # inside the one job.
+  if ! compose exec -T db pg_restore -U "$user" -d "$db" \
+        --no-owner --no-privileges --exit-on-error < "$file"; then
+    die "pg_restore failed. The database now holds however much of the dump loaded before the error — run this again with a good file before starting the stack."
+  fi
+
+  compose up -d
+  ok "Restored — $(web_url)"
+  info "Anything you run outside compose — an agent next to a desktop Bridge — restart it too."
+}
+
 cmd_update() {
   require_configured
   local current latest
@@ -859,6 +1044,9 @@ Everyday:
   ${B}test${R}                  check every connection the agent needs
 
 Occasionally:
+  ${B}backup${R} [path]         dump the whole mailbox to one compressed file
+  ${B}restore${R} <file>        put a backup back, replacing everything
+                        (these two also work in a clone you started yourself)
   ${B}requeue${R}               re-queue anything an older agent gave up on
   ${B}update${R}                pull the newest release and restart
   ${B}config${R}                edit meerail.toml in \$EDITOR
@@ -886,6 +1074,8 @@ main() {
     status|ps)     check_docker; cmd_status ;;
     logs)          check_docker; shift; cmd_logs "${1:-}" ;;
     test|check)    check_docker; cmd_test ;;
+    backup|dump)   check_docker; shift; cmd_backup "${1:-}" ;;
+    restore)       check_docker; shift; cmd_restore "${1:-}" ;;
     requeue)       check_docker; cmd_requeue ;;
     update|upgrade) check_docker; cmd_update ;;
     bridge)        check_docker; shift; cmd_bridge "${1:-init}" ;;

@@ -573,6 +573,119 @@ On Linux the same thing runs containerised with `make agent-docker` / `make agen
 the background under launchd. [`agent/README.md`](agent/README.md) covers the logs, the
 full-recheck path, and start-at-boot setups for all three platforms.
 
+### Importing an mbox
+
+Old mail that is not on a server any more — a Thunderbird folder, a Gmail Takeout export,
+an archive from a mail host you have left — goes in through `tools/import-mbox.sh`:
+
+```bash
+tools/import-mbox.sh ~/Downloads/archive.mbox
+tools/import-mbox.sh archive.mbox --account old@example.com --folder Archive
+```
+
+It creates an account of its own for the file (`<filename>@imported.local` unless you name
+one), stores every message as a placement in one folder, and then runs the same indexing
+pass the agent's indexer thread runs: Tika over the attachments, previews, `search_text`.
+What lands is ordinary mail — threaded, searchable down to the text inside a PDF, with
+attachments you can open. It runs on the host and talks to Postgres and Tika over the
+loopback ports compose publishes, so the stack has to be up; it reuses `agent/.venv`.
+
+| Flag | |
+| --- | --- |
+| `--account EMAIL` | Import into this account, creating it if it does not exist. Default: derived from the filename. |
+| `--folder NAME` | Which folder the mail lands in (default `INBOX`). A name like `Sent` or `Archive` takes that folder's role in the sidebar. |
+| `--keep-unread` | Take read/unread from the mbox `Status` headers. Most exports carry none, so this marks the whole import unread; by default everything is imported as read. |
+| `--no-index` | Import only, leaving attachment text and previews queued for a running agent. |
+| `--config PATH` | Use a config file other than the repository's `meerail.toml`. |
+
+Re-running the same file imports nothing twice: a message already placed in that folder is
+skipped, so an interrupted import continues where it stopped, and an mbox that has grown
+since last time adds only what is new.
+
+Import into an account **no agent syncs** — the default, and the tool refuses anything else
+without `--force`. The agent deletes folders its IMAP server does not list ([What meerail
+deletes, and when](#what-meerail-deletes-and-when)), and an imported folder exists nowhere
+but here, so its next pass would take the imported mail with it.
+
+### Backing up and restoring
+
+Everything meerail knows is in Postgres — the messages, their raw MIME, the attachment
+bytes, the extracted text, the accounts and the per-folder sync cursors. One command puts
+all of it in one file:
+
+```bash
+./meerail.sh backup                      # ~/.meerail/backups/meerail-20260804-120000.dump
+./meerail.sh backup /Volumes/backup      # a directory: same name, your path
+./meerail.sh backup mail.dump            # or name the file yourself
+```
+
+It runs against a live install. `pg_dump` reads a snapshot of its own, so the server keeps
+serving and the agent keeps syncing while it works; what you get is the mailbox as of the
+second the dump started, not a smear of the hour it took.
+
+`backup` and `restore` are the two commands that do not need an install to have been set up
+by `meerail.sh setup`. Run them from a clone whose stack you started yourself — `make up`,
+or plain `docker compose up` — and they fall back to the checkout's own
+`docker-compose.yml`, writing to `backups/` beside it. Nothing else does that: `update`,
+`uninstall` and `config` are about an install and stay that way.
+
+Compression happens **while the dump is produced, not after it** — `pg_dump`'s custom
+format hands each block to zstd as it comes off the socket, so there is never an
+uncompressed copy on disk and a backup costs only the space of the backup. The default is
+zstd level 19 with long-distance matching, which is the smallest thing that is still
+sensible; measured on a 232MB slice of a real 36GB mailbox:
+
+| | size | time |
+| --- | --- | --- |
+| `gzip -9` | 102MB | 11s |
+| `zstd -12 --long` | 72MB | 14s |
+| `zstd -19` (no `--long`) | 87MB | 86s |
+| **`zstd -19 --long`** (default) | **64MB** | 197s |
+| `xz -9` | 63MB | 320s |
+
+Long-distance matching is the interesting half: mail repeats itself a long way apart — one
+attachment on twenty messages, one quoted thread down a hundred replies — and level 19's
+ordinary 8MB window cannot see that far. Level 19 then buys another 11% for roughly sixty
+times the CPU, which is the right way round for something written once and kept for years,
+but not everyone's trade. To take the time back:
+
+```bash
+MEERAIL_BACKUP_COMPRESS=zstd:level=12,long ./meerail.sh backup
+```
+
+Anything `pg_dump -Z` accepts goes there. The archive records what it used, so restoring
+never needs to be told.
+
+Putting one back **replaces the database entirely** — it stops the server and the agent,
+drops the database, recreates it and restores into it:
+
+```bash
+./meerail.sh restore ~/.meerail/backups/meerail-20260804-120000.dump
+```
+
+It asks first, and refuses anything that is not a `pg_dump` archive before it drops
+anything. Expect the restore to take longer than the backup did; most of that is rebuilding
+the trigram search index.
+
+Two things are deliberately *not* in the dump. Your configuration — `~/.meerail/meerail.toml`,
+which holds your Bridge credentials — is a separate file; copy it somewhere safe yourself,
+and keep it as private as it already is. And attachments staged for a message you have
+written but not yet sent live in a Docker volume rather than the database; they survive
+everything except a restore taken before you wrote it, which is the same as never having
+written it.
+
+From a clone there are `make` targets for the same two operations, reading and writing the
+same files as the commands above:
+
+```bash
+make backup                                    # backups/meerail-<timestamp>.dump
+make backup BACKUP_COMPRESS=zstd:level=12,long
+make restore FILE=backups/meerail-20260804-120000.dump
+```
+
+`make restore` stops the containerised server for you, but an agent you run natively is
+yours to stop first.
+
 ## Development
 
 ```bash

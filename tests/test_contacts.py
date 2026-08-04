@@ -55,6 +55,68 @@ def test_autocomplete_matches_name_and_excludes_self(account):
     assert all(c["address"] != email for c in self_hits)
 
 
+def _related(*addresses):
+    p = "&".join(f"address={a}" for a in addresses)
+    code, rows = api("GET", f"/api/contacts/related?{p}")
+    assert code == 200
+    return {c["address"] for c in rows}
+
+
+def test_related_suggests_people_addressed_together(account):
+    """Two mails to the same trio make each member suggest the other two."""
+    email = account["email"]
+    tag = uuid.uuid4().hex[:8]
+    alice, bob, carol, dave = (f"{k}-{tag}@ex.test" for k in ("alice", "bob", "carol", "dave"))
+    for i, uid in enumerate((1, 2)):
+        _ingest(email, uid, _rich(f"<g{i}-{tag}@t>", email, f"{alice}, {bob}", carol, None, T0))
+    # Dave shares exactly one message with Alice, and one that only arrived —
+    # not a habit, and below the weight floor.
+    _ingest(email, 3, _rich(f"<d-{tag}@t>", alice, email, dave, None, T0))
+
+    api("POST", "/api/contacts/refresh")
+    hits = _related(alice)
+    assert {bob, carol} <= hits          # the group Alice is usually written to with
+    assert dave not in hits              # met once, by accident
+    assert alice not in hits             # never suggest who is already there
+
+
+def test_related_counts_mail_that_only_arrived(account):
+    """Received mail is history too: a group that only ever writes to you counts."""
+    email = account["email"]
+    tag = uuid.uuid4().hex[:8]
+    sender, other = f"sender-{tag}@ex.test", f"other-{tag}@ex.test"
+    for i, uid in enumerate((1, 2)):
+        _ingest(email, uid, _rich(f"<in{i}-{tag}@t>", sender, email, other, None, T0))
+
+    api("POST", "/api/contacts/refresh")
+    assert other in _related(sender)
+
+
+def test_related_ignores_broadcasts(account):
+    """A message to a crowd is not a group — it must not pair everyone up."""
+    email = account["email"]
+    tag = uuid.uuid4().hex[:8]
+    crowd = [f"crowd{i}-{tag}@ex.test" for i in range(14)]
+    for i, uid in enumerate((1, 2)):    # twice, so the weight floor is not what filters it
+        _ingest(email, uid, _rich(f"<b{i}-{tag}@t>", email, ", ".join(crowd), None, None, T0))
+
+    api("POST", "/api/contacts/refresh")
+    assert _related(crowd[0]) == set()
+
+
+def test_related_takes_every_recipient_into_account(account):
+    """With two people in the fields, the answer is who fits both."""
+    email = account["email"]
+    tag = uuid.uuid4().hex[:8]
+    alice, bob, carol = (f"{k}-{tag}@ex.test" for k in ("alice", "bob", "carol"))
+    for i, uid in enumerate((1, 2)):
+        _ingest(email, uid, _rich(f"<t{i}-{tag}@t>", email, f"{alice}, {bob}", carol, None, T0))
+
+    api("POST", "/api/contacts/refresh")
+    hits = _related(alice, bob)
+    assert hits == {carol}               # the seeds themselves drop out
+
+
 def test_scan_window_is_configurable(account):
     email = account["email"]
     tag = uuid.uuid4().hex[:8]

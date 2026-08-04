@@ -32,7 +32,7 @@ PLATFORMS  ?= linux/amd64,linux/arm64
 # builds at all. Created on demand by the buildx target below.
 BUILDER    ?= meerail
 
-.PHONY: help up down logs build infra dev venv agent agent-docker agent-test agent-logs agent-service agent-service-status agent-service-stop desktop psql fmt test test-up test-down test-psql screenshots version buildx images images-push
+.PHONY: help up down logs build infra dev venv backup restore agent agent-docker agent-test agent-logs agent-service agent-service-status agent-service-stop desktop psql fmt test test-up test-down test-psql screenshots version buildx images images-push
 
 help:
 	@echo "meerail targets:"
@@ -55,6 +55,8 @@ help:
 	@echo "  make test-up   - bring up the test stack and leave it running"
 	@echo "  make test-down - tear the test stack down, discarding its data"
 	@echo "  make test-psql - psql shell on the test database"
+	@echo "  make backup    - dump the database to one compressed file under backups/"
+	@echo "  make restore FILE=... - put one back, replacing the database"
 	@echo "  make screenshots - reseed the demo mailbox and re-shoot the website images"
 	@echo "  make version     - print the version everything is tagged with"
 	@echo "  make images      - build the three release images for this machine only"
@@ -143,6 +145,62 @@ test: test-up
 	 status=$$?; \
 	 $(TEST_COMPOSE) down -v --remove-orphans; \
 	 exit $$status
+
+# --- backup and restore ------------------------------------------------------
+#
+# The clone's version of `meerail.sh backup` / `meerail.sh restore`; both write
+# and read the same file, so a dump taken by one restores through the other.
+#
+# Compressed on the fly, not afterwards: pg_dump's custom format hands each
+# block to zstd as it comes off the socket, so nothing uncompressed is ever
+# written and the dump costs only the space it finally occupies. Level 19 with
+# long-distance matching, because size was the thing to optimise — on a real
+# mailbox that is ~3.6x smaller than the raw dump and within a percent of
+# `xz -9`. meerail.sh carries the measurements and the reasoning; the short
+# version is that `long` is free at any level and 19 is the level that then
+# actually pays. BACKUP_COMPRESS trades it back for time:
+#
+#   make backup BACKUP_COMPRESS=zstd:level=12,long   # ~11% bigger, far quicker
+#
+# := so both recipe lines below see the same timestamp; a recursive ?= would
+# re-run `date` on every expansion and write to a name it then cannot find.
+BACKUP_DIR      ?= backups
+BACKUP_COMPRESS ?= zstd:level=19,long
+BACKUP_STAMP    := $(shell date +%Y%m%d-%H%M%S)
+BACKUP_FILE     ?= $(BACKUP_DIR)/meerail-$(BACKUP_STAMP).dump
+
+# Needs only `db` up — pg_dump takes its own snapshot, so the server and agent
+# can go on writing while it runs. `.part` until it is whole, so an interrupted
+# dump is never mistaken for a backup.
+backup:
+	@mkdir -p $(dir $(BACKUP_FILE))
+	@$(COMPOSE) up -d --wait db
+	@echo "dumping to $(BACKUP_FILE) — the stack can keep running"
+	@$(COMPOSE) exec -T db pg_dump -U $${POSTGRES_USER:-meerail} -d $${POSTGRES_DB:-meerail} \
+	  --format=custom --compress=$(BACKUP_COMPRESS) --no-owner --no-privileges \
+	  > $(BACKUP_FILE).part || { rm -f $(BACKUP_FILE).part; exit 1; }
+	@mv $(BACKUP_FILE).part $(BACKUP_FILE)
+	@echo "wrote $(BACKUP_FILE) ($$(du -h $(BACKUP_FILE) | cut -f1))"
+
+# Destructive, hence the typed confirmation. Stops the server first; a natively
+# run agent is yours to stop — it will reconnect on its own afterwards, but
+# anything it writes mid-restore is written into a database being replaced.
+restore:
+	@test -n "$(FILE)" || { echo "usage: make restore FILE=$(BACKUP_DIR)/meerail-....dump"; exit 1; }
+	@test -f "$(FILE)" || { echo "no such file: $(FILE)"; exit 1; }
+	@test "$$(head -c 5 $(FILE))" = "PGDMP" || { echo "$(FILE) is not a pg_dump archive"; exit 1; }
+	@printf 'Replace the database with %s? Every message in it now is dropped. [type yes]: ' "$(FILE)"; \
+	 read reply; [ "$$reply" = "yes" ] || { echo "nothing was changed"; exit 1; }
+	@$(COMPOSE) stop server 2>/dev/null || true
+	@$(COMPOSE) up -d --wait db
+	@$(COMPOSE) exec -T db psql -U $${POSTGRES_USER:-meerail} -d postgres -q \
+	  -c "DROP DATABASE IF EXISTS $${POSTGRES_DB:-meerail} WITH (FORCE)" \
+	  -c "CREATE DATABASE $${POSTGRES_DB:-meerail} OWNER $${POSTGRES_USER:-meerail}"
+	@echo "restoring — longer than the backup took, most of it rebuilding indexes"
+	@$(COMPOSE) exec -T db pg_restore -U $${POSTGRES_USER:-meerail} -d $${POSTGRES_DB:-meerail} \
+	  --no-owner --no-privileges --exit-on-error < $(FILE)
+	@$(COMPOSE) up -d
+	@echo "restored"
 
 # --- website screenshots -----------------------------------------------------
 #

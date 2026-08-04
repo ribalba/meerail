@@ -118,6 +118,11 @@ App.api = {
   search(params) { return this.get("/api/search?" + new URLSearchParams(params).toString()); },
   accounts() { return this.get("/api/accounts"); },
   contacts(q) { return this.get("/api/contacts?q=" + encodeURIComponent(q)); },
+  relatedContacts(addresses) {
+    const p = new URLSearchParams();
+    addresses.forEach((a) => p.append("address", a));
+    return this.get("/api/contacts/related?" + p.toString());
+  },
 
   // The stats modal draws every panel from this one payload. tz_offset is sent
   // because hour-of-day and weekday buckets are computed in the database, and

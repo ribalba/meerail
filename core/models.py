@@ -361,6 +361,33 @@ class Contact(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
 
+class ContactPair(Base):
+    """Materialized co-recipient graph: who you address together.
+
+    One row per ordered pair, so a lookup for the addresses already in the
+    composer is a plain index scan on address_a. Rebuilt alongside `contacts`
+    and over the same window, so the two stay consistent — `weight` here and
+    `Contact.count` are only comparable because of that.
+    """
+
+    __tablename__ = "contact_pairs"
+    __table_args__ = (
+        UniqueConstraint("address_a", "address_b", name="uq_contact_pair"),
+        Index("ix_contact_pair_a", "address_a"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    address_a: Mapped[str] = mapped_column(String(320), nullable=False)
+    address_b: Mapped[str] = mapped_column(String(320), nullable=False)
+    # Messages the two appeared on together, and the same counted with mail the
+    # user sent weighted double — deliberately addressing people together is a
+    # stronger signal than having been put on the same thread by someone else.
+    count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    weight: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_seen: Mapped[datetime | None] = mapped_column(DateTime)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+
 class Thread(Base):
     """Denormalized conversation record for fast list rendering + analytics."""
 

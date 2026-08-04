@@ -9,12 +9,16 @@ App.compose = (function () {
   let draftGeneration = 0; // invalidates uploads still running for a discarded draft
   let body = null;         // markdown live-preview editor over #compose-body
   let prefilledFooter = ""; // footer put in the editor on open; alone it is not a draft
+  let footerTail = "";     // text that opened *below* the footer (the quote), if any
   let archivable = false;  // opened off a thread, so "Send & Archive" has something to file
   let fromPinned = false;  // From was decided (by the user, or by a reply) — stop guessing
   let fromDefault = 0;     // identity index the composer opened with
   let suggestSeq = 0;      // drops out-of-order sender-for replies
   let suggestKey = null;   // recipient set the last lookup was made for
   let suggestTimer = null;
+  let relatedSeq = 0;      // same, for the co-recipient suggestions
+  let relatedKey = null;
+  let lastField = "#compose-to";  // recipient field a suggestion would be added to
   let htmlMode = false;    // send a formatted copy alongside the plain text
   const $ = (s) => document.querySelector(s);
   const HTML_KEY = "meerail.compose.html";
@@ -192,6 +196,8 @@ App.compose = (function () {
     // No history means no opinion: fall back to what the composer opened with,
     // so deleting the recipient that caused a switch also undoes the switch.
     $("#compose-from").value = String(hit ? findIdentity(hit.account_id, hit.address) : fromDefault);
+    swapFooter(currentAccountId());       // a guessed From signs with its own footer too
+
     // The note says where this From came from, so it belongs on every one the
     // history chose — including a choice that happens to match the default,
     // and including a switch back off an earlier guess. Falling back to the
@@ -199,9 +205,68 @@ App.compose = (function () {
     setFromNote(hit ? "you usually write to these people from here" : "");
   }
 
-  function queueSuggestFrom() {
+  // --- Who else usually goes on this mail --------------------------------
+  // People are written to in groups, and the groups repeat. Once the composer
+  // knows one member the server can name the others, from who has actually
+  // been addressed alongside them before.
+  //
+  // Offered, never added. A wrong guess here would put a stranger on a mail
+  // silently, so every suggestion costs a click and nothing happens until it
+  // is made — and the row says nothing at all when the history has no opinion.
+
+  function setSuggestions(items) {
+    const host = $("#compose-suggest");
+    $("#compose-suggest-row").hidden = !items.length;
+    host.innerHTML = items.map((c, i) =>
+      `<button type="button" class="compose-suggest-btn" data-i="${i}"
+               title="Add ${App.esc(c.address)}">
+        <span class="cs-plus">+</span>
+        <span class="cs-label">${App.esc(c.name || c.address)}</span>
+      </button>`).join("");
+    host.querySelectorAll(".compose-suggest-btn").forEach((b) =>
+      b.addEventListener("click", () => addRecipient(items[Number(b.dataset.i)])));
+  }
+
+  // Into whichever recipient field was last used, so adding to Cc keeps adding
+  // to Cc — but never into a row that has since been folded away, since that
+  // clears on close and the address would vanish without ever being seen.
+  function addRecipient(contact) {
+    if (!contact) return;
+    let sel = lastField;
+    if (sel !== "#compose-to" && $(`${sel}-row`).hidden) sel = "#compose-to";
+    const input = $(sel);
+    const current = input.value.trim().replace(/,$/, "").trim();
+    input.value = (current ? `${current}, ` : "") + contact.address + ", ";
+    input.focus();
+    // Scripted .value changes fire nothing, and this is a recipient arriving:
+    // the From guess and the next round of suggestions both hang off it.
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  async function suggestRelated() {
+    const addresses = recipientAddresses();
+    const key = addresses.join(",");
+    if (key === relatedKey) return;      // same people — same answer
+    relatedKey = key;
+    if (!addresses.length) return setSuggestions([]);
+
+    const seq = ++relatedSeq;
+    const generation = draftGeneration;
+    let rows = [];
+    try {
+      rows = await App.api.relatedContacts(addresses);
+    } catch (_) {
+      relatedKey = null;                 // let the next keystroke try again
+      return;
+    }
+    // A newer lookup or a different draft won the race.
+    if (seq !== relatedSeq || generation !== draftGeneration) return;
+    setSuggestions(rows);
+  }
+
+  function queueRecipientLookups() {
     clearTimeout(suggestTimer);
-    suggestTimer = setTimeout(suggestFrom, 250);
+    suggestTimer = setTimeout(() => { suggestFrom(); suggestRelated(); }, 250);
   }
 
   // --- Window dragging -------------------------------------------------
@@ -294,10 +359,51 @@ App.compose = (function () {
   // goes above any quoted text, where a signature belongs, with the caret
   // landing on the blank line above it.
   function withFooter(text, accountId) {
+    prefilledFooter = footerFor(accountId);
+    footerTail = text || "";
+    if (!prefilledFooter) return footerTail;
+    return `\n\n${prefilledFooter}${footerTail}`;
+  }
+
+  function footerFor(accountId) {
     const acct = accounts.find((a) => a.id === accountId) || accounts[0];
-    prefilledFooter = ((acct && acct.footer) || "").replace(/\n+$/, "");
-    if (!prefilledFooter) return text || "";
-    return `\n\n${prefilledFooter}${text || ""}`;
+    return ((acct && acct.footer) || "").replace(/\n+$/, "");
+  }
+
+  function currentAccountId() {
+    const from = identities[Number($("#compose-from").value)] || identities[0];
+    return from ? from.account_id : null;
+  }
+
+  // The footer signs the message with the address it goes out from, so changing
+  // From has to change it too — otherwise a mail sent from the work account
+  // arrives carrying the private one's signature.
+  //
+  // Only the footer this composer put there is swapped. Once the user has
+  // edited or deleted it, the text is theirs and rewriting it would throw away
+  // something they typed; in that case the From changes alone. The swap is one
+  // undoable edit, so Ctrl-Z brings the old footer back.
+  function swapFooter(accountId) {
+    const next = footerFor(accountId);
+    if (next === prefilledFooter) return;
+    const text = body.getText();
+    let out;
+    if (prefilledFooter) {
+      const at = text.indexOf(prefilledFooter);
+      if (at < 0) return;                       // not ours any more — leave it be
+      // An account with no footer at all: the blank line that held it goes too,
+      // or the draft keeps a gap where a signature used to be.
+      const before = next ? text.slice(0, at) : text.slice(0, at).replace(/\n{1,2}$/, "");
+      out = before + next + text.slice(at + prefilledFooter.length);
+    } else {
+      // Nothing to replace: put the new footer where a prefilled one would have
+      // gone — above the quote if the draft still opens onto one, else at the
+      // end of what has been written.
+      const at = footerTail && text.endsWith(footerTail) ? text.length - footerTail.length : text.length;
+      out = `${text.slice(0, at).replace(/\n+$/, "")}\n\n${next}${text.slice(at)}`;
+    }
+    prefilledFooter = next;
+    body.replaceText(out);
   }
 
   // --- "Send as HTML email" ---------------------------------------------
@@ -362,6 +468,9 @@ App.compose = (function () {
     fromDefault = Number($("#compose-from").value);
     fromPinned = !!ctx.in_reply_to;
     suggestKey = null;
+    relatedKey = null;
+    lastField = "#compose-to";
+    setSuggestions([]);         // last draft's people are not this one's
     setFromNote("");
     $("#compose-to").value = (ctx.to || []).join(", ");
     // A reply that already carries Cc/Bcc opens with those rows visible —
@@ -374,7 +483,9 @@ App.compose = (function () {
     $("#compose-bcc").value = bcc;
     $("#compose-subject").value = ctx.subject || "";
     setHtmlMode(htmlDefault());       // per message, so every draft starts from the setting
-    body.setText(withFooter(ctx.body_text, ctx.account_id));
+    // The footer follows the From that is actually on screen, which is not
+    // always ctx.account_id — fillFrom falls back when that account is gone.
+    body.setText(withFooter(ctx.body_text, currentAccountId()));
     show(ctx.title || "New Message");     // clears the status line, so say this after
     // An attachment on a message whose content has been pruned is a filename
     // and nothing else — it cannot go along, and silence would read as if it had.
@@ -385,6 +496,7 @@ App.compose = (function () {
     }
     focusBody();
     suggestFrom();          // a forward can open already addressed
+    suggestRelated();       // and a reply-all is a group with a known shape
   }
 
   // A reply is pre-addressed, so the caret belongs in the body; a blank
@@ -553,14 +665,16 @@ App.compose = (function () {
     $("#compose-file").addEventListener("change", (e) => onFiles(e.target.files));
     ["#compose-to", "#compose-cc", "#compose-bcc"].forEach((s) => {
       App.autocomplete.attach($(s));
-      $(s).addEventListener("input", queueSuggestFrom);
+      $(s).addEventListener("input", queueRecipientLookups);
+      $(s).addEventListener("focus", () => { lastField = s; });
     });
     // Hiding a Cc/Bcc row clears it, which changes who the message is going to.
     ["#compose-cc-toggle", "#compose-bcc-toggle"].forEach((s) =>
-      $(s).addEventListener("click", queueSuggestFrom));
+      $(s).addEventListener("click", queueRecipientLookups));
     $("#compose-from").addEventListener("change", () => {
       fromPinned = true;                  // an explicit choice ends the guessing
       setFromNote("");
+      swapFooter(currentAccountId());
     });
     // Deliberately no backdrop click handler: clicking outside the window
     // leaves the composer exactly as it is. Minimizing is the − button's job.

@@ -599,6 +599,19 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
   border: 1px solid var(--border); border-radius: 7px; background: var(--bg); color: var(--text); min-width: 0;
 }
 .compose-row input:focus, #compose-from:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+/* People usually written to alongside the ones already in the fields. Offered,
+   never added: each is one click, and the row disappears once it has nothing
+   left to say. Wraps rather than scrolls — there are at most a handful. */
+.compose-suggest { display: flex; flex-wrap: wrap; gap: .3rem; min-width: 0; }
+.compose-suggest-btn {
+  display: inline-flex; align-items: center; gap: .25rem; max-width: 100%;
+  font: inherit; font-size: .78rem; padding: .2rem .5rem; cursor: pointer;
+  border: 1px dashed var(--border-strong); border-radius: 999px;
+  background: transparent; color: var(--text-muted);
+}
+.compose-suggest-btn:hover { border-style: solid; border-color: var(--accent); color: var(--text); }
+.compose-suggest-btn .cs-plus { color: var(--accent); font-weight: 600; }
+.compose-suggest-btn .cs-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Why the From changed itself. Shrinks before the field it explains does, and
    drops out entirely on a narrow window — it is a footnote, not a control. */
 .compose-note {
@@ -712,7 +725,7 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
 .modal-head h2 { margin: 0; font-size: 1.1rem; }
 .modal-body { padding: 1rem 1.2rem 1.4rem; overflow-y: auto; }
 
-/* Search syntax help. Wider than the settings modal so a filter and the line
+/* Search syntax help. Wider than a plain modal so a filter and the line
    explaining it stay on one row each. */
 #search-help-modal .modal { width: min(580px, 94vw); }
 #search-help-modal h3 { margin: 1.2rem 0 .4rem; font-size: .82rem; text-transform: uppercase;
@@ -725,6 +738,14 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
 .help-table td:first-child { white-space: nowrap; width: 1%; }
 .help-table td:last-child { color: var(--text-muted); }
 .help-table em { color: var(--text-faint); font-style: italic; }
+/* Settings holds the most of any modal — accounts with their footer editors,
+   plus four sections of fields and explanations — so it gets more room than
+   the 480px default, which had the account rows and textareas cramped. */
+#settings-modal .modal { width: min(760px, 94vw); }
+/* The explanations are prose, and prose at 760px is a tiring line length, so
+   they keep a comfortable measure while the controls take the full width. */
+#settings-modal .muted.small { max-width: 62ch; }
+
 .settings-account-list { list-style: none; margin: 0 0 1rem; padding: 0; }
 .settings-account-list li { padding: .55rem .1rem .75rem; border-bottom: 1px solid var(--border); }
 .settings-account-list li:last-child { border-bottom: none; }

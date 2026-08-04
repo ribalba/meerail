@@ -12,7 +12,7 @@ import asyncio
 from core.config import get_settings
 from core.database import SessionLocal
 
-from .contacts import rebuild_contacts
+from .contacts import rebuild_contact_pairs, rebuild_contacts
 
 settings = get_settings()
 
@@ -20,7 +20,11 @@ settings = get_settings()
 def _rebuild_contacts_once() -> int:
     db = SessionLocal()
     try:
-        return rebuild_contacts(db, settings.contacts_scan_years)
+        count = rebuild_contacts(db, settings.contacts_scan_years)
+        # Same window, same pass: the co-recipient ranking divides by the totals
+        # in `contacts`, so the two tables have to describe the same mail.
+        rebuild_contact_pairs(db, settings.contacts_scan_years)
+        return count
     finally:
         db.close()
 

@@ -300,6 +300,7 @@ def replace_content(db: Session, msg: Message, raw: bytes) -> None:
 def ingest_raw(
     db: Session, account: Account, mailbox: Mailbox, uid: int, flags: dict, raw: bytes,
     headers_only: bool = False, size_bytes: int | None = None,
+    parsed: ParsedEmail | None = None,
 ) -> tuple[Message, bool]:
     """Parse + store raw bytes. Returns (message, created_new_content).
 
@@ -313,8 +314,14 @@ def ingest_raw(
     A later full fetch of a message stored that way fills the content in — that
     is what makes widening the window plus a full recheck a way to get old mail
     back, rather than a one-way door.
+
+    ``parsed`` is the result of ``parse_email(raw)`` when the caller already has
+    it. The sync path never does — it hands over bytes straight off the socket —
+    but the mbox importer has to know a message's dedup_key *before* it decides
+    whether to store it at all, and parsing a mailbox twice means decoding every
+    attachment twice. It must be the parse of these exact bytes; nothing checks.
     """
-    parsed = parse_email(raw)
+    parsed = parsed if parsed is not None else parse_email(raw)
     msg = db.execute(
         select(Message).where(
             Message.account_id == account.id, Message.dedup_key == parsed.dedup_key

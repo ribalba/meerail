@@ -229,3 +229,7 @@ data/
 # password, so it must never come back the other way.
 /coolify/meerail.toml
 electron/.DS_Store
+
+# Database dumps written by `make backup` / `meerail.sh backup` — every message
+# you have, in one file.
+/backups/

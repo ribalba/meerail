@@ -585,6 +585,14 @@ App.markdown = (function () {
     return {
       getText: readAll,
       setText,
+      // Rewrite the draft as a single undoable edit. setText() is for opening a
+      // fresh draft and throws the history away with the old text; this is for
+      // changing text the user is already working on, which they must be able
+      // to take back with Ctrl-Z.
+      replaceText(text, caret) {
+        rebuild(text || "", caret >= 0 ? caret : -1);
+        record(true);
+      },
       focus(atEnd) {
         el.focus();
         const last = el.lastElementChild;
