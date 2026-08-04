@@ -565,8 +565,19 @@ class Bridge:
         return self._call("fetch", self._command_limit(), self.client.fetch, uids, what)
 
     def fetch_flags(self, uids: list[int]) -> dict[int, dict]:
-        resp = self._fetch(uids, [b"FLAGS"])
-        return {uid: flags_to_dict(data.get(b"FLAGS", ())) for uid, data in resp.items()}
+        """The reconcile sweep's pass: FLAGS, and the size the server claims.
+
+        RFC822.SIZE rides along because it is the one cheap way to notice that
+        what we stored is not what the server holds — the sweep already walks
+        every UID in the folder, and one more data item on a FETCH that was
+        being sent anyway costs nothing next to the round trip.
+        """
+        resp = self._fetch(uids, [b"FLAGS", b"RFC822.SIZE"])
+        return {
+            uid: {"flags": flags_to_dict(data.get(b"FLAGS", ())),
+                  "size": int(data.get(b"RFC822.SIZE") or 0)}
+            for uid, data in resp.items()
+        }
 
     def fetch_raw(self, uids: list[int]) -> dict[int, dict]:
         resp = self._fetch(uids, [b"FLAGS", b"BODY.PEEK[]"])

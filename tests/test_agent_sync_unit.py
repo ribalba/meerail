@@ -70,6 +70,12 @@ class IngestSpy:
     def touch_agent(self, *_args):
         pass
 
+    def find_short_content(self, *_args):
+        return []
+
+    def restore_content(self, *_args):
+        return True
+
 
 @pytest.fixture
 def no_backoff(monkeypatch):
@@ -227,7 +233,7 @@ def _run_pass(monkeypatch, pending):
     monkeypatch.setattr(agent_sync, "ingest", spy)
     monkeypatch.setattr(agent_sync, "Bridge", lambda _a: RecheckBridge())
     monkeypatch.setattr(agent_sync, "SessionLocal", lambda: DB())
-    monkeypatch.setattr(agent_sync, "drain_actions", lambda *_a: (0, 0))
+    monkeypatch.setattr(agent_sync, "drain_actions", lambda *_a: (0, 0, 0))
     agent_sync.sync_once(AccountCfg(), Cfg())
     return spy
 
@@ -259,7 +265,7 @@ def test_account_batch_size_overrides_the_global(monkeypatch):
     monkeypatch.setattr(agent_sync, "ingest", RecheckIngest(None))
     monkeypatch.setattr(agent_sync, "Bridge", lambda _a: RecheckBridge())
     monkeypatch.setattr(agent_sync, "SessionLocal", lambda: DB())
-    monkeypatch.setattr(agent_sync, "drain_actions", lambda *_a: (0, 0))
+    monkeypatch.setattr(agent_sync, "drain_actions", lambda *_a: (0, 0, 0))
     batches = []
     monkeypatch.setattr(agent_sync, "_sync_new",
                         lambda _db, _b, _a, _mb, batch, *_r: batches.append(batch) or 0)
@@ -278,7 +284,7 @@ def test_batch_size_falls_back_to_the_global(monkeypatch):
     monkeypatch.setattr(agent_sync, "ingest", RecheckIngest(None))
     monkeypatch.setattr(agent_sync, "Bridge", lambda _a: RecheckBridge())
     monkeypatch.setattr(agent_sync, "SessionLocal", lambda: DB())
-    monkeypatch.setattr(agent_sync, "drain_actions", lambda *_a: (0, 0))
+    monkeypatch.setattr(agent_sync, "drain_actions", lambda *_a: (0, 0, 0))
     batches = []
     monkeypatch.setattr(agent_sync, "_sync_new",
                         lambda _db, _b, _a, _mb, batch, *_r: batches.append(batch) or 0)
@@ -372,7 +378,7 @@ class FlagBridge:
         return self.uids
 
     def fetch_flags(self, uids):
-        return {u: {"seen": True} for u in uids}
+        return {u: {"flags": {"seen": True}, "size": 0} for u in uids}
 
 
 class CountingDB(DB):
@@ -522,6 +528,150 @@ def test_mail_arriving_mid_sweep_does_not_block_the_prune(monkeypatch):
     assert spy.pruned == [[1, 2, 3, 4]]
 
 
+# --- content that was stored short -------------------------------------------
+#
+# Content is fetched once and never read again. That is only sound while what
+# the server answered was the whole message — and Proton, asked for a message it
+# has created but not yet linked the attachments to, answers with the body
+# alone. The mail lands looking complete and the attachment is gone from the
+# mailbox for good. The sweep already walks every UID; RFC822.SIZE is what makes
+# it noticeable, and this is the only place the agent goes back for bytes it has
+# already fetched.
+
+
+class ShortBridge:
+    """A folder of three, where UID 2 is held locally at less than its size."""
+
+    def __init__(self, sizes=None):
+        self.sizes = sizes or {1: 100, 2: 745842, 3: 300}
+        self.refetched = []
+
+    exists = 3
+
+    def all_uids(self):
+        return [1, 2, 3]
+
+    def fetch_flags(self, uids):
+        return {u: {"flags": {"seen": True}, "size": self.sizes[u]} for u in uids}
+
+    def fetch_raw(self, uids):
+        self.refetched.append(list(uids))
+        return {u: {"raw": b"the whole message", "flags": {"seen": True}} for u in uids}
+
+
+def _short_spy(monkeypatch, short):
+    spy = IngestSpy()
+    spy.restored = []
+    spy.pruned = []
+    spy.update_flags = lambda *_a: None
+    spy.prune_vanished = lambda _db, _mb, uids: spy.pruned.append(list(uids))
+    spy.find_short_content = lambda _db, _mb, _sizes: list(short)
+    spy.restore_content = lambda _db, _mb, uid, raw: spy.restored.append((uid, raw)) or True
+    monkeypatch.setattr(agent_sync, "ingest", spy)
+    return spy
+
+
+@pytest.fixture(autouse=True)
+def _forget_refetches():
+    """The memo below is module state, and a test that filled it must not decide
+    what the next one sees."""
+    agent_sync._refetched.clear()
+    yield
+    agent_sync._refetched.clear()
+
+
+def test_a_message_stored_short_of_the_servers_size_is_fetched_again(monkeypatch, capsys):
+    spy = _short_spy(monkeypatch, [2])
+    bridge = ShortBridge()
+
+    agent_sync._reconcile(CountingDB(), bridge, Mailbox(), 100, email="user@example.com")
+
+    assert bridge.refetched == [[2]]                    # only the short one
+    assert spy.restored == [(2, b"the whole message")]
+    assert "re-fetched 1 message" in capsys.readouterr().out
+
+
+def test_the_same_short_message_is_not_fetched_again_every_sweep(monkeypatch):
+    """The evidence is the server's own arithmetic, and some servers report a
+    size they never quite hand over. Believing that one every reconcile interval
+    would re-download the mailbox for good."""
+    spy = _short_spy(monkeypatch, [2])
+    bridge = ShortBridge()
+
+    for _ in range(3):
+        agent_sync._reconcile(CountingDB(), bridge, Mailbox(), 100)
+
+    assert bridge.refetched == [[2]]
+    assert len(spy.restored) == 1
+
+
+def test_a_message_that_changes_size_again_is_fetched_again(monkeypatch):
+    """The memo is per size, not per UID: a message that really did change is
+    still a message we do not hold."""
+    _short_spy(monkeypatch, [2])
+    bridge = ShortBridge()
+
+    agent_sync._reconcile(CountingDB(), bridge, Mailbox(), 100)
+    bridge.sizes[2] += 1000
+    agent_sync._reconcile(CountingDB(), bridge, Mailbox(), 100)
+
+    assert bridge.refetched == [[2], [2]]
+
+
+def test_a_folder_the_server_reports_no_sizes_for_is_left_alone(monkeypatch):
+    """A size of zero is a server that did not answer the question, not a
+    message we are missing every byte of."""
+    spy = _short_spy(monkeypatch, [1, 2, 3])
+    spy.find_short_content = lambda _db, _mb, sizes: list(sizes)   # would take anything
+    bridge = ShortBridge(sizes={1: 0, 2: 0, 3: 0})
+
+    agent_sync._reconcile(CountingDB(), bridge, Mailbox(), 100)
+
+    assert bridge.refetched == []
+
+
+def test_a_repair_that_cannot_fetch_does_not_fail_the_sweep(monkeypatch, capsys, no_backoff):
+    """The sweep it rides on is doing the mailbox's real work — pulling flags and
+    finding what vanished. A message that has been short for a week can stay
+    short for another quarter of an hour."""
+    spy = _short_spy(monkeypatch, [2])
+    bridge = ShortBridge()
+    bridge.fetch_raw = lambda _uids: {}          # answers, with nothing in it
+
+    agent_sync._reconcile(CountingDB(), bridge, Mailbox(), 100, email="user@example.com")
+
+    assert spy.restored == []
+    assert spy.pruned == [[1, 2, 3]]             # the sweep ran to the end
+    assert "could not re-fetch" in capsys.readouterr().out
+    # Nothing was remembered, so the next sweep is free to try again.
+    assert agent_sync._refetched == {}
+
+
+def test_a_pass_that_sent_mail_waits_before_reading_the_folders_back(monkeypatch):
+    """The pass that sends is the pass that reads the copy back, seconds later,
+    and Proton has not finished assembling it. Waiting is what keeps the sent
+    mail in the mailbox whole."""
+    order = []
+    monkeypatch.setattr(agent_sync, "ingest", RecheckIngest(None))
+    monkeypatch.setattr(agent_sync, "Bridge", lambda _a: RecheckBridge())
+    monkeypatch.setattr(agent_sync, "SessionLocal", lambda: DB())
+    monkeypatch.setattr(agent_sync.time, "sleep", lambda s: order.append(("slept", s)))
+    monkeypatch.setattr(agent_sync, "_sync_new",
+                        lambda *_a, **_kw: order.append(("walked",)) or 0)
+
+    monkeypatch.setattr(agent_sync, "drain_actions", lambda *_a: (1, 0, 1))
+    agent_sync.sync_once(AccountCfg(), Cfg(), reconcile=False)
+    assert order[0] == ("slept", agent_sync._SEND_SETTLE_SECONDS)
+    assert ("walked",) in order
+
+    # And a pass that only pushed flags pays nothing: the wait is for mail that
+    # has just gone out, not for every sync.
+    order.clear()
+    monkeypatch.setattr(agent_sync, "drain_actions", lambda *_a: (3, 0, 0))
+    agent_sync.sync_once(AccountCfg(), Cfg(), reconcile=False)
+    assert not [o for o in order if o[0] == "slept"]
+
+
 class SilentBridge(RecheckBridge):
     """Bridge before it has loaded the account: connected, and listing nothing."""
 
@@ -537,7 +687,7 @@ def test_a_server_that_lists_no_folders_removes_no_folders(monkeypatch, capsys):
     monkeypatch.setattr(agent_sync, "ingest", spy)
     monkeypatch.setattr(agent_sync, "Bridge", lambda _a: SilentBridge())
     monkeypatch.setattr(agent_sync, "SessionLocal", lambda: DB())
-    monkeypatch.setattr(agent_sync, "drain_actions", lambda *_a: (0, 0))
+    monkeypatch.setattr(agent_sync, "drain_actions", lambda *_a: (0, 0, 0))
 
     agent_sync.sync_once(AccountCfg(), Cfg())
 

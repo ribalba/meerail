@@ -16,7 +16,7 @@ strip_content.
 
 from __future__ import annotations
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
@@ -274,6 +274,27 @@ def _store_content(db: Session, msg: Message, parsed: ParsedEmail, raw: bytes) -
                 thumb_status="pending" if thumbable else "skipped",
             )
         )
+
+
+def replace_content(db: Session, msg: Message, raw: bytes) -> None:
+    """Re-store a message's content from bytes fetched again from the server.
+
+    The ordinary path never does this: content is written once and afterwards
+    only ever pruned. It exists for the copy that was stored complete and was
+    not — a server that answered while it was still assembling the message
+    hands back a body with the attachments missing, and ``ingest_raw`` will not
+    look at those bytes again, because as far as the row is concerned the
+    content was fetched. See the agent's reconcile sweep, which is what notices.
+
+    The headers are left alone: they are what identified, threaded and dated the
+    message, they are the same in the new bytes, and rewriting them would move
+    the message in the list for no reason. Attachment rows go first — the new
+    parse re-creates them, and keeping the old ones would show the message
+    carrying each of its files twice.
+    """
+    db.execute(delete(Attachment).where(Attachment.message_pk == msg.id))
+    db.flush()      # autoflush is off; the DELETE must land before the INSERTs
+    _store_content(db, msg, parse_email(raw), raw)
 
 
 def ingest_raw(

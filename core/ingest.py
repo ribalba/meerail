@@ -29,6 +29,7 @@ from .mail.store import (
     is_pending,
     rebuild_search_text,
     recompute_counts,
+    replace_content,
     strip_content,
 )
 from .models import Account, Attachment, Mailbox, Message, MessageLocation, Setting, utcnow
@@ -322,6 +323,59 @@ def update_flags(db, mailbox: Mailbox, items: list[dict]) -> int:
         events.publish({"type": "flags", "folder": mailbox.imap_name,
                         "updated": updated, "unread": mailbox.unread_count})
     return updated
+
+
+# --- content that is stored, but short ---------------------------------------
+#
+# Content is fetched once and never looked at again: the cursor moves past the
+# UID and the reconcile sweep reads flags. That holds as long as what the server
+# answered was the whole message, and once it was not.
+#
+# Proton creates a message before it links the attachments to it, and /send asks
+# the agent to run immediately so the outbox empties promptly — so the pass that
+# sends your mail can read the copy of it back within the same second and get a
+# body with the attachment missing. It stores as complete, because nothing about
+# those bytes says otherwise, and the attachment is gone from the mailbox for
+# good while sitting in the account the whole time.
+#
+# RFC822.SIZE is the tell, and the sweep is already fetching it. Only *short* is
+# suspect: a server that reports a size a little under what it hands over is
+# doing arithmetic we should not read as damage.
+
+
+def find_short_content(db, mailbox: Mailbox, sizes: dict[int, int]) -> list[int]:
+    """Which of these UIDs hold less content than the server says they should.
+
+    Only messages whose content we believe we hold in full are candidates.
+    Headers-only mail (outside the content window when it was seen) and pruned
+    mail (the window slid past it) are *meant* to be short of the server's size,
+    and re-fetching either would be a way to quietly undo the window.
+    """
+    if not sizes:
+        return []
+    rows = db.execute(
+        select(MessageLocation.imap_uid, Message.size_bytes)
+        .join(Message, Message.id == MessageLocation.message_pk)
+        .where(
+            MessageLocation.mailbox_id == mailbox.id,
+            MessageLocation.imap_uid.in_(list(sizes)),
+            Message.content_status == "full",
+        )
+    ).all()
+    return sorted(uid for uid, stored in rows if sizes.get(uid, 0) > (stored or 0))
+
+
+def restore_content(db, mailbox: Mailbox, uid: int, raw: bytes) -> bool:
+    """Re-store the content of this placement's message. False if it is gone."""
+    msg = db.execute(
+        select(Message)
+        .join(MessageLocation, MessageLocation.message_pk == Message.id)
+        .where(MessageLocation.mailbox_id == mailbox.id, MessageLocation.imap_uid == uid)
+    ).scalars().first()
+    if msg is None:
+        return False
+    replace_content(db, msg, raw)
+    return True
 
 
 def prune_vanished(db, mailbox: Mailbox, present_uids: list[int]) -> int:

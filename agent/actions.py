@@ -251,11 +251,12 @@ def _log_failure(account, action: PendingAction, exc: Exception) -> None:
 def drain_actions(db, bridge, account) -> tuple[int, int]:
     """Apply the queued actions that are due for this account.
 
-    Returns (applied, failed). Failures are counted rather than raised: one
-    wedged action must not stop the rest of the queue, and the retry is a later
-    pass's business. The caller only needs the two numbers for its summary line
-    — every failure has already reported itself in full by the time this
-    returns.
+    Returns (applied, failed, sent). Failures are counted rather than raised:
+    one wedged action must not stop the rest of the queue, and the retry is a
+    later pass's business. The caller only needs the numbers for its summary
+    line — every failure has already reported itself in full by the time this
+    returns — and ``sent``, which says whether mail has just gone out and the
+    server therefore has a copy of it to finish assembling.
     """
     now = utcnow()
     queued = db.execute(
@@ -267,13 +268,16 @@ def drain_actions(db, bridge, account) -> tuple[int, int]:
     actions = [a for a in queued if _due(a, now)][:_PER_PASS]
 
     applied = failed = 0
-    sends = 0
+    sends = 0       # send actions tried
+    sent = 0        # ...and the ones the server took
     for action in actions:
-        sends += action.type == "send"
+        is_send = action.type == "send"
+        sends += is_send
         try:
             apply_action(db, bridge, account, action)
             _settle(db, action, True)
             applied += 1
+            sent += is_send
         except Exception as e:  # noqa: BLE001
             _settle(db, action, False, repr(e))
             failed += 1
@@ -286,7 +290,7 @@ def drain_actions(db, bridge, account) -> tuple[int, int]:
     # a pass that pushed nothing but flags leaves the outbox exactly as it was.
     if sends:
         events.publish({"type": "outbox", "sent": applied, "failed": failed})
-    return applied, failed
+    return applied, failed, sent
 
 
 # --- mail an older agent gave up on ------------------------------------------

@@ -31,6 +31,10 @@ def _chunks(seq, n):
 _FETCH_ROUNDS = 3
 _FETCH_BACKOFF = 2.0
 
+# How long a pass that sent mail waits before reading the folders back. See the
+# call in sync_once for what it is waiting for.
+_SEND_SETTLE_SECONDS = 10.0
+
 
 def _fetch_all(fetch, uids: list[int], what: str, email: str | None = None,
                *, needs_body: bool = True) -> dict[int, dict]:
@@ -266,6 +270,59 @@ def _sync_new(db, bridge: Bridge, account, mailbox, batch: int,
     return stored
 
 
+# A UID we have already re-fetched once for a given server size, per folder.
+#
+# The evidence for re-fetching is "the server says this message is bigger than
+# what we hold", and on a server whose RFC822.SIZE is an estimate rather than a
+# count that can be true of a message we hold perfectly. Without a memo the
+# sweep would then pull those bodies again every reconcile interval, for good —
+# a re-download of the mailbox on a fifteen-minute clock. Trying once per size
+# the server reports keeps the repair and drops the loop: a size that changes
+# again is a message that really did change, and earns another attempt.
+_refetched: dict[tuple[int, int], int] = {}
+_REFETCH_MEMO_MAX = 20_000      # a wrong-by-default server must not grow this forever
+
+
+def _repair_short_content(db, bridge: Bridge, mailbox, sizes: dict[int, int],
+                          email: str | None = None) -> int:
+    """Re-fetch messages whose stored content is short of the server's size.
+
+    The one place the agent goes back for bytes it has already fetched. See
+    ``ingest.find_short_content`` for why a stored message can be short in the
+    first place — in a word, a send that was read back before the server had
+    finished putting the message together.
+    """
+    sizes = {uid: size for uid, size in sizes.items() if size}
+    short = [uid for uid in ingest.find_short_content(db, mailbox, sizes)
+             if _refetched.get((mailbox.id, uid)) != sizes[uid]]
+    if not short:
+        return 0
+
+    if len(_refetched) > _REFETCH_MEMO_MAX:
+        _refetched.clear()
+
+    try:
+        fetched = _fetch_all(bridge.fetch_raw, short, "content refetch", email)
+    except Exception as e:  # noqa: BLE001
+        # Not a reason to fail the pass. This rides on the flag sweep, which is
+        # doing the mailbox's actual work, and the short copy has been sitting
+        # there long enough already — the next sweep can try again, which is why
+        # nothing is written to the memo on the way out.
+        log.warn(f"could not re-fetch {len(short)} short message(s) in "
+                 f"{mailbox.imap_name}: {e!r}", email)
+        return 0
+
+    repaired = 0
+    for uid, r in fetched.items():
+        _refetched[(mailbox.id, uid)] = sizes[uid]
+        if r["raw"] and ingest.restore_content(db, mailbox, uid, r["raw"]):
+            repaired += 1
+    if repaired:
+        log.info(f"re-fetched {repaired} message(s) in {mailbox.imap_name} that were "
+                 f"stored short of the size the server reports", email)
+    return repaired
+
+
 def _reconcile(db, bridge: Bridge, mailbox, batch: int,
                beat: "Heartbeat | None" = None, email: str | None = None) -> None:
     """Push flag changes for known UIDs and prune the ones that vanished.
@@ -278,8 +335,11 @@ def _reconcile(db, bridge: Bridge, mailbox, batch: int,
     """
     uids = bridge.all_uids()
     for chunk in _chunks(uids, batch):
-        flags = bridge.fetch_flags(chunk)
-        ingest.update_flags(db, mailbox, [{"uid": u, "flags": f} for u, f in flags.items()])
+        rows = bridge.fetch_flags(chunk)
+        ingest.update_flags(db, mailbox,
+                            [{"uid": u, "flags": r["flags"]} for u, r in rows.items()])
+        _repair_short_content(db, bridge, mailbox,
+                              {u: r["size"] for u, r in rows.items()}, email)
         if beat is not None:
             beat.beat()
     if _uid_list_is_trustworthy(bridge, uids, mailbox, email):
@@ -570,11 +630,27 @@ def sync_once(account: AccountConfig, cfg: Settings, reconcile: bool = True) -> 
         # Anything that failed has already logged why; the counts here only make
         # sure the summary never reads as "applied" for a queue that did not
         # fully apply.
-        applied, failed = drain_actions(db, bridge, account_row)
+        applied, failed, sent = drain_actions(db, bridge, account_row)
         if failed:
             log.warn(f"{applied} queued action(s) applied, {failed} failed", account.email)
         elif applied:
             log.info(f"applied {applied} queued action(s)", account.email)
+
+        # Mail has just gone out, and the folder walk below is about to read the
+        # server's copy of it back. /send asks for this pass by name so the
+        # outbox empties promptly, which puts that read within a second of the
+        # SMTP hand-off — and Proton creates a message before it links the
+        # attachments to it. Read that early and what lands is your own mail
+        # with the attachment missing, stored as complete because nothing in
+        # those bytes says otherwise.
+        #
+        # So let it settle. The cost is a few seconds on the passes that sent
+        # something, and only on those; the send itself has already happened,
+        # and mail arriving in the meantime is picked up by the same walk.
+        # _repair_short_content is the backstop for when this is not long
+        # enough — this wait is what keeps that from being needed.
+        if sent:
+            time.sleep(_SEND_SETTLE_SECONDS)
 
         # Recomputed per pass, not per process: the window slides, and an agent
         # that has been up for weeks would otherwise still be fetching against

@@ -200,6 +200,85 @@ def test_the_window_the_agent_applies_reaches_the_reader(account):
     assert full["content_window_months"] == 0
 
 
+# --- Content stored short of what the server holds --------------------------
+#
+# The third way a stored message can hold less than the server does, and the
+# only one that is a mistake: the server answered while it was still putting the
+# message together. Proton creates a message before it links the attachments to
+# it, and /send asks the agent to sync immediately, so the pass that sends your
+# mail can read it back within the second and store a body with the attachment
+# missing — as content_status='full', because nothing in those bytes says
+# otherwise, after which nothing ever looks at them again.
+#
+# The reconcile sweep's RFC822.SIZE is what notices. The other two ways of being
+# short are deliberate and must survive it: the window is not allowed to be
+# undone by the repair for it.
+
+
+def _short_and_full(email: str, subject: str) -> tuple[bytes, bytes]:
+    """The same message as the server first answered it, and as it really is."""
+    mid = f"<short-{uuid.uuid4().hex}@t>"
+    body = "the paper is attached"
+    return (make_message(mid, subject, "sender@y.com", email, body, T0),
+            make_message(mid, subject, "sender@y.com", email, body, T0,
+                         text_attachment="notes"))
+
+
+def test_a_message_stored_short_is_found_and_re_fetched(account):
+    email, aid = account["email"], account["id"]
+    short, full = _short_and_full(email, "Sent in a hurry")
+    dbfixture.ingest_raw_message(email, short, uid=20)
+
+    _, before = _detail(aid, "Sent in a hurry")
+    assert before["attachments"] == []          # the failure, as the reader sees it
+
+    assert dbfixture.short_content_uids(email, "INBOX", {20: len(full)}) == [20]
+    assert dbfixture.restore_message_content(email, "INBOX", 20, full) is True
+
+    _, after = _detail(aid, "Sent in a hurry")
+    assert [a["filename"] for a in after["attachments"]] == ["notes.txt"]
+    assert after["attachments"][0]["stored"] is True
+    assert after["content_status"] == "full"
+    assert "the paper is attached" in after["body_text"]
+    # One message, in place — a repair, not a second copy of the mail.
+    assert after["id"] == before["id"]
+    assert dbfixture.message_count(email) == 1
+    # And nothing is short any more, so the sweep has no reason to come back.
+    assert dbfixture.short_content_uids(email, "INBOX", {20: len(full)}) == []
+
+
+def test_re_fetching_twice_does_not_double_the_attachments(account):
+    """Whatever else a repair does, it must not leave the message carrying each
+    of its files twice."""
+    email, aid = account["email"], account["id"]
+    short, full = _short_and_full(email, "Fetched twice")
+    dbfixture.ingest_raw_message(email, short, uid=21)
+
+    dbfixture.restore_message_content(email, "INBOX", 21, full)
+    dbfixture.restore_message_content(email, "INBOX", 21, full)
+
+    _, detail = _detail(aid, "Fetched twice")
+    assert [a["filename"] for a in detail["attachments"]] == ["notes.txt"]
+
+
+def test_mail_that_is_meant_to_be_short_is_left_alone(account):
+    """Headers-only and pruned mail is short of the server's size by design.
+    Re-fetching either would be a way to quietly undo the content window."""
+    email = account["email"]
+    outside = make_message(f"<{uuid.uuid4().hex}@t>", "Outside the window",
+                           "sender@y.com", email, "body", T0, text_attachment="notes")
+    aged = make_message(f"<{uuid.uuid4().hex}@t>", "Aged out too", "sender@y.com",
+                        email, "body", ANCIENT, text_attachment="notes")
+    dbfixture.ingest_header_block(email, header_block(outside), uid=22,
+                                  size_bytes=len(outside))
+    dbfixture.ingest_raw_message(email, aged, uid=23)
+    assert dbfixture.prune_content(ANCIENT_CUTOFF) == 1
+
+    # Even told they are far bigger on the server than what we hold.
+    assert dbfixture.short_content_uids(
+        email, "INBOX", {22: len(outside) * 2, 23: len(aged) * 2}) == []
+
+
 # --- The agent's side of the decision ---------------------------------------
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "agent"))

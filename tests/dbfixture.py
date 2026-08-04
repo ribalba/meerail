@@ -120,6 +120,24 @@ def record_placement(email: str, message_id: str, uid: int, folder: str,
         return matched
 
 
+def short_content_uids(email: str, folder: str, sizes: dict[int, int]) -> list[int]:
+    """Which stored placements hold less than the server says, as the reconcile
+    sweep asks it."""
+    with session() as db:
+        account = ingest.get_or_create_account(db, email)
+        mailbox = _mailbox(db, account, folder)
+        return ingest.find_short_content(db, mailbox, sizes)
+
+
+def restore_message_content(email: str, folder: str, uid: int, raw: bytes) -> bool:
+    """Re-store a message's content from freshly fetched bytes, as the sweep does
+    once it has found one short."""
+    with session() as db:
+        account = ingest.get_or_create_account(db, email)
+        mailbox = _mailbox(db, account, folder)
+        return ingest.restore_content(db, mailbox, uid, raw)
+
+
 def set_flags(email: str, folder: str, items: list[dict]) -> int:
     with session() as db:
         account = ingest.get_or_create_account(db, email)

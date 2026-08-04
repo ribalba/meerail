@@ -272,7 +272,9 @@ def send(req: SendRequest, db: DBSession = Depends(get_db)):
     events.publish({"type": "outbox", "queued": 1})
     # And ask the agent to drain now rather than at the end of its poll
     # interval: a message that sends in a second should not sit visibly in the
-    # outbox for thirty.
+    # outbox for thirty. The pass this asks for sends the mail and then reads
+    # the server's copy of it back, which is closer together than a server
+    # necessarily likes — see _SEND_SETTLE_SECONDS in the agent's sync.
     publish_command({"type": "refresh", "email": account.email})
 
     return {"id": outbound.id, "state": outbound.state}

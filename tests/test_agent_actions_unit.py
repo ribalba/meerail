@@ -108,9 +108,9 @@ def test_failed_send_is_logged_with_the_endpoint_it_tried(failing_send, capsys):
     action = Action()
     db = DB([action])
 
-    applied, failed = agent_actions.drain_actions(db, Bridge(), AccountRow())
+    applied, failed, sent = agent_actions.drain_actions(db, Bridge(), AccountRow())
 
-    assert (applied, failed) == (0, 1)
+    assert (applied, failed, sent) == (0, 1, 0)
     out = capsys.readouterr().out
     # Who it was for, where it went, and when it will be tried again.
     assert "arne@example.com" in out
@@ -178,7 +178,7 @@ def test_an_offline_week_does_not_hold_anything_back(failing_send):
         a.updated_at = utcnow() - timedelta(days=4)
     db = DB(actions)
 
-    _applied, failed = agent_actions.drain_actions(db, Bridge(), AccountRow())
+    _applied, failed, _sent = agent_actions.drain_actions(db, Bridge(), AccountRow())
 
     assert failed == 3
     assert all(a.attempts == 5 for a in actions)
@@ -189,9 +189,9 @@ def test_a_healthy_drain_says_nothing_and_counts_the_action(monkeypatch, capsys)
     action = Action()
     db = DB([action])
 
-    applied, failed = agent_actions.drain_actions(db, Bridge(), AccountRow())
+    applied, failed, sent = agent_actions.drain_actions(db, Bridge(), AccountRow())
 
-    assert (applied, failed) == (1, 0)
+    assert (applied, failed, sent) == (1, 0, 1)
     assert capsys.readouterr().out == ""
     assert action.status == "done"
     assert db.outbound.state == "sent"
