@@ -39,8 +39,16 @@ def test_flag_updates_state_and_enqueues(account):
     assert any(a["type"] == "setflags" and "\\Flagged" in a["payload"].get("add", []) for a in acts)
 
 
+def _seed_trash(email):
+    """Give the account a \\Trash to file into, as every real server has."""
+    dbfixture.ingest_raw_message(email, make_message(
+        f"<trash-seed-{uuid.uuid4().hex}@t>", "Seed", "x@y.com", email, "seed", T0),
+        uid=1, folder="Trash", role_hint="\\Trash")
+
+
 def test_trash_removes_from_inbox_and_enqueues(account):
     email, aid = account["email"], account["id"]
+    _seed_trash(email)
     mid, _ = ingest_one(email, aid, "TRASHTOK" + uuid.uuid4().hex[:6])
 
     before = mailbox_total(email)
@@ -52,8 +60,34 @@ def test_trash_removes_from_inbox_and_enqueues(account):
     assert mailbox_total(email) == before - 1  # left the inbox locally
 
     acts = _actions(email)
-    # No Trash folder for this account -> IMAP delete (\Deleted + expunge).
-    assert any(a["type"] in ("move", "delete") for a in acts)
+    # A move into Trash, and nothing that destroys anything: the message is
+    # somewhere the user can get it back from, here and on the server.
+    assert any(a["type"] == "move" and a["payload"]["to_folder"] == "Trash" for a in acts)
+    assert not any(a["type"] == "delete" for a in acts)
+
+
+def test_trash_without_a_trash_folder_refuses_rather_than_deleting(account):
+    """No \\Trash to file into is a broken account, not permission to destroy.
+
+    This used to fall through to \\Deleted + EXPUNGE, which looks identical in
+    the UI — the row leaves the list either way — and is the difference between
+    a message the user can fetch back out of Trash and one nobody can. Any
+    server whose SPECIAL-USE flags meerail could not read (and any account whose
+    Trash had not been synced yet) got the destructive reading.
+    """
+    email, aid = account["email"], account["id"]
+    mid, _ = ingest_one(email, aid, "NOTRASHTOK" + uuid.uuid4().hex[:6])
+
+    before = mailbox_total(email)
+    _, boxes = api("GET", "/api/mailboxes")
+    inbox_id = next(m["id"] for a in boxes["accounts"] for m in a["mailboxes"]
+                    if a["email"] == email and m["role"] == "inbox")
+    code, body = api("POST", f"/api/messages/{mid}/trash?source_mailbox_id={inbox_id}")
+
+    assert code == 400
+    assert "Trash" in body["detail"]
+    assert mailbox_total(email) == before          # still in the inbox
+    assert not _actions(email)                     # and nothing queued at the server
 
 
 def test_archive_thread_clears_every_message_and_every_folder(account):
@@ -158,6 +192,7 @@ def test_bulk_trash_clears_every_selected_row(account):
     the same reason the reader trashes by thread rather than by message.
     """
     email, aid = account["email"], account["id"]
+    _seed_trash(email)
     tok = "BULKTOK" + uuid.uuid4().hex[:6]
     a = f"a-{uuid.uuid4().hex}@t"
     # One standalone message, and one thread of two.
@@ -189,6 +224,7 @@ def test_bulk_trash_clears_every_selected_row(account):
 def test_bulk_trash_skips_rows_that_already_went(account):
     """A row trashed in another window must not fail the rest of the batch."""
     email, aid = account["email"], account["id"]
+    _seed_trash(email)
     tok = "GONETOK" + uuid.uuid4().hex[:6]
     mid, _ = ingest_one(email, aid, tok)
     _, r = api("GET", f"/api/search?q={tok}&account_id={aid}")
@@ -204,6 +240,7 @@ def test_bulk_trash_skips_rows_that_already_went(account):
 def test_bulk_trash_all_empties_the_selected_mailbox(account):
     """The escalated "select all N in this folder" path deletes past the page."""
     email = account["email"]
+    _seed_trash(email)
     tok = "ALLTOK" + uuid.uuid4().hex[:6]
     for uid in range(1, 6):
         dbfixture.ingest_raw_message(email, make_message(
@@ -221,6 +258,29 @@ def test_bulk_trash_all_empties_the_selected_mailbox(account):
     _, rows = api("GET", f"/api/messages?mailbox_id={inbox_id}&limit=50")
     assert rows["rows"] == [] and rows["total"] == 0
     assert mailbox_total(email) == 0
+
+
+def test_emptying_the_trash_is_the_one_route_to_a_permanent_delete(account):
+    """Deleting for good is still reachable — it just has to be asked for.
+
+    Selecting everything in Trash and pressing delete means empty it, and there
+    is nowhere left to move those messages to. That is the only place a `delete`
+    action is queued now; every other route carries a target folder.
+    """
+    email = account["email"]
+    _seed_trash(email)
+    tok = "EMPTYTOK" + uuid.uuid4().hex[:6]
+    dbfixture.ingest_raw_message(email, make_message(
+        f"<e-{uuid.uuid4().hex}@t>", f"Doomed {tok}", "x@y.com", email, f"{tok} body", T0),
+        uid=2, folder="Trash", role_hint="\\Trash")
+
+    _, boxes = api("GET", "/api/mailboxes")
+    trash_id = next(m["id"] for a_ in boxes["accounts"] for m in a_["mailboxes"]
+                    if a_["email"] == email and m["role"] == "trash")
+    code, body = api("POST", "/api/messages/bulk/trash-all", {"mailbox_id": trash_id})
+
+    assert code == 200, body
+    assert any(a["type"] == "delete" for a in _actions(email))
 
 
 def mailbox_total(email):

@@ -120,7 +120,7 @@ def bulk_trash(req: BulkTrashRequest, db: DBSession = Depends(get_db)):
             loose.add(item.message_id)
 
     for account_id, (threads, loose) in by_account.items():
-        target = _role_mailbox(db, account_id, "trash")  # None -> \Deleted + expunge
+        target = _trash_mailbox(db, account_id)
         match = []
         if threads:
             match.append(Message.thread_id.in_(threads))
@@ -181,7 +181,7 @@ def bulk_trash_all(req: BulkTrashAllRequest, db: DBSession = Depends(get_db)):
 
     touched: set[int] = set()
     accounts: set[int] = set()
-    trash_of: dict[int, Mailbox | None] = {}   # account_id -> its Trash, looked up once
+    trash_of: dict[int, Mailbox] = {}   # account_id -> its Trash, looked up once
     moved = 0
     for loc in locs:
         msg = by_id.get(loc.message_pk)
@@ -192,13 +192,18 @@ def bulk_trash_all(req: BulkTrashAllRequest, db: DBSession = Depends(get_db)):
             touched.add(loc.mailbox_id)
             continue
         if msg.account_id not in trash_of:
-            trash_of[msg.account_id] = _role_mailbox(db, msg.account_id, "trash")
-        target = trash_of[msg.account_id]
+            trash_of[msg.account_id] = _trash_mailbox(db, msg.account_id)
+        target: Mailbox | None = trash_of[msg.account_id]
         # Selecting everything in Trash and pressing delete means empty it, not
         # move it to itself — which _move_to would treat as a no-op, leaving the
         # client looping over rows that never go away.
-        if target is not None and loc.mailbox_id == target.id:
-            target = None         # IMAP \Deleted + expunge
+        #
+        # This is the one place a permanent delete is asked for rather than
+        # fallen into: the message is already in Trash and the user is emptying
+        # it. Every other route into _move_to now carries a real target folder
+        # (see _trash_mailbox).
+        if loc.mailbox_id == target.id:
+            target = None         # IMAP \Deleted + UID EXPUNGE
         _move_to(db, msg, loc.mailbox_id, target, touched)
         accounts.add(msg.account_id)
         moved += 1
@@ -354,6 +359,11 @@ def _move_to(db: DBSession, msg: Message, source_mailbox_id: int, target: Mailbo
                      {"from_folder": source.imap_name, "uid": loc.imap_uid,
                       "to_folder": target.imap_name})
         else:
+            # No target folder means delete for good, and the only caller that
+            # asks for that is emptying Trash — see bulk_trash_all. A missing
+            # \Trash used to arrive here too, which made "trash" mean "destroy"
+            # on any server whose flags we could not read; _trash_mailbox now
+            # refuses that case before it gets this far.
             _enqueue(db, msg.account_id, msg.id, "delete",
                      {"folder": source.imap_name, "uid": loc.imap_uid})
 
@@ -374,6 +384,30 @@ def _role_mailbox(db: DBSession, account_id: int, role: str) -> Mailbox | None:
     ).scalars().first()
 
 
+def _trash_mailbox(db: DBSession, account_id: int) -> Mailbox:
+    """Where "trash" files mail. There is no second place to look.
+
+    Unlike _archive_mailbox, a missing \\Trash has no equivalent that still
+    means "put this somewhere I can get it back from": the only other thing the
+    keypress could be turned into is \\Deleted + EXPUNGE, and that is not
+    trashing a message, it is destroying it. Doing that silently — which is what
+    a ``None`` target here used to mean — turns one wrong SPECIAL-USE flag on
+    the server into every trashed message being gone for good, with the UI
+    showing exactly what it shows for a normal trash.
+
+    So it fails instead, and says why. The account is one folder away from
+    working; the mail it would otherwise have eaten is not recoverable at all.
+    """
+    target = _role_mailbox(db, account_id, "trash")
+    if target is None:
+        raise HTTPException(
+            status_code=400,
+            detail="This account has no Trash folder, so there is nowhere to trash to. "
+                   "Create one on the server (or mark an existing folder \\Trash) and "
+                   "sync again.")
+    return target
+
+
 def _archive_mailbox(db: DBSession, account_id: int) -> Mailbox | None:
     """Where "archive" files mail, which is not always an \\Archive folder.
 
@@ -389,7 +423,7 @@ def _archive_mailbox(db: DBSession, account_id: int) -> Mailbox | None:
 @router.post("/{message_id}/trash")
 def trash(message_id: int, source_mailbox_id: int, db: DBSession = Depends(get_db)):
     msg = _get_message(db, message_id)
-    target = _role_mailbox(db, msg.account_id, "trash")  # None -> IMAP \Deleted + expunge
+    target = _trash_mailbox(db, msg.account_id)
     _move_to(db, msg, source_mailbox_id, target)
     db.commit()
     _wake_agent(db, msg)
@@ -509,7 +543,7 @@ def archive_thread(thread_id: str, account_id: int, db: DBSession = Depends(get_
 
 @router.post("/threads/{thread_id:path}/trash")
 def trash_thread(thread_id: str, account_id: int, db: DBSession = Depends(get_db)):
-    target = _role_mailbox(db, account_id, "trash")  # None -> IMAP \Deleted + expunge
+    target = _trash_mailbox(db, account_id)
     return {"ok": True, "moved": _thread_move(db, thread_id, account_id, target)}
 
 

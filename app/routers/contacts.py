@@ -85,4 +85,5 @@ def refresh(years: int | None = None, db: DBSession = Depends(get_db)):
     y = years if years is not None else settings.contacts_scan_years
     count = rebuild_contacts(db, y)
     pairs = rebuild_contact_pairs(db, y)
+    db.commit()          # both tables together — see app.contacts
     return {"count": count, "pairs": pairs, "years": y}

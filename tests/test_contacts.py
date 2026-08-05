@@ -55,6 +55,29 @@ def test_autocomplete_matches_name_and_excludes_self(account):
     assert all(c["address"] != email for c in self_hits)
 
 
+def test_an_alias_of_your_own_is_not_a_contact(account):
+    """One account owns several addresses. All of them are you.
+
+    Only the primary used to be excluded, so mail addressed to an alias put the
+    user in their own address book — offered back to them in the composer — and
+    mail *sent from* one read as mail received, which is a different weight in
+    the co-recipient ranking (see the `sent` half of contact_pairs).
+    """
+    email = account["email"]
+    tag = uuid.uuid4().hex[:8]
+    alias = f"alias-{tag}@ex.test"
+    dbfixture.report_sync(email, addresses=[email, alias])
+    other = f"other-{tag}@ex.test"
+    _ingest(email, 1, _rich(f"<a1-{tag}@t>", f"<{other}>", alias, None, None, T0))
+    _ingest(email, 2, _rich(f"<a2-{tag}@t>", f"<{alias}>", other, None, None, T0))
+
+    api("POST", "/api/contacts/refresh")
+    _, rows = api("GET", f"/api/contacts?q={tag}")
+    addrs = {c["address"] for c in rows}
+    assert other in addrs                # the person written to is a contact
+    assert alias not in addrs            # the address written from is not
+
+
 def _related(*addresses):
     p = "&".join(f"address={a}" for a in addresses)
     code, rows = api("GET", f"/api/contacts/related?{p}")

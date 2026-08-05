@@ -136,8 +136,10 @@ cp meerail.example.toml meerail.toml
 chmod 600 meerail.toml               # it holds your mail password in plaintext
 cp .env.example .env                 # just the Postgres container's credentials
 
-# 2. Start the backing services + web app (Postgres, Tika, server). Postgres and
-#    Tika are published on 127.0.0.1, which is where the agent looks for them.
+# 2. Start the backing services + web app (Postgres, Tika, server). All three are
+#    published on 127.0.0.1, which is where the agent looks for them — and, for
+#    the web app, the only safe default: it is unauthenticated until you set
+#    server.password. See "Reaching it from another machine" below.
 docker compose up -d
 
 # 3. Run the agent next to Proton Bridge — it does the syncing and the parsing,
@@ -380,25 +382,36 @@ too, so the agent stays stateless — stop and restart it anytime.
 ### What is exposed
 
 Every container sits on one Docker network, `meerail`, and addresses the others by service
-name. **Only the server is published on all interfaces**; Postgres and Tika are bound to
-`127.0.0.1` explicitly, so they are reachable from this machine and not from the LAN.
+name. **Nothing is published beyond `127.0.0.1` by default** — the server included, so a
+fresh stack is reachable from this machine and not from the LAN.
 
 | Service | Address on the `meerail` network | Published on the host |
 | --- | --- | --- |
-| `server` | `server:8000` | **`8000`** — browser / Electron |
+| `server` | `server:8000` | `127.0.0.1:8000` — browser / Electron |
 | `db` | `db:5432` | `127.0.0.1:5432` — loopback only |
 | `tika` | `tika:9998` | `127.0.0.1:9998` — loopback only |
 
-Those two loopback bindings are what a **natively-run agent** needs: it is not on the
+The two backing loopback bindings are what a **natively-run agent** needs: it is not on the
 compose network, so `db` and `tika` do not resolve for it. Same for the host-network agent
 container and for `make dev`. Neither service authenticates a caller worth the name (the
 shipped Postgres password is `meerail`; Tika will extract whatever anyone POSTs it), so if
 you edit those port lines, keep the `127.0.0.1:` prefix — without it Docker publishes on
-`0.0.0.0` and punches straight through the host firewall.
+`0.0.0.0` and punches straight through the host firewall, whose rules Docker's own bypass.
 
-Nothing here puts the server behind TLS or asks for a password by default, which is right
-for a localhost app and wrong the moment 8000 is reachable from elsewhere — set
-`SERVER_PASSWORD` and put a TLS terminator in front if you expose it.
+#### Reaching it from another machine
+
+The server is on that list for the same reason, and a stronger one: **the UI has no
+authentication until you give it a password.** With none set, anyone who can open port 8000
+can read every message in the mailbox, search it, and queue deletes that the agent will
+then apply to the real server. So exposing it is two steps, in this order:
+
+1. Set `password` under `[server]` in `meerail.toml` (or `SERVER_PASSWORD` in the
+   environment), and restart the server.
+2. Set `MEERAIL_BIND=0.0.0.0` in `.env` and `docker compose up -d`.
+
+Off a network you trust, put a TLS terminator in front of it as well — the password and the
+session cookie both cross the wire in the clear otherwise. `meerail.sh` asks the same
+question at install time and refuses to widen the binding until a password is set.
 
 If that terminator is Coolify, [`COOLIFY.md`](COOLIFY.md) and
 [`docker-compose.coolify.yml`](docker-compose.coolify.yml) deploy the whole stack —

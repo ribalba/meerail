@@ -24,6 +24,15 @@ def _rebuild_contacts_once() -> int:
         # Same window, same pass: the co-recipient ranking divides by the totals
         # in `contacts`, so the two tables have to describe the same mail.
         rebuild_contact_pairs(db, settings.contacts_scan_years)
+        # One commit for both. Each table is emptied and refilled, so a commit
+        # in between publishes a `contacts` full of new totals beside a
+        # `contact_pairs` that is empty or still describes the last window —
+        # which is what the composer would rank against for however long the
+        # second half takes over a large mailbox. Committing once means readers
+        # see the old pair of tables or the new pair, never one of each; a
+        # failure halfway rolls the whole rebuild back and the next tick redoes
+        # it.
+        db.commit()
         return count
     finally:
         db.close()

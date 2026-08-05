@@ -82,14 +82,35 @@ def _copy_then_remove(c, uid: int, to_folder: str) -> None:
     c.copy([uid], to_folder)
     if not _still_present(c, uid):
         return
+    _remove_message(c, uid)
+
+
+def _remove_message(c, uid: int) -> None:
+    """Take one message out of the selected folder, and only that one.
+
+    A bare EXPUNGE removes every message in the folder carrying \\Deleted, not
+    just this one — including messages another client flagged and has not
+    expunged yet. That is somebody's mail destroyed by a keypress that named a
+    different message, and there is no undo for it. UID EXPUNGE (RFC 4315,
+    advertised as UIDPLUS) is the only form that can be aimed, so where the
+    server does not offer it this refuses rather than guesses.
+
+    Refusing leaves the action queued and retried, which is what this module
+    does with everything it cannot do yet (see _settle): a delete that has not
+    happened can still happen, expunged mail cannot come back. The capability is
+    checked *before* the \\Deleted flag goes on, so a refusal also leaves no
+    message sitting flagged for the next client's EXPUNGE to sweep up.
+
+    Bridge, Gmail, Proton, Dovecot and Cyrus all advertise UIDPLUS; the server
+    this closes the door on is a rare one.
+    """
+    if not c.has_capability("UIDPLUS"):
+        raise RuntimeError(
+            "server does not advertise UIDPLUS, so this message cannot be expunged "
+            "on its own — a folder-wide EXPUNGE would take every other \\Deleted "
+            "message in the folder with it")
     c.delete_messages([uid])
-    # UID EXPUNGE where the server has UIDPLUS: a bare EXPUNGE takes every
-    # message in the folder that carries \Deleted, including ones another
-    # client flagged and has not expunged yet.
-    if c.has_capability("UIDPLUS"):
-        c.expunge([uid])
-    else:
-        c.expunge()
+    c.expunge([uid])
 
 
 def _still_present(c, uid: int) -> bool:
@@ -137,9 +158,11 @@ def apply_action(db, bridge, account, action: PendingAction) -> None:
             _copy_then_remove(c, p["uid"], p["to_folder"])
 
     elif t == "delete":
+        # Deleting for good, which the UI only ever queues for a message the
+        # user emptied out of Trash. Scoped to this UID alone — see
+        # _remove_message for what the unscoped form costs.
         c.select_folder(p["folder"])
-        c.delete_messages([p["uid"]])
-        c.expunge()
+        _remove_message(c, p["uid"])
 
     elif t == "create_folder":
         # Idempotent: a retry after a timeout that actually landed must not fail
@@ -290,6 +313,40 @@ def _log_failure(account, action: PendingAction, exc: Exception) -> None:
                  "above is fixed", email)
 
 
+def _claim(db, actions: list[PendingAction], now) -> list[PendingAction]:
+    """Take these rows for this pass alone, and hand back the ones we got.
+
+    Reading a row and applying it are two steps with an IMAP or SMTP round trip
+    between them, and the row still says "pending" throughout — so two agents
+    over one database (an old process that has not exited, a restart that
+    overlaps itself, a laptop and a server both pointed at the same Postgres)
+    can each read the same send and each hand it to the mail server. The user
+    asked for one mail and two arrive, which no amount of retrying afterwards
+    can take back.
+
+    SELECT ... FOR UPDATE SKIP LOCKED is the claim: the first agent to reach a
+    row holds it until this pass commits, and the second is handed the rows the
+    first did not get rather than blocking behind it. Nothing is marked, so an
+    agent that dies mid-pass releases its rows by disconnecting and the next
+    pass picks them up exactly as it does today — the queue keeps its one rule,
+    that a row leaves it by succeeding and by no other route.
+
+    The status is re-checked under the lock because it may have been settled
+    between the read above and the lock here, and ``_due`` is re-applied for the
+    same reason: this is the one query whose answer is allowed to be trusted.
+    """
+    if not actions:
+        return []
+    locked = db.execute(
+        select(PendingAction)
+        .where(PendingAction.id.in_([a.id for a in actions]),
+               PendingAction.status == "pending")
+        .order_by(PendingAction.created_at)
+        .with_for_update(skip_locked=True)
+    ).scalars().all()
+    return [a for a in locked if _due(a, now)]
+
+
 def drain_actions(db, bridge, account) -> tuple[int, int]:
     """Apply the queued actions that are due for this account.
 
@@ -307,7 +364,7 @@ def drain_actions(db, bridge, account) -> tuple[int, int]:
         .order_by(PendingAction.created_at)
         .limit(_SCAN)
     ).scalars().all()
-    actions = [a for a in queued if _due(a, now)][:_PER_PASS]
+    actions = _claim(db, [a for a in queued if _due(a, now)][:_PER_PASS], now)
 
     applied = failed = 0
     sends = 0       # send actions tried

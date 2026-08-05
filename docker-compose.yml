@@ -124,7 +124,19 @@ services:
     ports:
       # The only published port in the stack. Your browser / Electron talk to
       # this; the agent no longer talks to the server at all.
-      - "8000:8000"
+      #
+      # 127.0.0.1 by default, and load-bearing for the same reason it is on db
+      # and tika above — more so, because this one is the mail. The UI has no
+      # authentication at all until `password` is set under [server] in
+      # meerail.toml, so publishing on 0.0.0.0 hands everyone on the network the
+      # whole mailbox: reading it, searching it, and queueing deletes into it,
+      # through the host firewall that Docker's own rules bypass.
+      #
+      # To reach it from another machine, set MEERAIL_BIND=0.0.0.0 in .env —
+      # after setting server.password, and with something terminating TLS in
+      # front of it off a trusted network. docker-compose.hub.yml, which
+      # meerail.sh drives, spells the same variable the same way.
+      - "${MEERAIL_BIND:-127.0.0.1}:${MEERAIL_PORT:-8000}:8000"
     networks: [meerail]
     # Only what is genuinely container topology. Everything else — secret_key,
     # server.password, the search windows — comes from the mounted meerail.toml.

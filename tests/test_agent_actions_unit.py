@@ -14,6 +14,7 @@ poll is under three minutes of a wrong port or a signed-out Bridge.
 
 import sys
 from datetime import timedelta
+from itertools import count
 from pathlib import Path
 
 import pytest
@@ -36,7 +37,10 @@ class Account:
 class Action:
     """A PendingAction row, without the mapper."""
 
+    _next_id = count(1)
+
     def __init__(self, type_="send", payload=None, attempts=0, status="pending"):
+        self.id = next(Action._next_id)
         self.type = type_
         self.payload = payload or {"outbound_id": 1, "mail_from": "me@example.com",
                                    "rcpt_to": ["arne@example.com"]}
@@ -56,25 +60,33 @@ class Outbound:
 
 
 class DB:
-    """Answers the one query drain_actions makes, and hands back one Outbound.
+    """Answers the two queries drain_actions makes, and hands back one Outbound.
+
+    The first is the queue itself; the second re-reads the due rows under FOR
+    UPDATE SKIP LOCKED to claim them for this pass, and is told apart by the
+    lock clause in the SQL. `claimed` is what that second query comes back with
+    — by default everything, as it does when no other agent is running.
 
     The due-filter is applied in Python by drain_actions, so returning every row
     here is what a real query would do too.
     """
 
-    def __init__(self, actions, outbound=None):
+    def __init__(self, actions, outbound=None, claimed=None):
         self._actions = actions
+        self._claimed = actions if claimed is None else claimed
+        self._rows = actions
         self.outbound = outbound or Outbound()
         self.commits = 0
 
-    def execute(self, _stmt):
+    def execute(self, stmt):
+        self._rows = self._claimed if "FOR UPDATE" in str(stmt) else self._actions
         return self
 
     def scalars(self):
         return self
 
     def all(self):
-        return self._actions
+        return self._rows
 
     def get(self, _model, _pk):
         return self.outbound
@@ -137,6 +149,25 @@ def test_a_send_is_never_given_up_on(failing_send, capsys):
     assert db.outbound.raw_mime                      # the bytes are still there
     out = capsys.readouterr().out
     assert "giving up" not in out
+
+
+def test_an_action_another_agent_is_holding_is_left_alone(failing_send, capsys):
+    """Two agents over one database — an old process that has not exited, a
+    restart that overlaps itself — must not both hand the same message to SMTP.
+
+    The claim is a locked re-read: rows another agent holds come back skipped,
+    and skipped is exactly "not this agent's to send". Without it both passes
+    read the same pending row, both send it, and the user's one mail arrives
+    twice with nothing able to take it back.
+    """
+    action = Action()
+    db = DB([action], claimed=[])          # the other agent got there first
+
+    applied, failed, sent = agent_actions.drain_actions(db, Bridge(), AccountRow())
+
+    assert (applied, failed, sent) == (0, 0, 0)
+    assert action.attempts == 0            # untouched, not failed
+    assert capsys.readouterr().out == ""
 
 
 def test_a_failed_action_waits_before_the_next_attempt(failing_send, capsys):
@@ -344,10 +375,11 @@ def test_a_move_out_of_all_mail_stops_at_the_copy(role, filed_by_the_copy):
     it: Proton answers the EXPUNGE with "operation not allowed" and the action
     fails forever over a step that had nothing to do. Archiving from there is
     the COPY alone. Every other folder still gets the full move."""
-    calls = _move(Client(), role=role, from_folder="All Mail", to_folder="Archive")
+    calls = _move(Client(capabilities=("UIDPLUS",)), role=role,
+                  from_folder="All Mail", to_folder="Archive")
 
     assert ("copy", [7], "Archive") in calls
-    assert (("expunge",) in calls) is not filed_by_the_copy
+    assert (("expunge", [7]) in calls) is not filed_by_the_copy
     assert (("delete", [7]) in calls) is not filed_by_the_copy
 
 
@@ -370,13 +402,45 @@ def test_a_hand_rolled_move_removes_the_source_copy():
                      ("search", ["UID", 7]), ("delete", [7]), ("expunge", [7])]
 
 
-def test_a_hand_rolled_move_expunges_the_whole_folder_only_as_a_last_resort():
-    """A bare EXPUNGE takes every \\Deleted message in the folder with it,
-    including ones another client flagged and has not expunged yet."""
-    calls = _move(Client())
+def test_a_hand_rolled_move_refuses_rather_than_expunge_the_whole_folder():
+    """No UIDPLUS, so the deletion cannot be aimed at this message alone — and a
+    bare EXPUNGE would take every \\Deleted message in the folder with it,
+    including ones another client flagged and has not expunged yet.
 
-    assert ("expunge",) in calls
-    assert ("expunge", [7]) not in calls
+    The action fails, which leaves it queued and retried (see _settle): the move
+    has not happened, and a move that has not happened can still happen. The
+    \\Deleted flag is not set either — a message left flagged is one the next
+    client's EXPUNGE sweeps up, which is the same loss by a slower route.
+    """
+    client = Client()
+
+    with pytest.raises(RuntimeError, match="UIDPLUS"):
+        _move(client)
+
+    assert client.calls == [("select", "INBOX"), ("copy", [7], "Trash"),
+                            ("search", ["UID", 7])]
+
+
+def test_a_delete_takes_out_the_one_message_it_names():
+    client = Client(capabilities=("UIDPLUS",))
+    bridge = type("B", (), {"acc": Account(), "ops": lambda _self: client})()
+    action = Action("delete", {"uid": 7, "folder": "Trash"})
+
+    agent_actions.apply_action(RoleDB("trash"), bridge, AccountRow(), action)
+
+    assert client.calls == [("select", "Trash"), ("delete", [7]), ("expunge", [7])]
+
+
+def test_a_delete_refuses_when_it_cannot_be_aimed():
+    """Emptying the trash of one message must not empty it of another client's."""
+    client = Client()
+    bridge = type("B", (), {"acc": Account(), "ops": lambda _self: client})()
+    action = Action("delete", {"uid": 7, "folder": "Trash"})
+
+    with pytest.raises(RuntimeError, match="UIDPLUS"):
+        agent_actions.apply_action(RoleDB("trash"), bridge, AccountRow(), action)
+
+    assert client.calls == [("select", "Trash")]
 
 
 def test_a_hand_rolled_move_that_the_copy_already_finished_deletes_nothing():
