@@ -569,9 +569,17 @@ server that has been down since Friday.
   when the agent is away — and an **Outbox** folder appears above Favorites while anything
   is in it (`g o` any time). Both turn red once an attempt has actually failed. The folder
   lists each waiting message with who it is for, how many attempts it has cost and what the
-  last one said; opening one shows the full error, when the next attempt is due, and two
-  buttons: **Try now**, which skips the backoff after you have fixed the cause, and
-  **Delete**, the only thing anywhere that takes a message back out of the queue.
+  last one said; opening one shows the full error, when the next attempt is due, and three
+  buttons: **Try now / Send now**, which skips whatever it is waiting on, **Cancel send**,
+  which stops a message going out but leaves it here to send later, and **Delete**, the only
+  thing anywhere that takes a message back out of the queue for good.
+- **You can give yourself time to change your mind.** Settings → Composing → *Wait before
+  sending* holds every message you send in the Outbox for that long before the agent may
+  relay it, counting down on the row (`server.send_delay_seconds` sets the default). Nothing
+  else changes: the message is written, visible and addressed the whole time, and the two
+  buttons above are what you press when you get there first. `0`, the default, sends at the
+  first opportunity. A delayed message goes out within one poll interval of its deadline
+  rather than exactly on it — the agent is not woken for a send it would have to refuse.
 - **The agent says the same thing in its log.** It prints every send that goes out and every
   one that fails, and — because a pass that dies at connect never gets as far as trying —
   lists what is still sitting in the outbox at startup and after a failed pass. A mailbox

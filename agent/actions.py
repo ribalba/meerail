@@ -180,7 +180,18 @@ def _due(action: PendingAction, now) -> bool:
     action queued a moment ago by someone still looking at the window.
     ``updated_at`` is when the last attempt settled, which _settle writes on
     every pass through, successful or not.
+
+    Two clocks, and a row is due only when both have run out. The second is the
+    deliberate wait a send can be given when it is composed (core/outbox.py):
+    it is not a backoff and does not double, and it applies to the first attempt
+    as much as to the fortieth — which is exactly the difference between "this
+    failed and will be retried later" and "this has not been sent yet on
+    purpose". The user can end it from the Outbox at any time; that clears the
+    field rather than reaching in here.
     """
+    hold = outbox.not_before(action)
+    if hold is not None and now < hold:
+        return False
     if not action.attempts:
         return True
     last = action.updated_at
@@ -371,7 +382,11 @@ def report_waiting(db, email: str | None = None, throttle: bool = False) -> int:
         if account_id is None:
             return 0
 
-    rows = outbox.unsent(db, account_id)
+    # ACTIVE_STATES, not everything in the folder: a send the user cancelled is
+    # sitting there because they asked it to, and warning about it every pass
+    # would make the log's one real signal — mail that cannot get out — harder
+    # to see rather than easier.
+    rows = outbox.unsent(db, account_id, states=outbox.ACTIVE_STATES)
     if not rows:
         return 0
     if throttle and not _report_due(email or ""):

@@ -24,9 +24,11 @@ from . import events
 from .mail import thumbs, tika
 from .mail.parse import strip_nuls
 from .mail.store import (
+    find_message_by_message_id,
     ingest_location_only,
     ingest_raw,
     is_pending,
+    move_in_flight,
     rebuild_search_text,
     recompute_counts,
     replace_content,
@@ -409,6 +411,43 @@ def restore_content(db, mailbox: Mailbox, uid: int, raw: bytes) -> bool:
         return False
     replace_content(db, msg, raw)
     return True
+
+
+def unplaced_uids(db, mailbox: Mailbox, present_uids: list[int]) -> list[int]:
+    """Which of the UIDs the server lists this folder holds no placement for.
+
+    The mirror image of prune_vanished, and the half that was missing. A pass
+    only ever *reads* below a folder's cursor — new mail is fetched above
+    last_uid, update_flags skips a UID it has no row for, and the sweep's one
+    write is the prune, which only deletes. So a placement lost below the cursor
+    stayed lost: nothing went back for it.
+
+    Reads the whole folder's UIDs rather than filtering by present_uids in SQL.
+    The comparison set is the same one prune_vanished builds a row at a time,
+    and an IN list of forty thousand parameters is the slower way to ask.
+    """
+    # autoflush is off and this is a raw SELECT: a caller that has just written
+    # placements (the flag sweep runs before this) would otherwise be compared
+    # against the rows as they were before it.
+    db.flush()
+    placed = set(db.scalars(
+        select(MessageLocation.imap_uid).where(MessageLocation.mailbox_id == mailbox.id)
+    ))
+    return [uid for uid in present_uids if uid not in placed]
+
+
+def has_move_in_flight(db, account: Account, message_id: str | None) -> bool:
+    """Is this message — named by its Message-ID, which is all a UID we hold no
+    placement for can be identified by — in the middle of being moved?
+
+    Restoring a placement for one would undo the move: the source placement is
+    deleted the moment the key is pressed, and the server goes on listing the
+    UID until the agent applies the move and the server catches up.
+    """
+    if not message_id:
+        return False                      # never seen before, so never moved
+    msg = find_message_by_message_id(db, account.id, message_id)
+    return msg is not None and move_in_flight(db, msg.id)
 
 
 def prune_vanished(db, mailbox: Mailbox, present_uids: list[int]) -> int:

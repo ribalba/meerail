@@ -49,8 +49,85 @@ RETRY_DOUBLINGS = 8      # 60s * 2**8 is well past the ceiling; keeps it finite
 # worry about. "sent" is gone from here; "draft" is not queued for anything.
 # "error" is written by no current version — it is what the agent's old
 # five-attempt cap left behind — but those rows are still unsent mail and the
-# Outbox has to show them.
-UNSENT_STATES = ("queued", "error")
+# Outbox has to show them. "held" is a message whose send was cancelled: it has
+# no queue row and no next attempt, and it is here because that is the whole
+# difference between cancelling a send and deleting the mail.
+UNSENT_STATES = ("queued", "held", "error")
+
+# The subset that is on its way somewhere. The Outbox folder shows everything
+# unsent; the agent's "these have not gone out yet" warning is about mail that
+# is trying and failing to, and a message someone cancelled by hand is neither
+# news nor a fault. It stays in the folder and out of the log.
+ACTIVE_STATES = ("queued", "error")
+
+
+# --- The delay before a send goes out --------------------------------------
+#
+# A send may be held back deliberately: the "wait a minute before this actually
+# leaves" that turns a sent message back into a recallable one. The wait is
+# written on the queue row as ``payload["not_before"]`` — an absolute instant,
+# not a duration, so both processes read the same deadline however long the
+# agent was asleep, and so a per-message "send this at 08:00" costs nothing
+# beyond a different value here.
+#
+# In the payload rather than in a column because the two sides already share
+# the payload, PendingAction has no other scheduling field, and the pending
+# queue is scanned in Python anyway (see send_actions).
+#
+# Datetimes are naive UTC throughout meerail (models.utcnow), and the string in
+# the payload has to stay in that convention: a tz-aware value written here
+# would raise on the comparison in the agent, on the other side of the
+# database, where it is a great deal less obvious why.
+
+SETTING_KEY = "send_delay_seconds"
+# A day. Not a policy about what is sensible — it is the ceiling that keeps a
+# typo'd number from parking someone's mail past the point they would look for
+# it in the Outbox at all.
+MAX_DELAY = 24 * 3600
+
+
+def not_before(action: PendingAction | None) -> datetime | None:
+    """The instant before which this action must not be attempted, if any.
+
+    Tolerant of a payload that has been hand-edited or written by a version that
+    did not have this: an unparseable value means "no hold", because refusing to
+    send is the worse failure of the two.
+    """
+    raw = (action.payload or {}).get("not_before") if action else None
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def hold_until(delay_seconds: int, now: datetime) -> str | None:
+    """The payload value for a send that should wait ``delay_seconds``, or None
+    for one that should go at the first opportunity."""
+    delay = min(max(int(delay_seconds or 0), 0), MAX_DELAY)
+    return (now + timedelta(seconds=delay)).isoformat() if delay else None
+
+
+def send_delay(db) -> int:
+    """How long a newly composed message waits before the agent may send it.
+
+    The Settings modal writes the row; ``server.send_delay_seconds`` in
+    meerail.toml is the default it starts from, so an install can ship a delay
+    without anyone opening the UI. 0 is "send at the first opportunity", which
+    is what every version before this did.
+    """
+    from .config import get_settings
+    from .models import Setting
+
+    row = db.get(Setting, SETTING_KEY)
+    raw = row.value if row is not None else None
+    if raw in (None, ""):
+        return max(int(get_settings().send_delay_seconds or 0), 0)
+    try:
+        return min(max(int(raw), 0), MAX_DELAY)
+    except (TypeError, ValueError):
+        return 0
 
 
 def retry_delay(attempts: int) -> timedelta:
@@ -93,10 +170,10 @@ UNSENT_COLUMNS = (
 )
 
 
-def unsent(db, account_id: int | None = None) -> list:
+def unsent(db, account_id: int | None = None, states: tuple = UNSENT_STATES) -> list:
     """Every message written here and not yet handed to a mail server, oldest
     first — the queue in the order the agent will work through it."""
-    q = select(*UNSENT_COLUMNS).where(Outbound.state.in_(UNSENT_STATES))
+    q = select(*UNSENT_COLUMNS).where(Outbound.state.in_(states))
     if account_id is not None:
         q = q.where(Outbound.account_id == account_id)
     return db.execute(q.order_by(Outbound.created_at, Outbound.id)).all()

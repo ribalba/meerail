@@ -199,6 +199,57 @@ class PassProgress:
         }
 
 
+def _store_chunk(db, bridge: Bridge, account, mailbox, headers: dict[int, dict],
+                 cutoff, email: str | None) -> tuple[int, int]:
+    """Give every UID in ``headers`` a placement in this folder.
+
+    Returns (placed, stored): how many UIDs ended up in the folder, and how many
+    of those brought content with them. The two differ by a lot on a label
+    server — a Proton mailbox shows the same message under several labels, so
+    most of a walk resolves to a placement against content already held — and
+    the callers want opposite halves of it. Ingesting new mail counts what it
+    stored; repairing a folder counts what it put back.
+
+    Split out of _sync_new so that the repair path stores mail by exactly the
+    same route the first fetch did, rather than by a second implementation of it
+    that can drift.
+    """
+    # Content we already hold (same Message-ID under another Proton label) only
+    # needs a placement row; everything else needs fetching — in full, or
+    # headers alone if it is older than the content window. A message with no
+    # date at all is fetched in full: unknown age is not evidence that mail is
+    # old, and guessing wrong here silently drops a body.
+    placed = stored = 0
+    need_raw, need_headers = [], []
+    for uid, h in headers.items():
+        if ingest.record_known(db, account, mailbox, uid, h["flags"], h["message_id"]):
+            placed += 1
+            continue
+        if cutoff is not None and h["date"] is not None and h["date"] < cutoff:
+            need_headers.append(uid)
+        else:
+            need_raw.append(uid)
+
+    if need_raw:
+        raws = _fetch_all(bridge.fetch_raw, need_raw, "raw fetch", email)
+        for uid, r in raws.items():
+            if r["raw"]:
+                ingest.store_message(db, account, mailbox, uid, r["flags"], r["raw"])
+                placed += 1
+                stored += 1
+
+    if need_headers:
+        blocks = _fetch_all(bridge.fetch_header_block, need_headers,
+                            "header fetch", email)
+        for uid, r in blocks.items():
+            if r["raw"]:
+                ingest.store_headers(db, account, mailbox, uid, r["flags"], r["raw"],
+                                     size_bytes=headers[uid]["size"])
+                placed += 1
+                stored += 1
+    return placed, stored
+
+
 def _sync_new(db, bridge: Bridge, account, mailbox, batch: int,
               progress: PassProgress | None = None, cutoff=None,
               beat: "Heartbeat | None" = None) -> int:
@@ -221,38 +272,8 @@ def _sync_new(db, bridge: Bridge, account, mailbox, batch: int,
     for chunk in _chunks(new, batch):
         headers = _fetch_all(bridge.fetch_headers, chunk, "header fetch", email,
                              needs_body=False)
-
-        # Content we already hold (same Message-ID under another Proton label)
-        # only needs a placement row; everything else needs fetching — in full,
-        # or headers alone if it is older than the content window. A message
-        # with no date at all is fetched in full: unknown age is not evidence
-        # that mail is old, and guessing wrong here silently drops a body.
-        need_raw, need_headers = [], []
-        for uid, h in headers.items():
-            if ingest.record_known(db, account, mailbox, uid, h["flags"], h["message_id"]):
-                continue
-            if cutoff is not None and h["date"] is not None and h["date"] < cutoff:
-                need_headers.append(uid)
-            else:
-                need_raw.append(uid)
-
-        chunk_stored = 0
-        if need_raw:
-            raws = _fetch_all(bridge.fetch_raw, need_raw, "raw fetch", email)
-            for uid, r in raws.items():
-                if r["raw"]:
-                    ingest.store_message(db, account, mailbox, uid, r["flags"], r["raw"])
-                    chunk_stored += 1
-
-        if need_headers:
-            blocks = _fetch_all(bridge.fetch_header_block, need_headers,
-                                "header fetch", email)
-            for uid, r in blocks.items():
-                if r["raw"]:
-                    ingest.store_headers(db, account, mailbox, uid, r["flags"], r["raw"],
-                                         size_bytes=headers[uid]["size"])
-                    chunk_stored += 1
-
+        _placed, chunk_stored = _store_chunk(db, bridge, account, mailbox, headers,
+                                             cutoff, email)
         ingest.advance_cursor(db, mailbox, max(chunk))
         # Rides the cursor's own transaction on purpose. Progress that committed
         # separately could outrun a chunk that then rolled back, leaving the bar
@@ -327,15 +348,84 @@ def _repair_short_content(db, bridge: Bridge, mailbox, sizes: dict[int, int],
     return repaired
 
 
-def _reconcile(db, bridge: Bridge, mailbox, batch: int,
-               beat: "Heartbeat | None" = None, email: str | None = None) -> None:
-    """Push flag changes for known UIDs and prune the ones that vanished.
+# How many lost placements one sweep will put back in a single folder.
+#
+# A gap much larger than this is not the failure this repairs. It is a database
+# that has lost most of a mailbox, which the full recheck exists for and does in
+# one pass with a progress bar to show for it; doing the same work here would
+# hold the sweep open for hours with nothing visible happening, on a fifteen
+# minute clock. So the repair is spread over passes, and what it left is logged
+# rather than quietly dropped.
+_RESTORE_PER_PASS = 500
 
-    The one loop in a pass that reports nothing on its own: it walks every UID
-    in the folder in fixed chunks and commits once, at the end. On a mailbox of
-    tens of thousands against a server that answers a command a second, that is
-    hours of silence from a thread that is working the whole time — hence the
-    heartbeat, which is the only thing here the UI can see until the sweep ends.
+
+def _restore_unplaced(db, bridge: Bridge, account, mailbox, uids: list[int], batch: int,
+                      cutoff=None, beat: "Heartbeat | None" = None,
+                      email: str | None = None) -> int:
+    """Ingest UIDs the server lists in this folder that the database has lost.
+
+    The gap this closes: nothing else in a pass can put a placement back. New
+    mail is fetched above the folder's cursor, so a UID below it is never asked
+    for again; update_flags skips a UID it holds no row for; and the sweep's one
+    write is prune_vanished, which only deletes. A placement pruned during a
+    moment when the server did not list it — a Bridge part way through loading
+    the mailbox, a label the server cleared and put back — was therefore lost
+    for good, in a folder that goes on being reconciled every fifteen minutes
+    and never notices. One message missing from an inbox on one machine while a
+    second meerail against the same account showed it perfectly well.
+
+    A move the user has just made looks exactly like that gap from here: the
+    source placement is deleted the moment the key is pressed and the server
+    goes on listing the UID until the agent applies the move and the server
+    catches up. Restoring it would put the message straight back into the folder
+    it was just archived out of — the disappearance-in-reverse. So a message
+    with a move still in flight is left where it is; either the move lands and
+    the UID stops being listed, or it does not and a later sweep repairs it in
+    earnest.
+    """
+    missing = ingest.unplaced_uids(db, mailbox, uids)
+    if not missing:
+        return 0
+    deferred = max(0, len(missing) - _RESTORE_PER_PASS)
+    missing = missing[:_RESTORE_PER_PASS]
+
+    restored = 0
+    for chunk in _chunks(missing, batch):
+        headers = _fetch_all(bridge.fetch_headers, chunk, "header fetch", email,
+                             needs_body=False)
+        headers = {uid: h for uid, h in headers.items()
+                   if not ingest.has_move_in_flight(db, account, h["message_id"])}
+        if not headers:
+            continue
+        placed, _stored = _store_chunk(db, bridge, account, mailbox, headers, cutoff, email)
+        restored += placed
+        if beat is not None:
+            beat.mark()
+        db.commit()
+        ingest.note_ingested(account, mailbox, placed)
+
+    if restored:
+        log.info(f"restored {restored} message(s) to {mailbox.imap_name} that the server "
+                 f"lists but the database had lost", email)
+    if deferred:
+        log.warn(f"{mailbox.imap_name}: {deferred} more message(s) the server lists are "
+                 f"still missing locally — at most {_RESTORE_PER_PASS} are restored per "
+                 f"sweep, so the rest follow on later ones", email)
+    return restored
+
+
+def _reconcile(db, bridge: Bridge, account, mailbox, batch: int,
+               beat: "Heartbeat | None" = None, email: str | None = None,
+               cutoff=None) -> None:
+    """Bring this folder's placements back in line with the server's.
+
+    Flags are pushed onto the UIDs we hold, UIDs the server lists that we have
+    lost are fetched back, and the ones it no longer lists are pruned. The one
+    loop in a pass that reports nothing on its own: it walks every UID in the
+    folder in fixed chunks and commits once, at the end. On a mailbox of tens of
+    thousands against a server that answers a command a second, that is hours of
+    silence from a thread that is working the whole time — hence the heartbeat,
+    which is the only thing here the UI can see until the sweep ends.
     """
     uids = bridge.all_uids()
     for chunk in _chunks(uids, batch):
@@ -346,6 +436,14 @@ def _reconcile(db, bridge: Bridge, mailbox, batch: int,
                               {u: r["size"] for u, r in rows.items()}, email)
         if beat is not None:
             beat.beat()
+    try:
+        _restore_unplaced(db, bridge, account, mailbox, uids, batch, cutoff, beat, email)
+    except Exception as e:  # noqa: BLE001
+        # Not a reason to fail the pass, for the same reason _repair_short_content
+        # is not: the sweep above is the folder's actual work and it has already
+        # been done. The placements have been missing for a while already, and
+        # the next sweep gets to try again.
+        log.warn(f"could not restore missing messages in {mailbox.imap_name}: {e!r}", email)
     if _uid_list_is_trustworthy(bridge, uids, mailbox, email):
         ingest.prune_vanished(db, mailbox, uids)
     db.commit()
@@ -714,7 +812,8 @@ def sync_once(account: AccountConfig, cfg: Settings, reconcile: bool = True) -> 
             # A recheck reconciles unconditionally: flags and vanished messages
             # are as much a part of "is everything still right" as the bodies.
             if reconcile or recheck_at:
-                _reconcile(db, bridge, mailbox, batch, beat, account.email)
+                _reconcile(db, bridge, account_row, mailbox, batch, beat, account.email,
+                           cutoff)
 
         # LIST completed and every returned folder synced successfully, so it
         # is now safe to treat absent rows as folders removed/renamed upstream.

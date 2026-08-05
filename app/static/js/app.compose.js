@@ -698,11 +698,25 @@ App.compose = (function () {
     for (const sel of SEND_BUTTONS) $(sel).disabled = on;
   }
 
+  // What the window says once the server has the message. "Sent ✓" is a small
+  // lie even without a delay — the agent has yet to relay it — but with one it
+  // is the wrong lie: the mail is deliberately still here, catchable, and the
+  // composer is the last place the author looks before they stop thinking about
+  // it. So it says how long they have, and where.
+  function word(res) {
+    const at = res && res.send_at ? App.utcDate(res.send_at) : null;
+    if (!at) return "Sent ✓";
+    const s = Math.max(1, Math.round((at.getTime() - Date.now()) / 1000));
+    const when = s < 90 ? `${s}s` : `${Math.round(s / 60)}m`;
+    return `Sending in ${when} — in the Outbox until then`;
+  }
+
   async function send(after) {
     const status = $("#compose-status");
     const to = parseAddrs($("#compose-to").value);
     if (!to.length) { status.textContent = "Add at least one recipient."; return false; }
     status.textContent = "Sending…";
+    let sentWord = "Sent ✓";
     busy(true);
     try {
       const from = identities[Number($("#compose-from").value)] || identities[0] || {};
@@ -711,7 +725,7 @@ App.compose = (function () {
       // sent as text/plain exactly as it always has been. A draft with nothing
       // in it has nothing to render, so it stays plain either way.
       const text = body.getText();
-      await App.api.sendMail({
+      const res = await App.api.sendMail({
         account_id: from.account_id,
         from_address: from.address,
         to, cc: parseAddrs($("#compose-cc").value), bcc: parseAddrs($("#compose-bcc").value),
@@ -729,19 +743,22 @@ App.compose = (function () {
       // sidebar's outbox count is the honest version of the "Sent ✓" below, so
       // read it back now rather than at the next poll.
       App.status.refresh();
+      sentWord = word(res);
     } catch (e) {
       status.textContent = e.message || "Send failed";
       busy(false);
       return false;
     }
-    status.textContent = "Sent ✓";
+    status.textContent = sentWord;
     if (after) {
       try {
-        await after();
+        // Handed the word the send earned, so a follow-up's own line does not
+        // quietly promote a delayed message back to "Sent ✓".
+        await after(sentWord);
       } catch (e) {
         // The window stays open on purpose: the follow-up is the only thing
         // left to retry or do by hand, and closing would hide why.
-        status.textContent = `Sent ✓ — ${e.message || "the follow-up failed"}`;
+        status.textContent = `${sentWord} — ${e.message || "the follow-up failed"}`;
         busy(false);
         return true;
       }
@@ -759,13 +776,13 @@ App.compose = (function () {
   function sendDefault() { return archiveTicket ? sendAndArchive() : sendNow(); }
 
   function sendAndArchive() {
-    return send(async () => {
+    return send(async (sent) => {
       $("#compose-status").textContent = "Archiving…";
       // The conversation this draft was opened off, not whatever the reader
       // has moved on to since — those are rarely the same by the time a reply
       // is sent, let alone one that sat minimized.
       await App.reader.archiveTicketed(archiveTicket);
-      $("#compose-status").textContent = "Sent ✓ · archived";
+      $("#compose-status").textContent = `${sent} · archived`;
     });
   }
 
@@ -777,7 +794,7 @@ App.compose = (function () {
     if (!choice) return false;
     const title = $("#compose-subject").value.trim();
     const text = body.getText();
-    return send(async () => {
+    return send(async (sent) => {
       $("#compose-status").textContent = "Creating task…";
       const res = await App.api.createTask({
         title, text,
@@ -785,7 +802,7 @@ App.compose = (function () {
         status: "open",                  // Meerato's Backlog
         schedule_date: choice.date,      // …until it moves itself to Now
       });
-      $("#compose-status").textContent = `Sent ✓ · ${res.title} filed`;
+      $("#compose-status").textContent = `${sent} · ${res.title} filed`;
     });
   }
 

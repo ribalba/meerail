@@ -16,6 +16,8 @@ strip_content.
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
@@ -144,6 +146,40 @@ def pending_uid(message_pk: int) -> int:
 def is_pending(loc: MessageLocation) -> bool:
     """Is this placement one we wrote ourselves, ahead of the server?"""
     return loc.imap_uid < 0
+
+
+# How long after a move is applied the server is still allowed to disagree with
+# it. Applying a move and the server's own view of the folder catching up are
+# two different events, and everything that reads "the message is not where the
+# database says" during the gap between them would otherwise read it as a fact.
+SETTLE_GRACE = timedelta(minutes=5)
+
+
+def move_in_flight(db: Session, message_pk: int) -> bool:
+    """Is a move or delete the user asked for still expected to land?
+
+    Two states look identical from the outside and want opposite answers. The
+    move finished seconds ago and the server has not caught up: in flight, and
+    anything that disagrees with it is too early to be believed. The move
+    finished long ago and the server still disagrees: not in flight, and never
+    will be — whatever the server says now is the truth.
+
+    Read by the UI, to decide whether a second keypress on the same message can
+    be honoured (app/routers/actions.py), and by the agent, to decide whether a
+    placement the server lists but the database has not got is a move in
+    progress or a gap to repair (agent/sync._restore_unplaced).
+    """
+    action = db.execute(
+        select(PendingAction).where(
+            PendingAction.message_pk == message_pk,
+            PendingAction.type.in_(("move", "delete")),
+        ).order_by(PendingAction.updated_at.desc())
+    ).scalars().first()
+    if action is None:
+        return False                      # nothing was ever queued for it
+    if action.status != "done":
+        return True                       # still queued, or being applied now
+    return utcnow() - action.updated_at < SETTLE_GRACE
 
 
 def place_pending(

@@ -192,6 +192,23 @@
           </p>
         </div>
 
+        <div class="settings-section">
+          <label for="send-delay">Wait before sending (seconds)</label>
+          <input type="number" id="send-delay" min="0" max="86400" step="5" />
+          <div class="sa-footer-actions">
+            <button type="button" id="send-delay-save">Save</button>
+            <span class="sa-footer-status" id="send-delay-status"></span>
+          </div>
+          <p class="muted small">
+            How long a message you send sits in the <em>Outbox</em> before it
+            actually goes out — the window in which you can still stop it. Every
+            message in the Outbox has <em>Send now</em> and <em>Cancel send</em>
+            on it, whatever this is set to. <code>0</code> sends straight away.
+            Applies to messages written from now on, and to every browser: this
+            one is stored on the server.
+          </p>
+        </div>
+
         <h3 class="settings-heading">Tasks</h3>
         <div class="settings-section">
           <label for="meerato-url">Meerato private URL</label>

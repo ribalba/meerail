@@ -7,8 +7,6 @@ folder's copy is re-ingested on the next sync (dedup keeps content single)."""
 
 from __future__ import annotations
 
-from datetime import timedelta
-
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select
@@ -19,8 +17,8 @@ from core.database import get_db
 from core.events import publish_command
 from ..deps import require_ui_auth
 from .messages import _resolve_mailbox_ids
-from core.mail.store import is_pending, place_pending, recompute_counts
-from core.models import Account, Mailbox, Message, MessageLocation, PendingAction, utcnow
+from core.mail.store import is_pending, move_in_flight, place_pending, recompute_counts
+from core.models import Account, Mailbox, Message, MessageLocation, PendingAction
 
 router = APIRouter(prefix="/api/messages", tags=["actions"], dependencies=[Depends(require_ui_auth)])
 
@@ -289,39 +287,23 @@ def _retarget_pending(db: DBSession, msg: Message, target: Mailbox | None) -> bo
     return True
 
 
-# How long after the queued move has finished a placement we wrote ourselves is
-# still worth waiting on. A sync pass runs on a poll interval of seconds, so
-# anything past this is not a placement in flight — it is one whose server copy
-# is never coming. See _in_flight.
-_SETTLE_GRACE = timedelta(minutes=5)
-
-
 def _in_flight(db: DBSession, msg: Message) -> bool:
     """Is the move behind this optimistic placement still going to land?
 
     Only asked when the placement is one we wrote ourselves and there is no
-    queued action left to re-aim (see _retarget_pending). Two things look like
-    that from here and they want opposite answers.
+    queued action left to re-aim (see _retarget_pending). The move finished
+    seconds ago and the sync has not brought the real placement back yet: the
+    honest answer to another keypress is "not yet". The move finished long ago
+    and the server copy has still not arrived: never will be — the message is
+    not where we think it is, or (as when a trash-as-COPY-plus-EXPUNGE deleted
+    it outright) it is nowhere at all. Waiting on that forever is what wedged 22
+    messages into a folder no keypress could get them out of.
 
-    The move finished seconds ago and the sync has not brought the real
-    placement back yet: in flight, and the honest answer to another keypress is
-    "not yet". The move finished long ago and the server copy has still not
-    arrived: not in flight, and never will be — the message is not where we
-    think it is, or (as when a trash-as-COPY-plus-EXPUNGE deleted it outright)
-    it is nowhere at all. Waiting on that forever is what wedged 22 messages
-    into a folder no keypress could get them out of.
+    The agent asks the same question of the same actions for the opposite
+    reason — see core.mail.store.move_in_flight, which is why this is one
+    definition rather than two that can drift apart.
     """
-    action = db.execute(
-        select(PendingAction).where(
-            PendingAction.message_pk == msg.id,
-            PendingAction.type.in_(("move", "delete")),
-        ).order_by(PendingAction.updated_at.desc())
-    ).scalars().first()
-    if action is None:
-        return False                      # nothing was ever queued for it
-    if action.status != "done":
-        return True                       # still queued, or being applied now
-    return utcnow() - action.updated_at < _SETTLE_GRACE
+    return move_in_flight(db, msg.id)
 
 
 def _move_to(db: DBSession, msg: Message, source_mailbox_id: int, target: Mailbox | None,

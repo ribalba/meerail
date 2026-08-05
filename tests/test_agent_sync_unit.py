@@ -207,6 +207,8 @@ class RecheckIngest:
 
     def update_flags(self, *_a): pass
     def prune_vanished(self, *_a): pass
+    def unplaced_uids(self, *_a): return []
+    def has_move_in_flight(self, *_a): return False
     def prune_mailboxes(self, _db, _account, names): self.pruned.append(names)
     def extract_pending(self, _db): return 0
     def thumb_pending(self, _db): return 0
@@ -274,7 +276,7 @@ def test_account_batch_size_overrides_the_global(monkeypatch):
     monkeypatch.setattr(agent_sync, "_sync_new",
                         lambda _db, _b, _a, _mb, batch, *_r: batches.append(batch) or 0)
     monkeypatch.setattr(agent_sync, "_reconcile",
-                        lambda _db, _b, _mb, batch, *_r: batches.append(batch))
+                        lambda _db, _b, _a, _mb, batch, *_r: batches.append(batch))
 
     account = AccountCfg()
     account.batch_size = 25
@@ -293,7 +295,7 @@ def test_batch_size_falls_back_to_the_global(monkeypatch):
     monkeypatch.setattr(agent_sync, "_sync_new",
                         lambda _db, _b, _a, _mb, batch, *_r: batches.append(batch) or 0)
     monkeypatch.setattr(agent_sync, "_reconcile",
-                        lambda _db, _b, _mb, batch, *_r: batches.append(batch))
+                        lambda _db, _b, _a, _mb, batch, *_r: batches.append(batch))
 
     agent_sync.sync_once(AccountCfg(), Cfg())
 
@@ -438,6 +440,7 @@ def _liveness_spy(monkeypatch):
     spy.touch_agent = lambda _db, account: spy.touched.append(account)
     spy.update_flags = lambda *_a: None
     spy.prune_vanished = lambda *_a: None
+    spy.unplaced_uids = lambda *_a: []
     monkeypatch.setattr(agent_sync, "ingest", spy)
     return spy
 
@@ -455,7 +458,7 @@ def test_a_long_flag_sweep_says_it_is_alive_before_it_ends(monkeypatch):
     spy = _liveness_spy(monkeypatch)
 
     db, account = CountingDB(), object()
-    agent_sync._reconcile(db, FlagBridge(10), Mailbox(), 2,
+    agent_sync._reconcile(db, FlagBridge(10), account, Mailbox(), 2,
                           agent_sync.Heartbeat(db, account))
 
     assert spy.touched == [account] * 5   # one per chunk, not one at the end
@@ -472,7 +475,7 @@ def test_the_heartbeat_is_rate_limited_rather_than_per_chunk(monkeypatch):
     spy = _liveness_spy(monkeypatch)
 
     db, account = CountingDB(), object()
-    agent_sync._reconcile(db, FlagBridge(10), Mailbox(), 2,
+    agent_sync._reconcile(db, FlagBridge(10), account, Mailbox(), 2,
                           agent_sync.Heartbeat(db, account))
 
     assert spy.touched == []
@@ -523,6 +526,7 @@ def _prune_spy(monkeypatch):
     spy = IngestSpy()
     spy.pruned = []
     spy.update_flags = lambda *_a: None
+    spy.unplaced_uids = lambda *_a: []
     spy.prune_vanished = lambda _db, _mb, uids: spy.pruned.append(list(uids))
     monkeypatch.setattr(agent_sync, "ingest", spy)
     return spy
@@ -533,7 +537,7 @@ def test_a_server_that_answers_short_never_deletes_anything(monkeypatch, capsys)
     evidence that 497 messages were deleted."""
     spy = _prune_spy(monkeypatch)
 
-    agent_sync._reconcile(CountingDB(), FlagBridge(3, short=497), Mailbox(), 100,
+    agent_sync._reconcile(CountingDB(), FlagBridge(3, short=497), object(), Mailbox(), 100,
                           email="user@example.com")
 
     assert spy.pruned == []
@@ -546,7 +550,7 @@ def test_a_folder_that_really_is_empty_still_prunes(monkeypatch):
     elsewhere: an empty folder that the server agrees is empty still prunes."""
     spy = _prune_spy(monkeypatch)
 
-    agent_sync._reconcile(CountingDB(), FlagBridge(0), Mailbox(), 100)
+    agent_sync._reconcile(CountingDB(), FlagBridge(0), object(), Mailbox(), 100)
 
     assert spy.pruned == [[]]
 
@@ -554,7 +558,7 @@ def test_a_folder_that_really_is_empty_still_prunes(monkeypatch):
 def test_a_complete_answer_prunes_as_before(monkeypatch):
     spy = _prune_spy(monkeypatch)
 
-    agent_sync._reconcile(CountingDB(), FlagBridge(4), Mailbox(), 100)
+    agent_sync._reconcile(CountingDB(), FlagBridge(4), object(), Mailbox(), 100)
 
     assert spy.pruned == [[1, 2, 3, 4]]
 
@@ -564,7 +568,7 @@ def test_mail_arriving_mid_sweep_does_not_block_the_prune(monkeypatch):
     between the two commands. Only *fewer* is suspect."""
     spy = _prune_spy(monkeypatch)
 
-    agent_sync._reconcile(CountingDB(), FlagBridge(4, short=-2), Mailbox(), 100)
+    agent_sync._reconcile(CountingDB(), FlagBridge(4, short=-2), object(), Mailbox(), 100)
 
     assert spy.pruned == [[1, 2, 3, 4]]
 
@@ -605,6 +609,7 @@ def _short_spy(monkeypatch, short):
     spy.restored = []
     spy.pruned = []
     spy.update_flags = lambda *_a: None
+    spy.unplaced_uids = lambda *_a: []
     spy.prune_vanished = lambda _db, _mb, uids: spy.pruned.append(list(uids))
     spy.find_short_content = lambda _db, _mb, _sizes: list(short)
     spy.restore_content = lambda _db, _mb, uid, raw: spy.restored.append((uid, raw)) or True
@@ -625,7 +630,7 @@ def test_a_message_stored_short_of_the_servers_size_is_fetched_again(monkeypatch
     spy = _short_spy(monkeypatch, [2])
     bridge = ShortBridge()
 
-    agent_sync._reconcile(CountingDB(), bridge, Mailbox(), 100, email="user@example.com")
+    agent_sync._reconcile(CountingDB(), bridge, object(), Mailbox(), 100, email="user@example.com")
 
     assert bridge.refetched == [[2]]                    # only the short one
     assert spy.restored == [(2, b"the whole message")]
@@ -640,7 +645,7 @@ def test_the_same_short_message_is_not_fetched_again_every_sweep(monkeypatch):
     bridge = ShortBridge()
 
     for _ in range(3):
-        agent_sync._reconcile(CountingDB(), bridge, Mailbox(), 100)
+        agent_sync._reconcile(CountingDB(), bridge, object(), Mailbox(), 100)
 
     assert bridge.refetched == [[2]]
     assert len(spy.restored) == 1
@@ -652,9 +657,9 @@ def test_a_message_that_changes_size_again_is_fetched_again(monkeypatch):
     _short_spy(monkeypatch, [2])
     bridge = ShortBridge()
 
-    agent_sync._reconcile(CountingDB(), bridge, Mailbox(), 100)
+    agent_sync._reconcile(CountingDB(), bridge, object(), Mailbox(), 100)
     bridge.sizes[2] += 1000
-    agent_sync._reconcile(CountingDB(), bridge, Mailbox(), 100)
+    agent_sync._reconcile(CountingDB(), bridge, object(), Mailbox(), 100)
 
     assert bridge.refetched == [[2], [2]]
 
@@ -666,7 +671,7 @@ def test_a_folder_the_server_reports_no_sizes_for_is_left_alone(monkeypatch):
     spy.find_short_content = lambda _db, _mb, sizes: list(sizes)   # would take anything
     bridge = ShortBridge(sizes={1: 0, 2: 0, 3: 0})
 
-    agent_sync._reconcile(CountingDB(), bridge, Mailbox(), 100)
+    agent_sync._reconcile(CountingDB(), bridge, object(), Mailbox(), 100)
 
     assert bridge.refetched == []
 
@@ -679,13 +684,145 @@ def test_a_repair_that_cannot_fetch_does_not_fail_the_sweep(monkeypatch, capsys,
     bridge = ShortBridge()
     bridge.fetch_raw = lambda _uids: {}          # answers, with nothing in it
 
-    agent_sync._reconcile(CountingDB(), bridge, Mailbox(), 100, email="user@example.com")
+    agent_sync._reconcile(CountingDB(), bridge, object(), Mailbox(), 100, email="user@example.com")
 
     assert spy.restored == []
     assert spy.pruned == [[1, 2, 3]]             # the sweep ran to the end
     assert "could not re-fetch" in capsys.readouterr().out
     # Nothing was remembered, so the next sweep is free to try again.
     assert agent_sync._refetched == {}
+
+
+# --- placements the database lost --------------------------------------------
+#
+# The other half of prune_vanished, and the half that was missing for a long
+# time: a pass only ever *read* below a folder's cursor, so a placement removed
+# below it was removed for good. What that looked like in the field was one
+# message sitting in an inbox on one machine and absent from the same inbox on
+# another, both syncing the same account, neither of them wrong about anything
+# it could see.
+
+
+class GappyBridge:
+    """A folder holding four messages, of which the database has lost two."""
+
+    def __init__(self, missing=(2, 3)):
+        self.missing = list(missing)
+        self.exists = 4
+        self.fetched = []
+
+    def all_uids(self):
+        return [1, 2, 3, 4]
+
+    def fetch_flags(self, uids):
+        return {u: {"flags": {"seen": True}, "size": 0} for u in uids}
+
+    def fetch_headers(self, uids):
+        self.fetched.append(list(uids))
+        return {u: {"message_id": f"m{u}", "flags": {"seen": True}, "date": None, "size": 0}
+                for u in uids}
+
+    def fetch_raw(self, uids):
+        return {u: {"raw": b"the whole message", "flags": {"seen": True}} for u in uids}
+
+
+def _gap_spy(monkeypatch, missing=(2, 3), in_flight=()):
+    spy = IngestSpy()
+    spy.pruned = []
+    spy.placed = []
+    spy.update_flags = lambda *_a: None
+    spy.prune_vanished = lambda _db, _mb, uids: spy.pruned.append(list(uids))
+    spy.unplaced_uids = lambda _db, _mb, _uids: list(missing)
+    spy.has_move_in_flight = lambda _db, _acc, message_id: message_id in in_flight
+    spy.record_known = lambda _db, _acc, _mb, uid, _f, _mid: spy.placed.append(uid) or True
+    monkeypatch.setattr(agent_sync, "ingest", spy)
+    return spy
+
+
+def test_a_message_the_server_lists_but_the_database_lost_is_fetched_back(monkeypatch, capsys):
+    """The bug this exists for. A placement pruned during a moment when the
+    server did not list it — a Bridge part way through loading the mailbox, a
+    label cleared and put back — used to be invisible for good: it sits below
+    the cursor, so nothing ever asks for that UID again."""
+    spy = _gap_spy(monkeypatch)
+
+    agent_sync._reconcile(CountingDB(), GappyBridge(), object(), Mailbox(), 100,
+                          email="user@example.com")
+
+    assert spy.placed == [2, 3]
+    assert spy.pruned == [[1, 2, 3, 4]]          # the sweep still ran to the end
+    assert "restored 2 message" in capsys.readouterr().out
+
+
+def test_a_folder_with_nothing_missing_asks_the_server_for_nothing(monkeypatch):
+    """The common case is a folder that is entirely fine, and it must not cost a
+    fetch to find that out."""
+    spy = _gap_spy(monkeypatch, missing=())
+    bridge = GappyBridge()
+
+    agent_sync._reconcile(CountingDB(), bridge, object(), Mailbox(), 100)
+
+    assert bridge.fetched == []
+    assert spy.placed == []
+
+
+def test_a_message_being_moved_is_not_dragged_back_into_the_folder_it_left(monkeypatch):
+    """A move the user has just made looks exactly like a gap from here: the
+    source placement goes the moment the key is pressed, and the server goes on
+    listing the UID until the agent applies the move and the server catches up.
+
+    Restoring it would put the message straight back into the folder it was
+    archived out of — the disappearance this whole mechanism exists to prevent,
+    running backwards."""
+    spy = _gap_spy(monkeypatch, missing=(2, 3), in_flight={"m2"})
+
+    agent_sync._reconcile(CountingDB(), GappyBridge(), object(), Mailbox(), 100)
+
+    assert spy.placed == [3]                     # 2 is still on its way out
+
+
+def test_a_whole_chunk_being_moved_costs_no_write(monkeypatch):
+    """Every UID in the chunk is in flight, so there is nothing left to store —
+    and _store_chunk must not be called with an empty batch just to prove it."""
+    spy = _gap_spy(monkeypatch, missing=(2, 3), in_flight={"m2", "m3"})
+    calls = []
+    monkeypatch.setattr(agent_sync, "_store_chunk",
+                        lambda *a, **kw: calls.append(a) or (0, 0))
+
+    agent_sync._reconcile(CountingDB(), GappyBridge(), object(), Mailbox(), 100)
+
+    assert calls == []
+
+
+def test_a_gap_bigger_than_one_sweep_is_spread_out_and_says_what_it_left(monkeypatch, capsys):
+    """A gap this size is a database that has lost most of a mailbox, which the
+    full recheck exists for. Doing it here instead would hold the sweep open for
+    hours, every fifteen minutes — so it is capped, and the cap is logged rather
+    than quietly applied."""
+    monkeypatch.setattr(agent_sync, "_RESTORE_PER_PASS", 2)
+    spy = _gap_spy(monkeypatch, missing=(2, 3, 4, 5, 6))
+
+    agent_sync._reconcile(CountingDB(), GappyBridge(), object(), Mailbox(), 100,
+                          email="user@example.com")
+
+    assert spy.placed == [2, 3]
+    assert "3 more message(s)" in capsys.readouterr().out
+
+
+def test_a_restore_that_cannot_fetch_does_not_fail_the_sweep(monkeypatch, capsys, no_backoff):
+    """Same bargain as the short-content repair: the sweep it rides on is doing
+    the folder's real work, and a placement that has been missing for a week can
+    stay missing for another quarter of an hour."""
+    spy = _gap_spy(monkeypatch)
+    bridge = GappyBridge()
+    bridge.fetch_headers = lambda _uids: {}      # answers, with nothing in it
+
+    agent_sync._reconcile(CountingDB(), bridge, object(), Mailbox(), 100,
+                          email="user@example.com")
+
+    assert spy.placed == []
+    assert spy.pruned == [[1, 2, 3, 4]]          # the sweep ran to the end
+    assert "could not restore missing messages" in capsys.readouterr().out
 
 
 def test_a_pass_that_sent_mail_waits_before_reading_the_folders_back(monkeypatch):

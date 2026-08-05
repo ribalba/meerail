@@ -94,6 +94,7 @@ App.api = {
   get(p) { return this.request("GET", p); },
   post(p, b) { return this.request("POST", p, b); },
   patch(p, b) { return this.request("PATCH", p, b); },
+  put(p, b) { return this.request("PUT", p, b); },
   del(p) { return this.request("DELETE", p); },
 
   mailboxes() { return this.get("/api/mailboxes"); },
@@ -176,7 +177,12 @@ App.api = {
   outbox() { return this.get("/api/outbox"); },
   outboxMessage(id) { return this.get(`/api/outbox/${id}`); },
   outboxRetry(id) { return this.post(`/api/outbox/${id}/retry`); },
+  outboxCancel(id) { return this.post(`/api/outbox/${id}/cancel`); },
   outboxDiscard(id) { return this.del(`/api/outbox/${id}`); },
+  outboxSettings() { return this.get("/api/outbox/settings"); },
+  saveOutboxSettings(seconds) {
+    return this.put("/api/outbox/settings", { send_delay_seconds: seconds });
+  },
   deleteAttachment(id) { return this.del(`/api/compose/attachments/${encodeURIComponent(id)}`); },
   async uploadAttachment(file) {
     const fd = new FormData();

@@ -66,6 +66,17 @@ contacts_scan_years = 1
 # Per-attachment cap for outgoing (compose) uploads, in bytes.
 max_attachment_bytes = 104857600  # 100 MB
 
+# Seconds a sent message waits in the Outbox before the agent may relay it —
+# the window in which you can still call it back. 0 sends at the first
+# opportunity. Settings → Composing writes this too, and what is set there wins;
+# this is the default a fresh install starts from.
+#
+# Every queued message has "Send now" and "Cancel send" on it whatever this
+# says, so the delay only decides how long the default is, not whether you can
+# intervene. A delayed message goes out within one poll_interval of its
+# deadline, not on it: the agent is not woken for a send it would refuse.
+send_delay_seconds = 0
+
 # Once a day, fetch the VERSION file from meerail's default branch and let the
 # UI say so if it is newer than this build (sidebar strip, Settings → About).
 #

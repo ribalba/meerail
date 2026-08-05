@@ -471,10 +471,16 @@ class PendingAction(Base):
         ForeignKey("messages.id", ondelete="CASCADE")
     )
     type: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Type-specific detail. A send carries the envelope (mail_from, rcpt_to) and
+    # the outbound id, and optionally "not_before": an ISO instant before which
+    # the agent must not attempt it. See core/outbox.py.
     payload: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
-    # pending | leased | done. "error" is written by nothing current: it is what
-    # the version with a five-attempt cap left on rows it gave up on, and those
-    # rows are still here — agent --requeue-abandoned puts them back.
+    # pending | leased | held | done. "held" is a send the user cancelled: the
+    # agent only selects "pending", so parking a row there stops it going out
+    # while keeping the envelope it was built with. "error" is written by
+    # nothing current: it is what the version with a five-attempt cap left on
+    # rows it gave up on, and those rows are still here — agent
+    # --requeue-abandoned puts them back.
     status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
     attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     # The last failure, kept while the row goes on being retried — not a verdict.
@@ -502,7 +508,10 @@ class Outbound(Base):
     account_id: Mapped[int] = mapped_column(
         ForeignKey("accounts.id", ondelete="CASCADE"), index=True, nullable=False
     )
-    # draft | queued | sent. "error" is historical, as on PendingAction.status.
+    # draft | queued | held | sent. "held" is a send that was cancelled before
+    # it went out: still the user's mail, still in the Outbox, but with nothing
+    # coming for it until they say so. "error" is historical, as on
+    # PendingAction.status.
     state: Mapped[str] = mapped_column(String(16), default="draft", nullable=False)
 
     to_addrs: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)

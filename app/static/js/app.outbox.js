@@ -25,7 +25,8 @@ App.outbox = (function () {
   let rows = [];             // last /api/outbox payload
   let openId = null;         // the message showing in the reading pane
   let request = 0;           // guards against an older fetch landing last
-  let busy = false;          // a retry/discard is in flight — see actionBar()
+  let busy = false;          // a retry/cancel/discard is in flight — see actionBar()
+  let ticker = null;         // retimes a delayed send's countdown — see counting()
 
   const $ = (s) => document.querySelector(s);
   const byId = (id) => rows.find((r) => r.id === id) || null;
@@ -34,13 +35,26 @@ App.outbox = (function () {
   // Said the same way in the row, the header and the sidebar, because they are
   // the same fact seen from three distances.
 
-  function stuck(r) { return !!r.error || !r.queued; }
+  function stuck(r) { return !r.held && (!!r.error || !r.queued); }
 
+  // Held first, and before the error: a cancelled message is not failing, it is
+  // waiting for its author, and saying "not going out — 3 failed attempts"
+  // about mail they stopped themselves is answering a question nobody asked.
   function stateLabel(r) {
+    if (r.held) return "Cancelled — not being sent";
     if (!r.queued) return "Not queued — an older agent gave up on it";
     if (r.error) return `Not going out — ${r.attempts} failed attempt${r.attempts === 1 ? "" : "s"}`;
+    if (r.send_at) return cap(sendingText(r.send_at));
     return r.attempts ? `Waiting — ${r.attempts} attempt${r.attempts === 1 ? "" : "s"} so far`
                       : "Waiting to be sent";
+  }
+
+  // "sending in 40s", and "sending now" once the wait is over — never "sending
+  // due now", which is untilText's phrasing for a retry that is overdue and
+  // means something else.
+  function sendingText(iso) {
+    const t = untilText(iso);
+    return t === "due now" ? "sending now" : `sending ${t}`;
   }
 
   // "in 4m". The negative case matters: an overdue action is due *now*, and
@@ -57,7 +71,10 @@ App.outbox = (function () {
   }
 
   function nextText(r) {
-    if (!r.queued) return "";
+    if (r.held || !r.queued) return "";
+    // A message inside its send delay has not been tried and is not going to
+    // be; "next attempt" would be the wrong noun for the first one.
+    if (r.send_at) return sendingText(r.send_at);
     if (!r.attempts) return "on the agent's next pass";
     return r.next_attempt_at ? `next attempt ${untilText(r.next_attempt_at)}` : "due now";
   }
@@ -84,7 +101,8 @@ App.outbox = (function () {
         <div class="msg-snippet">${App.esc(r.snippet || "")}</div>
         <div class="ob-row-state">
           <span class="ob-chip${stuck(r) ? " stuck" : ""}">
-            ${App.icon(stuck(r) ? "warning" : "sent", 11)}${App.esc(stateLabel(r))}</span>
+            ${App.icon(stuck(r) ? "warning" : "sent", 11)}<span class="ob-when"
+              >${App.esc(stateLabel(r))}</span></span>
           ${r.attachment_count ? `<span class="attach-glyph">${App.icon("paperclip", 12)}</span>` : ""}
         </div>`;
     el.addEventListener("click", () => {
@@ -109,6 +127,40 @@ App.outbox = (function () {
     host.appendChild(frag);
   }
 
+  // --- The countdown -------------------------------------------------------
+  // A delayed send is the one thing in this folder that changes on its own
+  // between refreshes, and a window that says "sending in 40s" for two minutes
+  // is worse than one that says nothing: the number is the whole reason to look
+  // at the screen at all. So the labels are retimed in place every second —
+  // only their text, never the rows, because rebuilding the list under a reader
+  // who is scrolling it is the cure being worse than the disease.
+
+  // Only while there is a number still going down. A delay that has run out
+  // leaves the row saying "sending now" until the agent's pass takes it away,
+  // and nothing about that sentence changes with the clock.
+  function counting() {
+    return rows.some((r) => !r.held && r.send_at && App.utcDate(r.send_at) > Date.now());
+  }
+
+  function tick() {
+    for (const r of rows) {
+      const el = document.querySelector(`.ob-row[data-id="${r.id}"] .ob-when`);
+      if (el) el.textContent = stateLabel(r);
+    }
+    const open = openId === null ? null : byId(openId);
+    const el = document.querySelector(".ob-detail .ob-when");
+    if (el && open) el.textContent = stateLabel(open);
+    if (!counting()) stopTicker();
+  }
+
+  function startTicker() {
+    if (ticker === null && counting()) ticker = setInterval(tick, 1000);
+  }
+
+  function stopTicker() {
+    if (ticker !== null) { clearInterval(ticker); ticker = null; }
+  }
+
   async function load() {
     const mine = ++request;
     let data;
@@ -123,6 +175,7 @@ App.outbox = (function () {
     if (mine !== request) return;
     rows = data.rows || [];
     renderList();
+    startTicker();
     // A background refresh lands here too (mail sends, the agent tries again),
     // so the pane has to be brought along rather than left showing a message
     // that has since gone out.
@@ -136,13 +189,30 @@ App.outbox = (function () {
   }
 
   function actionBar(r) {
-    // "Try now" only says anything a waiting message does not already do — the
-    // agent is coming for it either way — so it is offered on everything but
-    // reads as the answer to "I just fixed the port".
+    // The same verb, named for the situation it is being pressed in: a message
+    // that is failing gets tried again, a message that is waiting on purpose
+    // gets sent. Offered on everything, because "go now" is a sentence you can
+    // always say to a queue.
+    const going = !!r.send_at || r.held;
+    const send = going
+      ? { label: "Send now", icon: "sent",
+          title: "Send this message now instead of at the end of its delay" }
+      : { label: "Try now", icon: "refresh",
+          title: "Ask the agent to try this message now instead of at the end of its backoff" };
+
+    // Cancel is only offered while there is still something to cancel. A held
+    // message has already been stopped, and saying so twice would make the
+    // button look like it had not worked the first time.
+    const cancel = r.held ? "" : `
+      <button class="ob-btn" data-ob="cancel"${busy ? " disabled" : ""}
+        title="Stop this message going out — it stays here until you send it"
+        >${App.icon("close", 15)} Cancel send</button>`;
+
     return `<div class="ob-actions">
       <button class="ob-btn" data-ob="retry"${busy ? " disabled" : ""}
-        title="Ask the agent to try this message now instead of at the end of its backoff"
-        >${App.icon("refresh", 15)} Try now</button>
+        title="${App.esc(send.title)}"
+        >${App.icon(send.icon, 15)} ${App.esc(send.label)}</button>
+      ${cancel}
       <button class="ob-btn danger" data-ob="discard"${busy ? " disabled" : ""}
         title="Take this message out of the queue — it will never be sent"
         >${App.icon("trash", 15)} Delete</button>
@@ -159,7 +229,23 @@ App.outbox = (function () {
     // The error is the reason this screen exists, so it goes above the message
     // rather than under it: whoever opened this row is not here to re-read
     // their own mail.
-    const why = m.error
+    const why = m.held
+      // A cancelled message can still carry the error from before it was
+      // cancelled, and that error is often the reason it was: it stays on
+      // screen, under a banner that no longer calls it a fault.
+      ? `<div class="ob-waiting">${App.icon("close", 15)}
+           <span>${App.esc(stateLabel(m))}. It is still here, with everything it was
+           addressed to — nothing goes out until you press <strong>Send now</strong>.
+           ${m.error ? "The last attempt before it was stopped said:" : ""}</span>
+         </div>${m.error ? `<pre class="ob-held-error">${App.esc(m.error)}</pre>` : ""}`
+      : m.send_at
+      ? `<div class="ob-waiting">${App.icon("sent", 15)}
+           <span><span class="ob-when">${App.esc(stateLabel(m))}</span>. Written messages
+           wait here before they go, so
+           there is time to change your mind — <strong>Send now</strong> skips the wait,
+           <strong>Cancel send</strong> stops it.</span>
+         </div>`
+      : m.error
       ? `<div class="ob-error">
            <div class="ob-error-head">${App.icon("warning", 15)}
              <span>${App.esc(stateLabel(m))}</span></div>
@@ -240,18 +326,24 @@ App.outbox = (function () {
     renderDetail(m);
   }
 
-  // --- The two verbs -------------------------------------------------------
+  // --- The three verbs -----------------------------------------------------
+
+  const WORKING = { retry: "Asking the agent…", cancel: "Stopping it…", discard: "Deleting…" };
 
   async function act(what, id) {
     const status = $("#ob-action-status");
+    // Only the irreversible one asks. Cancelling is undone by the button next
+    // to it, and putting a dialog in front of a send someone is trying to catch
+    // in the next twenty seconds would be the one place it actually costs them.
     if (what === "discard" && !confirm(
         "Delete this message without sending it?\n\nIt is not sent anywhere and cannot be got back.")) {
       return;
     }
     busy = true;
-    if (status) status.textContent = what === "retry" ? "Asking the agent…" : "Deleting…";
+    if (status) status.textContent = WORKING[what] || "Working…";
     try {
       if (what === "retry") await App.api.outboxRetry(id);
+      else if (what === "cancel") await App.api.outboxCancel(id);
       else await App.api.outboxDiscard(id);
     } catch (e) {
       busy = false;
@@ -264,13 +356,13 @@ App.outbox = (function () {
       App.reader.clear();
       App.mobile.show("list");
     }
-    // Both verbs change the sidebar count as well as the list, and the retry
+    // Every verb changes the sidebar count as well as the list, and the retry
     // may have already sent the message by the time the next refresh lands.
     await App.shell.reloadList();
     App.status.refresh();
   }
 
-  function clear() { openId = null; }
+  function clear() { openId = null; stopTicker(); }
 
   return { load, open, clear, count: () => rows.length,
            openId: () => openId };

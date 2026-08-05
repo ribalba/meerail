@@ -154,6 +154,21 @@ def set_present(email: str, folder: str, uids: list[int]) -> int:
         return ingest.prune_vanished(db, mailbox, uids)
 
 
+def unplaced_uids(email: str, folder: str, uids: list[int]) -> list[int]:
+    """Which of these server UIDs the folder holds no placement for — the
+    question the agent's reconcile asks before fetching anything back."""
+    with session() as db:
+        account = ingest.get_or_create_account(db, email)
+        mailbox = _mailbox(db, account, folder)
+        return ingest.unplaced_uids(db, mailbox, uids)
+
+
+def move_in_flight(email: str, message_id: str) -> bool:
+    with session() as db:
+        account = ingest.get_or_create_account(db, email)
+        return ingest.has_move_in_flight(db, account, message_id)
+
+
 def prune_folders(email: str, present_names: set[str]) -> int:
     with session() as db:
         account = ingest.get_or_create_account(db, email)
@@ -339,4 +354,4 @@ def send_action_state(outbound_id: int) -> dict | None:
             return None
         a = rows[0]
         return {"status": a.status, "attempts": a.attempts, "updated_at": a.updated_at,
-                "error": a.error}
+                "error": a.error, "payload": dict(a.payload or {})}

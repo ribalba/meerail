@@ -204,6 +204,51 @@ def test_a_send_that_works_says_so(monkeypatch, capsys):
     assert db.outbound.state == "sent"
 
 
+def test_a_delayed_send_is_left_alone_until_its_time(monkeypatch, capsys):
+    """The undo window, from the agent's side.
+
+    A message may be written with a deadline before which it must not go out.
+    That is not a backoff — it applies to the first attempt, costs no attempt
+    count, and says nothing about anything being wrong — so a pass that meets
+    one must walk past it in silence and leave the queue exactly as it found it.
+    """
+    monkeypatch.setattr(agent_actions.smtp, "send_raw", lambda *_a, **_kw: None)
+    action = Action()
+    action.payload = dict(action.payload,
+                          not_before=(utcnow() + timedelta(minutes=5)).isoformat())
+    db = DB([action])
+
+    applied, failed, sent = agent_actions.drain_actions(db, Bridge(), AccountRow())
+
+    assert (applied, failed, sent) == (0, 0, 0)
+    assert action.attempts == 0
+    assert action.status == "pending"
+    assert db.outbound.state == "queued"
+    assert capsys.readouterr().out == ""
+
+    # And once the deadline is behind it, the same row goes out on the next pass
+    # with nothing else having changed.
+    action.payload = dict(action.payload,
+                          not_before=(utcnow() - timedelta(seconds=1)).isoformat())
+    applied, _failed, sent = agent_actions.drain_actions(db, Bridge(), AccountRow())
+
+    assert (applied, sent) == (1, 1)
+    assert db.outbound.state == "sent"
+
+
+def test_an_unreadable_delay_sends_rather_than_stalls(monkeypatch):
+    """A not_before that cannot be parsed — hand-edited, or written by something
+    that did not share the convention — must not park mail forever. Sending a
+    message a few seconds early is a smaller failure than never sending it."""
+    monkeypatch.setattr(agent_actions.smtp, "send_raw", lambda *_a, **_kw: None)
+    action = Action()
+    action.payload = dict(action.payload, not_before="whenever")
+
+    applied, _failed, sent = agent_actions.drain_actions(DB([action]), Bridge(), AccountRow())
+
+    assert (applied, sent) == (1, 1)
+
+
 def test_a_healthy_flag_push_says_nothing(capsys):
     """Only sends get a line of their own; the rest of the queue is noise."""
     action = Action("setflags", {"uid": 3, "folder": "INBOX", "add": ["\\Seen"]})

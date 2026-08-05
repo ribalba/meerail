@@ -10,6 +10,8 @@ app: mail piling up in `outbound` with no way to know it was there.
 import sys
 from pathlib import Path
 
+import pytest
+
 import dbfixture
 from helpers import api
 
@@ -23,6 +25,16 @@ def queue_one(account, subject="Waiting", body="body text", to="dest@example.com
         "account_id": account["id"], "to": [to], "subject": subject, "body_text": body})
     assert code == 200 and r["state"] == "queued"
     return r["id"]
+
+
+@pytest.fixture
+def no_send_delay():
+    """The send delay is an install-wide setting, so a test that changes it has
+    to put it back — the next test's mail would otherwise sit in the outbox
+    waiting out a delay nobody asked for."""
+    before = api("GET", "/api/outbox/settings")[1]["send_delay_seconds"]
+    yield lambda seconds: api("PUT", "/api/outbox/settings", {"send_delay_seconds": seconds})
+    api("PUT", "/api/outbox/settings", {"send_delay_seconds": before})
 
 
 def row_for(oid: int) -> dict | None:
@@ -113,6 +125,129 @@ def test_try_now_makes_a_backed_off_message_due_again(account):
     assert row_for(oid)["queued"] is True
 
 
+# --- The delay, and the two buttons it exists for ---------------------------
+#
+# A sent message is unrecallable the instant the SMTP server takes it, so the
+# only place to put "actually, no" is before that — a stretch of time in which
+# the mail is written, visible, and still here. These pin the three things that
+# has to mean: it waits, it can be released early, and it can be stopped.
+
+
+def test_a_delayed_send_waits_and_says_when_it_will_go(account, no_send_delay):
+    set_delay = no_send_delay
+    set_delay(600)
+    oid = queue_one(account, subject="Second thoughts")
+
+    row = row_for(oid)
+    assert row["send_at"], "a delayed send has to say when it is going"
+    assert row["send_at"] > row["created_at"]
+    # The clock the UI shows is the later of the two, and before the first
+    # attempt the delay is the only one running.
+    assert row["next_attempt_at"] == row["send_at"]
+    assert row["error"] is None and row["attempts"] == 0 and row["held"] is False
+
+    # The agent is told the same thing, in the payload it reads.
+    assert dbfixture.send_action_state(oid)["payload"]["not_before"]
+
+
+def test_no_delay_leaves_a_send_exactly_as_it_was(account, no_send_delay):
+    """The default, and every install that predates the setting: nothing is
+    written on the queue row and nothing waits."""
+    no_send_delay(0)
+    oid = queue_one(account)
+
+    assert row_for(oid)["send_at"] is None
+    assert "not_before" not in dbfixture.send_action_state(oid)["payload"]
+
+
+def test_send_now_ends_the_delay(account, no_send_delay):
+    no_send_delay(3600)
+    oid = queue_one(account, subject="Go on then")
+    assert row_for(oid)["send_at"]
+
+    assert api("POST", f"/api/outbox/{oid}/retry")[0] == 200
+
+    assert row_for(oid)["send_at"] is None
+    # Cleared on the row the agent actually reads — not merely on the copy the
+    # UI was shown.
+    assert "not_before" not in dbfixture.send_action_state(oid)["payload"]
+
+
+def test_cancel_stops_a_send_without_throwing_it_away(account, no_send_delay):
+    """The middle ground between letting it go and deleting it: the message
+    stays, with its envelope, and nothing comes for it until it is sent."""
+    no_send_delay(3600)
+    oid = queue_one(account, subject="Not this one", to="oops@example.com")
+    envelope = dbfixture.send_action_state(oid)["payload"]
+
+    code, body = api("POST", f"/api/outbox/{oid}/cancel")
+    assert code == 200 and body["held"] is True
+
+    row = row_for(oid)
+    assert row is not None and row["held"] is True
+    assert row["state"] == "held"
+    assert row["subject"] == "Not this one"
+
+    # Parked, not deleted: the agent's drain only selects "pending", and the
+    # envelope it was built with is still there to send from.
+    after = dbfixture.send_action_state(oid)
+    assert after["status"] == "held"
+    assert after["payload"]["mail_from"] == envelope["mail_from"]
+    assert after["payload"]["rcpt_to"] == envelope["rcpt_to"]
+
+    # Asking twice is not an error — two windows, or a double click.
+    assert api("POST", f"/api/outbox/{oid}/cancel")[0] == 200
+
+
+def test_send_now_puts_a_cancelled_message_back(account, no_send_delay):
+    no_send_delay(3600)
+    oid = queue_one(account)
+    api("POST", f"/api/outbox/{oid}/cancel")
+
+    assert api("POST", f"/api/outbox/{oid}/retry")[0] == 200
+
+    row = row_for(oid)
+    assert row["held"] is False and row["state"] == "queued"
+    assert row["send_at"] is None
+    after = dbfixture.send_action_state(oid)
+    assert after["status"] == "pending"
+    assert "not_before" not in after["payload"]
+
+
+def test_a_cancelled_message_can_still_be_deleted(account, no_send_delay):
+    no_send_delay(3600)
+    oid = queue_one(account)
+    api("POST", f"/api/outbox/{oid}/cancel")
+
+    assert api("DELETE", f"/api/outbox/{oid}")[0] == 204
+    assert row_for(oid) is None
+    assert dbfixture.send_action_state(oid) is None
+
+
+def test_changing_the_delay_does_not_move_a_deadline_already_running(account, no_send_delay):
+    """A message whose author has already watched a countdown start keeps the
+    deadline they were shown. The setting decides what the next message gets."""
+    set_delay = no_send_delay
+    set_delay(3600)
+    oid = queue_one(account)
+    before = row_for(oid)["send_at"]
+
+    set_delay(0)
+
+    assert row_for(oid)["send_at"] == before
+    assert row_for(queue_one(account))["send_at"] is None
+
+
+def test_the_delay_setting_round_trips_and_refuses_nonsense(no_send_delay):
+    set_delay = no_send_delay
+    assert set_delay(45) == (200, {"send_delay_seconds": 45})
+    assert api("GET", "/api/outbox/settings")[1]["send_delay_seconds"] == 45
+    assert set_delay(-1)[0] == 400
+    assert set_delay(10 ** 9)[0] == 400
+    # And the ceiling is reported, so the UI does not have to know it too.
+    assert api("GET", "/api/outbox/settings")[1]["max_delay_seconds"] > 0
+
+
 def test_the_agent_says_out_loud_what_is_still_waiting(account, capsys):
     """The other half of the same problem, on the other side of the database.
 
@@ -140,6 +275,22 @@ def test_the_agent_is_quiet_about_an_empty_outbox(account, capsys):
     with dbfixture.session() as db:
         assert agent_actions.report_waiting(db, account["email"]) == 0
     assert capsys.readouterr().out == ""
+
+
+def test_the_agent_is_quiet_about_a_cancelled_message(account, capsys, no_send_delay):
+    """The warning is for mail that cannot get out. A message someone stopped by
+    hand is neither news nor a fault, and repeating it every pass would bury the
+    one line in that log that means something."""
+    no_send_delay(3600)
+    oid = queue_one(account, subject="Stopped on purpose")
+    api("POST", f"/api/outbox/{oid}/cancel")
+
+    with dbfixture.session() as db:
+        assert agent_actions.report_waiting(db, account["email"]) == 0
+    assert capsys.readouterr().out == ""
+
+    # But it is still in the folder — quiet is not the same as gone.
+    assert row_for(oid)["held"] is True
 
 
 def test_discarding_takes_a_message_out_of_the_queue_for_good(account):

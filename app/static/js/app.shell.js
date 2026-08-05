@@ -550,6 +550,40 @@ App.shell = (function () {
     }
   }
 
+  // --- Settings modal (send delay) ---
+  // Server-side, unlike the two below it: the delay decides when the *agent*
+  // may send, so it cannot live in one browser's localStorage — the message
+  // would go out on time from a machine that never had the preference.
+  async function loadSendDelay() {
+    const input = $("#send-delay");
+    if (document.activeElement === input) return;   // never clobber a number being typed
+    try {
+      const cfg = await App.api.outboxSettings();
+      input.value = cfg.send_delay_seconds;
+    } catch (_) {}
+  }
+
+  async function saveSendDelay() {
+    const status = $("#send-delay-status");
+    status.classList.remove("error");
+    const seconds = parseInt($("#send-delay").value, 10);
+    if (isNaN(seconds) || seconds < 0) {
+      status.textContent = "Enter a number of seconds";
+      status.classList.add("error");
+      return;
+    }
+    status.textContent = "Saving…";
+    try {
+      await App.api.saveOutboxSettings(seconds);
+    } catch (e) {
+      status.textContent = e.message || "Could not save";
+      status.classList.add("error");
+      return;
+    }
+    status.textContent = seconds ? `Saved — messages wait ${seconds}s` : "Saved — sending straight away";
+    setTimeout(() => { status.textContent = ""; }, 2500);
+  }
+
   // --- Settings modal (age tint) ---
   // Applied on input rather than behind a Save button: it is a purely local
   // display preference, and seeing the list recolour as you type is the whole
@@ -564,6 +598,7 @@ App.shell = (function () {
     $("#settings-modal").hidden = false;
     renderSettingsAccounts();
     loadMeeratoUrl();
+    loadSendDelay();
     $("#theme-mode").value = App.theme.mode();
     $("#age-days").value = App.list.ageDays();
     $("#compose-html-default").checked = App.compose.htmlDefault();
@@ -643,6 +678,10 @@ App.shell = (function () {
     });
     $("#btn-refresh").addEventListener("click", requestRefresh);
     $("#meerato-save").addEventListener("click", saveMeeratoUrl);
+    $("#send-delay-save").addEventListener("click", saveSendDelay);
+    $("#send-delay").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); saveSendDelay(); }
+    });
     // Immediate, like the age tint below it: the whole window repaints as you
     // pick, which is the only honest preview a theme picker can give.
     $("#theme-mode").addEventListener("change", (e) => App.theme.set(e.target.value));

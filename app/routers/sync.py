@@ -133,6 +133,12 @@ def _outbox_status(db) -> dict:
     and it does not mean the message has been given up on — nothing gives up on
     a queued message. It is there so the UI can say *why* the count is not
     going down.
+
+    "queued" and not every unsent state, so a message whose send was cancelled
+    is not in this number: the strip exists to say that mail is on its way out
+    and may be stuck, and a message somebody stopped by hand is neither. It is
+    still in the Outbox, and the folder's own count — which is about what is in
+    the folder rather than what is in flight — does include it.
     """
     queued, oldest = db.execute(
         select(func.count(Outbound.id), func.min(Outbound.created_at))

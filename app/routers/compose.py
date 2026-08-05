@@ -18,6 +18,7 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy import distinct, func, select, tuple_
 from sqlalchemy.orm import Session as DBSession
 
+from core import outbox as outbox_core
 from core.config import get_settings
 from core.database import get_db
 from core.events import publish_command
@@ -271,10 +272,16 @@ def send(req: SendRequest, db: DBSession = Depends(get_db)):
 
     # The agent fetches the raw message by id (keeps big attachments out of the queue).
     # mail_from is the chosen sender so Proton relays it as that address.
-    db.add(PendingAction(
-        account_id=account.id, type="send",
-        payload={"outbound_id": outbound.id, "mail_from": from_addr, "rcpt_to": rcpt},
-    ))
+    #
+    # not_before is the configured delay, absent when there is none. It is the
+    # difference between a message the agent has not got to yet and one it is
+    # deliberately sitting on, and only the second can be called back — which is
+    # the point of the setting.
+    payload = {"outbound_id": outbound.id, "mail_from": from_addr, "rcpt_to": rcpt}
+    hold = outbox_core.hold_until(outbox_core.send_delay(db), utcnow())
+    if hold:
+        payload["not_before"] = hold
+    db.add(PendingAction(account_id=account.id, type="send", payload=payload))
     db.commit()
 
     # Staged files are now baked into raw_mime; drop them.
@@ -292,9 +299,15 @@ def send(req: SendRequest, db: DBSession = Depends(get_db)):
     # outbox for thirty. The pass this asks for sends the mail and then reads
     # the server's copy of it back, which is closer together than a server
     # necessarily likes — see _SEND_SETTLE_SECONDS in the agent's sync.
-    publish_command({"type": "refresh", "email": account.email})
+    #
+    # Not for a held message: waking the agent to look at an action it must
+    # refuse is a connection made for nothing. It goes out on the first pass
+    # after the delay expires instead, so a delayed send lands within one
+    # poll_interval of its deadline rather than on it.
+    if not hold:
+        publish_command({"type": "refresh", "email": account.email})
 
-    return {"id": outbound.id, "state": outbound.state}
+    return {"id": outbound.id, "state": outbound.state, "send_at": hold}
 
 
 # --- Which address do I write to these people from? -------------------------

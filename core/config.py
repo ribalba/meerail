@@ -251,6 +251,7 @@ _SECTION_KEYS: dict[str, dict[str, str]] = {
         "contacts_scan_years": "contacts_scan_years",
         "data_dir": "data_dir",
         "max_attachment_bytes": "max_attachment_bytes",
+        "send_delay_seconds": "send_delay_seconds",
         "update_check": "update_check",
     },
     "agent": {
@@ -393,6 +394,13 @@ class Settings(BaseSettings):
 
     # Per-attachment cap for outgoing (compose) uploads, in bytes.
     max_attachment_bytes: int = 100 * 1024 * 1024  # 100 MB
+
+    # Seconds a composed message waits in the Outbox before the agent may send
+    # it — the undo window. 0 sends at the first opportunity, which is what
+    # every version before this one did. The Settings modal writes a `settings`
+    # row that overrides this; this is only the default it starts from, for an
+    # install that wants the delay without anyone opening the UI.
+    send_delay_seconds: int = 0
 
     # Once a day, ask github.com whether a newer meerail has been released, and
     # let the UI say so. This is the only outbound request the server makes;

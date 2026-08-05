@@ -70,6 +70,74 @@ def test_ingest_threads_dedups_flags_and_prunes(account):
     assert dbfixture.message_count(email) == 2
 
 
+def test_a_placement_lost_below_the_cursor_is_still_visible_to_the_repair(account):
+    """The other half of prune_vanished, and the half that was missing.
+
+    A pass only ever reads below a folder's cursor: new mail is fetched above
+    last_uid, update_flags skips a UID it holds no row for, and the sweep's one
+    write is the prune. So a placement pruned during a moment when the server
+    did not list it — a Bridge part way through loading the mailbox, a Proton
+    label cleared and put back — stayed gone, in a folder reconciled every
+    fifteen minutes that could never notice. This is the query that notices.
+    """
+    email = account["email"]
+    mid = f"gap-{uuid.uuid4().hex}@t"
+    dbfixture.ingest_raw_message(
+        email, make_message(f"<{mid}>", "Subject GAP", "x@y.com", email, "body", T0), uid=1)
+    # A second label on the same message, so pruning the inbox placement leaves
+    # the content alive — which is exactly how this was found in the field.
+    dbfixture.record_placement(email, mid, uid=99, folder="All Mail", role_hint="\\All")
+
+    assert dbfixture.unplaced_uids(email, "INBOX", [1]) == []
+
+    dbfixture.set_present(email, "INBOX", [])          # the server "forgets" it
+    assert _mb(email, "INBOX")["total"] == 0
+    assert dbfixture.message_count(email) == 1         # the All Mail copy held it
+
+    # The server lists uid 1 again. It is below the cursor, so nothing else in a
+    # pass would ever ask about it.
+    assert dbfixture.unplaced_uids(email, "INBOX", [1]) == [1]
+
+    # And once it is back, it stops being reported as missing.
+    dbfixture.record_placement(email, mid, uid=1, folder="INBOX")
+    assert dbfixture.unplaced_uids(email, "INBOX", [1]) == []
+
+
+def test_a_move_still_landing_is_not_read_as_a_gap_to_repair(account):
+    """A move the user has just made looks exactly like a lost placement: the
+    source placement goes the moment the key is pressed, and the server goes on
+    listing the UID until the agent applies the move and catches up. Repairing
+    that would put the message straight back in the folder it was archived out
+    of — the disappearance the optimistic placement exists to prevent, in
+    reverse."""
+    email = account["email"]
+    mid = f"inflight-{uuid.uuid4().hex}@t"
+    dbfixture.ingest_raw_message(
+        email, make_message(f"<{mid}>", "Subject FLIGHT", "x@y.com", email, "body", T0), uid=1)
+    dbfixture.create_folder(email, "Archive", role_hint="\\Archive")
+
+    _, boxes = api("GET", "/api/mailboxes")
+    mine = next(a for a in boxes["accounts"] if a["email"] == email)["mailboxes"]
+    inbox = next(m for m in mine if m["role"] == "inbox")
+    _, listing = api("GET", f"/api/messages?mailbox_id={inbox['id']}&limit=50")
+    message_id = listing["rows"][0]["id"]
+
+    code, body = api("POST", f"/api/messages/{message_id}/archive"
+                             f"?source_mailbox_id={inbox['id']}")
+    assert code == 200, body
+
+    # The inbox placement is gone locally and the move is queued, so the UID the
+    # server still lists reads as missing — and must be left alone.
+    assert dbfixture.unplaced_uids(email, "INBOX", [1]) == [1]
+    assert dbfixture.move_in_flight(email, mid) is True
+
+    # Applied an hour ago and the server still lists it: the move is not coming
+    # back for it, and whatever the server says now is the truth.
+    dbfixture.apply_actions(email, minutes_ago=60)
+    assert dbfixture.move_in_flight(email, mid) is False
+    assert dbfixture.unplaced_uids(email, "INBOX", [1]) == [1]   # now safe to repair
+
+
 def test_repeated_alerts_with_one_subject_do_not_become_one_thread(account):
     """Machine mail shares a subject but is not a conversation.
 
