@@ -126,6 +126,11 @@ App.keys = (function () {
           run: () => App.shell.goto("unified") },
         { chord: ["g", "f"], show: "g f", label: "Go to Flagged",
           run: () => App.shell.goto("flagged") },
+        // Reachable even while the row is hidden, which it is whenever the
+        // outbox is empty: "did that actually go?" is a question worth being
+        // able to ask at any moment, and the answer is the empty folder.
+        { chord: ["g", "o"], show: "g o", label: "Go to Outbox",
+          run: () => App.shell.goto("outbox") },
       ],
     },
     {
@@ -156,6 +161,10 @@ App.keys = (function () {
       group: "General",
       items: [
         { keys: ["c"], show: "c", label: "Compose", run: () => App.compose.openNew() },
+        // Handled ahead of the table in handle(), like the other modified keys:
+        // it has to work while the composer has the keyboard, since swapping
+        // the draft you are typing in for another one is the point of it.
+        { show: "⌥/Alt C", label: "Next minimized draft" },
         { keys: ["/"], show: "/", label: "Search", run: () => App.search.focusInput() },
         { show: "⌘/Ctrl ↵", label: "Send message" },
         // Handled ahead of the table in handle() — modified keys never reach it.
@@ -233,6 +242,16 @@ App.keys = (function () {
     }
     if (e.altKey && !mod && e.key === "Enter") {
       if (App.compose.isOpen()) { e.preventDefault(); App.compose.sendNow(); }
+      return;
+    }
+    // Alt+C brings the next minimized draft up, parking whatever is in the
+    // composer to make room, so repeated presses walk all of them. Up here
+    // rather than in the table because it has to work with the caret in a
+    // draft — and matched on the physical key, since Option+C on a Mac reports
+    // e.key as "ç" and never as "c".
+    if (e.altKey && !mod && e.code === "KeyC") {
+      e.preventDefault();
+      App.compose.cycle();
       return;
     }
     if (e.key === "Escape") { e.preventDefault(); onEscape(); return; }

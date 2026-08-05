@@ -14,6 +14,7 @@ from core import ingest
 from core.database import SessionLocal
 from core.models import utcnow
 
+import actions
 import commands
 import log
 from actions import drain_actions
@@ -581,6 +582,11 @@ def _report_error(email: str, message: str) -> None:
     well *be* the database — so this opens its own and swallows anything it
     throws. Reporting an error must never become a second error that takes the
     retry loop down with it; the print above is the guaranteed record.
+
+    The outbox is named here as well, because a pass that dies before
+    drain_actions leaves queued mail entirely unmentioned: the log says "sync
+    failed" on a loop while the reply someone wrote an hour ago sits unsent
+    behind it, and nothing connects the two.
     """
     db = SessionLocal()
     try:
@@ -588,6 +594,12 @@ def _report_error(email: str, message: str) -> None:
         db.commit()
     except Exception as e:  # noqa: BLE001
         log.warn(f"could not record sync error in the database: {e!r}", email)
+    try:
+        # Throttled: this loop can fail every thirty seconds, and the list is a
+        # reminder of what is riding on the failure above, not the failure.
+        actions.report_waiting(db, email, throttle=True)
+    except Exception as e:  # noqa: BLE001
+        log.warn(f"could not read the outbox: {e!r}", email)
     finally:
         db.close()
 
@@ -619,6 +631,11 @@ def sync_once(account: AccountConfig, cfg: Settings, reconcile: bool = True) -> 
         # error left standing for that whole window reads as "still broken"
         # while the progress bar beside it visibly advances.
         ingest.clear_agent_error(db, account_row)
+        # Name, colour and footer, for whichever of them meerail.toml pins. Done
+        # here rather than at the end of the pass so an edit to the file shows up
+        # in the UI as soon as the agent reaches the server, without waiting on a
+        # backfill that may run for another hour — or on a pass that fails.
+        ingest.record_presentation(db, account_row, account.presentation())
         # Read once, up front: a request arriving mid-pass must not be cleared
         # by this pass, which has already walked part of the mailbox without it.
         recheck_at = ingest.take_recheck(db, account_row)

@@ -361,3 +361,96 @@ def test_reading_a_message_that_is_still_being_moved_queues_no_bad_uid(account):
     assert detail["seen"] is True                 # read locally, as pressed
     for a in _actions(email):
         assert a["payload"].get("uid", 1) > 0, f"queued a local-only UID: {a}"
+
+
+def _seed_folder(email, folder, role_hint):
+    """Give the account a folder, the only way one appears — a sync that saw it."""
+    dbfixture.ingest_raw_message(email, make_message(
+        f"<seed-{uuid.uuid4().hex}@t>", "Seed", "x@y.com", email, "seed", T0),
+        uid=1, folder=folder, role_hint=role_hint)
+
+
+def test_trashing_a_labelled_message_queues_one_move_not_one_per_label(account):
+    """One Proton message wearing two labels is one message, and wants moving once.
+
+    Queueing a move per placement sent the agent a second command addressing a
+    UID the first move had just retired — "Message does not exist", logged once
+    per trashed message and retried until it settled having achieved nothing.
+    Worse, it was a second chance for the destructive half of a hand-rolled move
+    to run against a message already sitting in Trash, which is how it got
+    deleted outright.
+    """
+    email, aid = account["email"], account["id"]
+    tok = "LABELTOK" + uuid.uuid4().hex[:6]
+    _, rfc_id = ingest_one(email, aid, tok)
+    _seed_folder(email, "Trash", "\\Trash")
+    # The same message under \All as well, which is how Proton and Gmail hand it
+    # over: two placements, two UIDs, one message.
+    assert dbfixture.record_placement(email, rfc_id, uid=99, folder="All Mail",
+                                      role_hint="\\All")
+
+    _, r = api("GET", f"/api/search?q={tok}&account_id={aid}")
+    code, body = api("POST", f"/api/messages/threads/{r['rows'][0]['thread_id']}/trash"
+                             f"?account_id={aid}")
+    assert code == 200, body
+    assert body["moved"] == 2                     # both placements left, locally
+
+    moves = [m for m in _actions(email) if m["type"] in ("move", "delete")]
+    assert len(moves) == 1, moves
+    # From a real folder, not \All: a move out of \All is an added label and
+    # nothing else, which would leave the message in the inbox it just left.
+    assert moves[0]["payload"]["from_folder"] == "INBOX"
+    assert moves[0]["payload"]["to_folder"] == "Trash"
+
+
+def _archive_then_settle(email, aid, tok, minutes_ago):
+    """Archive a message and retire the queued move, `minutes_ago` in the past.
+
+    Leaves the message where a placement we wrote ourselves lives on with no
+    queued action behind it — the agent applied the move and the sync has not
+    brought the server's copy back.
+    """
+    ingest_one(email, aid, tok)
+    _seed_folder(email, "Archive", "\\Archive")
+    _seed_folder(email, "Trash", "\\Trash")
+    _, r = api("GET", f"/api/search?q={tok}&account_id={aid}")
+    api("POST", f"/api/messages/threads/{r['rows'][0]['thread_id']}/archive?account_id={aid}")
+    assert dbfixture.apply_actions(email, minutes_ago=minutes_ago)
+
+    _, boxes = api("GET", "/api/mailboxes")
+    archive = next(m["id"] for a in boxes["accounts"] for m in a["mailboxes"]
+                   if a["email"] == email and m["role"] == "archive")
+    _, rows = api("GET", f"/api/messages?mailbox_id={archive}&limit=50")
+    return next(x for x in rows["rows"] if tok in x["subject"])["id"], archive
+
+
+def test_filing_a_message_whose_move_just_landed_says_to_wait(account):
+    """Seconds after the move applied there is no UID to address the message by,
+    and the real placement is on its way. "Try again in a moment" is true."""
+    email, aid = account["email"], account["id"]
+    mid, archive = _archive_then_settle(email, aid, "SETTLE" + uuid.uuid4().hex[:6],
+                                        minutes_ago=0)
+
+    code, _ = api("POST", f"/api/messages/{mid}/trash?source_mailbox_id={archive}")
+    assert code == 409
+
+
+def test_filing_a_message_whose_move_landed_long_ago_still_works(account):
+    """The same state an hour on is not a move in flight. Something went wrong
+    upstream — at worst the message is gone from the server entirely — and
+    refusing forever leaves it wedged in a folder no keypress can get it out of.
+    It files locally instead, and tells the server nothing it cannot address."""
+    email, aid = account["email"], account["id"]
+    mid, archive = _archive_then_settle(email, aid, "WEDGED" + uuid.uuid4().hex[:6],
+                                        minutes_ago=60)
+
+    code, body = api("POST", f"/api/messages/{mid}/trash?source_mailbox_id={archive}")
+    assert code == 200, body
+
+    _, boxes = api("GET", "/api/mailboxes")
+    trash = next(m["id"] for a in boxes["accounts"] for m in a["mailboxes"]
+                 if a["email"] == email and m["role"] == "trash")
+    _, rows = api("GET", f"/api/messages?mailbox_id={trash}&limit=50")
+    assert mid in [x["id"] for x in rows["rows"]]
+    # Nothing was queued: there is no UID here any server has heard of.
+    assert not [a for a in _actions(email) if a["type"] in ("move", "delete")]

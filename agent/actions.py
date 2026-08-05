@@ -15,35 +15,24 @@ What an attempt count buys instead is the retry *cadence*: see _RETRY_BASE.
 
 from __future__ import annotations
 
-from datetime import timedelta
+import time
 
 from sqlalchemy import select
 
-from core import events
-from core.models import Mailbox, Outbound, PendingAction, utcnow
+from core import events, outbox
+from core.models import Account, Mailbox, Outbound, PendingAction, utcnow
 
 import log
 import smtp
 
-# How long after a failure an action may be tried again: doubling from
-# _RETRY_BASE up to _RETRY_CEILING, from the attempt count the row already
-# carries.
-#
-# Not politeness towards the server — every failed send costs the sync pass its
-# full SMTP timeout (a minute by default), at the head of the pass, before any
-# mail is fetched. Retried every pass, one message with a wrong port would slow
-# every sync for as long as it stayed wrong, which is how issue #7 read in the
-# log: passes of 65s and 180s where a healthy one takes half a second. Backing
-# off keeps a permanently-failing action at a cost that tends to nothing while
-# still retrying it forever.
-#
-# The ceiling is deliberately short. An hour would be tidier arithmetic, but the
-# case that matters is the laptop that has just come back online after four days
-# — everything in the queue is long overdue by then, so the ceiling only ever
-# decides how long the *last* stretch of a broken spell lasts once it is fixed.
-_RETRY_BASE = 60          # seconds, after the first failure
-_RETRY_CEILING = 900      # 15 minutes
-_RETRY_DOUBLINGS = 8      # 60s * 2**8 is well past the ceiling; keeps it finite
+# The retry cadence lives in core/outbox.py, because the server shows the same
+# numbers in the Outbox folder — "next attempt in 4 minutes" has to mean the
+# same thing on both sides of the database. Re-exported under the old names so
+# this module still reads as the owner of the drain loop.
+_RETRY_BASE = outbox.RETRY_BASE
+_RETRY_CEILING = outbox.RETRY_CEILING
+_RETRY_DOUBLINGS = outbox.RETRY_DOUBLINGS
+retry_delay = outbox.retry_delay
 
 # How deep to look for work in one pass. Nothing is ever retired, so the queue
 # can hold rows that have been failing for weeks; ordering by age and scanning
@@ -68,6 +57,49 @@ def _is_all_mail(db, account_id: int, imap_name: str) -> bool:
     ) == "all"
 
 
+def _copy_then_remove(c, uid: int, to_folder: str) -> None:
+    """Move by hand, for a server that does not advertise MOVE (RFC 6851).
+
+    COPY the message into the target folder, then take it out of the source one
+    — and that second half is where a move turns into a deletion if it is done
+    blind, so it only happens against positive evidence that there is still
+    something in the source folder to take out.
+
+    On a server where folders are labels, the COPY *is* the move: applying
+    Trash removes every other label, so by the time the EXPUNGE runs the
+    message is not in the source folder any more, it is sitting in Trash — and
+    "delete this message, which is in Trash" is how Proton spells "delete it
+    for good". That is not hypothetical. It destroyed 22 messages on a live
+    account over two days, one per trash keypress, each of which the UI went on
+    showing from its own optimistic placement while the server had no copy left
+    anywhere. Those servers all advertise MOVE, so they no longer come through
+    here at all; the guard stays because this is the path that cannot tell.
+
+    Being wrong in the safe direction leaves a copy in the source folder, which
+    the next sync shows and the user can move again. Being wrong in the other
+    direction is mail nobody can get back.
+    """
+    c.copy([uid], to_folder)
+    if not _still_present(c, uid):
+        return
+    c.delete_messages([uid])
+    # UID EXPUNGE where the server has UIDPLUS: a bare EXPUNGE takes every
+    # message in the folder that carries \Deleted, including ones another
+    # client flagged and has not expunged yet.
+    if c.has_capability("UIDPLUS"):
+        c.expunge([uid])
+    else:
+        c.expunge()
+
+
+def _still_present(c, uid: int) -> bool:
+    """Is this UID still in the selected folder? Anything unclear is a no."""
+    try:
+        return bool(c.search(["UID", uid]))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def apply_action(db, bridge, account, action: PendingAction) -> None:
     t = action.type
     p = action.payload or {}
@@ -85,18 +117,24 @@ def apply_action(db, bridge, account, action: PendingAction) -> None:
 
     elif t == "move":
         c.select_folder(p["from_folder"])
-        c.copy([p["uid"]], p["to_folder"])
-        # \All is not a folder a message can be taken out of. On Proton and
-        # Gmail it is the union of everything the account holds — filing to
-        # Archive or Trash is a label change that the COPY has already made,
-        # and the EXPUNGE that would follow is a step with nothing to do. The
-        # server says so ("EXPUNGE failed: operation not allowed") and the
-        # whole action fails on it, retries, and fails again: 267 archived and
-        # trashed messages piled up in the queue that way, every one of them
-        # already filed on the server.
-        if not _is_all_mail(db, action.account_id, p["from_folder"]):
-            c.delete_messages([p["uid"]])
-            c.expunge()
+        if _is_all_mail(db, action.account_id, p["from_folder"]):
+            # \All is not a folder a message can be taken out of. On Proton and
+            # Gmail it is the union of everything the account holds — filing to
+            # Archive or Trash is a label change that the COPY has already
+            # made, and removing it from \All afterwards is a step with nothing
+            # to do. The server says so ("EXPUNGE failed: operation not
+            # allowed") and the whole action fails on it, retries, and fails
+            # again: 267 archived and trashed messages piled up in the queue
+            # that way, every one of them already filed on the server.
+            c.copy([p["uid"]], p["to_folder"])
+        elif c.has_capability("MOVE"):
+            # One command, and the server decides what leaving the source
+            # folder means — which is the whole reason to prefer it. See
+            # _copy_then_remove for what doing it by hand costs on a server
+            # where folders are labels.
+            c.move([p["uid"]], p["to_folder"])
+        else:
+            _copy_then_remove(c, p["uid"], p["to_folder"])
 
     elif t == "delete":
         c.select_folder(p["folder"])
@@ -133,13 +171,6 @@ def apply_action(db, bridge, account, action: PendingAction) -> None:
 
     else:
         raise ValueError(f"unknown action type: {t}")
-
-
-def retry_delay(attempts: int) -> timedelta:
-    """How long an action that has failed ``attempts`` times waits before the
-    next try. Doubles from _RETRY_BASE, flat at _RETRY_CEILING thereafter."""
-    doublings = min(max(attempts - 1, 0), _RETRY_DOUBLINGS)
-    return timedelta(seconds=min(_RETRY_BASE * 2 ** doublings, _RETRY_CEILING))
 
 
 def _due(action: PendingAction, now) -> bool:
@@ -278,6 +309,14 @@ def drain_actions(db, bridge, account) -> tuple[int, int]:
             _settle(db, action, True)
             applied += 1
             sent += is_send
+            # Only sends get a line of their own. A flag or a move is the tail
+            # end of something the user watched happen in the UI; a send is the
+            # one action whose success they have no other way to confirm, and
+            # "did that mail actually go out on Friday" is a question the log
+            # should be able to answer months later.
+            if is_send:
+                rcpt = ", ".join((action.payload or {}).get("rcpt_to") or []) or "(no recipients)"
+                log.ok(f"sent to {rcpt}", getattr(bridge.acc, "email", None))
         except Exception as e:  # noqa: BLE001
             _settle(db, action, False, repr(e))
             failed += 1
@@ -291,6 +330,71 @@ def drain_actions(db, bridge, account) -> tuple[int, int]:
     if sends:
         events.publish({"type": "outbox", "sent": applied, "failed": failed})
     return applied, failed, sent
+
+
+# --- mail that is still waiting ----------------------------------------------
+#
+# A failed *attempt* reports itself in full (see _log_failure). A send that is
+# never attempted reports nothing at all, and that is the case people actually
+# hit: Bridge is down, or signed out, or the host has been asleep, so the pass
+# dies at connect() and drain_actions is never reached. The log then says "sync
+# failed" over and over and never once mentions that there is mail in the
+# outbox behind it — which is exactly the report this was written for, mail
+# sitting in `outbound` with no way to know it was there.
+#
+# So the queue gets said out loud too: at startup, and after a failed pass.
+
+# Per account, so a retry loop failing every thirty seconds does not reprint the
+# same list two thousand times before anyone reads it. The failure itself is
+# still logged every time; this is the reminder of what is riding on it.
+_REPORT_EVERY = 600.0
+_last_report: dict[str, float] = {}
+
+
+def _report_due(key: str) -> bool:
+    now = time.monotonic()
+    if now - _last_report.get(key, -_REPORT_EVERY) < _REPORT_EVERY:
+        return False
+    _last_report[key] = now
+    return True
+
+
+def report_waiting(db, email: str | None = None, throttle: bool = False) -> int:
+    """Log the mail that has been written and not yet sent. Returns the count.
+
+    ``email`` limits it to one account (the retry loop knows which one it is);
+    without it the whole queue is reported, which is what startup wants.
+    """
+    account_id = None
+    if email is not None:
+        account_id = db.scalar(select(Account.id).where(Account.email == email))
+        if account_id is None:
+            return 0
+
+    rows = outbox.unsent(db, account_id)
+    if not rows:
+        return 0
+    if throttle and not _report_due(email or ""):
+        return len(rows)
+
+    sends = outbox.send_actions(db, [r.id for r in rows])
+    log.warn(f"{len(rows)} message(s) in the outbox have not been sent yet:", email)
+    for row in rows[:10]:
+        when = row.created_at.strftime("%Y-%m-%d %H:%M") if row.created_at else "?"
+        action = sends.get(row.id)
+        why = row.error or (action.error if action else None)
+        if why:
+            state = f"failed {action.attempts if action else 0}x: {why}"
+        elif action is None:
+            # No queue row at all: an older agent retired it, and nothing is
+            # going to pick it up again until it is put back.
+            state = "not queued — run with --requeue-abandoned"
+        else:
+            state = "queued, not tried yet"
+        log.warn(f"  {when}  {outbox.describe(row)}  ({state})", email)
+    if len(rows) > 10:
+        log.warn(f"  ...and {len(rows) - 10} more", email)
+    return len(rows)
 
 
 # --- mail an older agent gave up on ------------------------------------------

@@ -188,3 +188,43 @@ def test_display_name_case_is_preserved():
 def test_address_without_an_address_is_rejected():
     with pytest.raises(ValueError, match="no email address in it"):
         AccountConfig(email="you@proton.me", addresses=["Arne Tarara"])
+
+
+# --- presentation pinned in the file -----------------------------------------
+
+
+def test_nothing_is_pinned_by_default():
+    # The ordinary install: Settings owns name, colour and footer, and the agent
+    # has nothing to say about them.
+    assert AccountConfig(email="you@proton.me").presentation() == {}
+
+
+def test_only_the_fields_written_in_the_file_are_pinned():
+    account = AccountConfig(email="you@proton.me", label="Personal", color="#ff0000")
+    assert account.presentation() == {"label": "Personal", "color": "#ff0000"}
+
+
+def test_an_empty_footer_is_pinned_rather_than_ignored():
+    # "" and "absent" are different answers: one says this account has no
+    # footer, the other says Settings decides. Falsiness must not merge them.
+    assert AccountConfig(email="you@proton.me", footer="").presentation() == {"footer": ""}
+
+
+@pytest.mark.parametrize("field, value", [("label", "x" * 201), ("color", "x" * 33)])
+def test_presentation_too_wide_for_its_column_is_rejected(field, value):
+    # Otherwise this surfaces as a psycopg error on the agent's first pass,
+    # naming neither the file nor the key.
+    with pytest.raises(ValueError, match="the limit is"):
+        AccountConfig(email="you@proton.me", **{field: value})
+
+
+def test_presentation_loads_from_the_account_block(tmp_path, monkeypatch):
+    path = tmp_path / "meerail.toml"
+    path.write_text(
+        '[[agent.account]]\nemail = "you@proton.me"\n'
+        'label = "Personal"\ncolor = "#1d6ff2"\nfooter = "Sent from meerail"\n'
+    )
+    monkeypatch.setenv("MEERAIL_CONFIG", str(path))
+    (account,) = load().accounts
+    assert account.presentation() == {"label": "Personal", "color": "#1d6ff2",
+                                      "footer": "Sent from meerail"}

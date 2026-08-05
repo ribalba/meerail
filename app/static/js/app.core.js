@@ -169,6 +169,14 @@ App.api = {
     return this.get("/api/compose/sender-for?" + p.toString());
   },
   sendMail(payload) { return this.post("/api/compose/send", payload); },
+
+  // The outbox: what has been written here and not yet handed to a mail server.
+  // A queue of this app's own, not an IMAP folder, so it has endpoints of its
+  // own rather than riding on /api/messages.
+  outbox() { return this.get("/api/outbox"); },
+  outboxMessage(id) { return this.get(`/api/outbox/${id}`); },
+  outboxRetry(id) { return this.post(`/api/outbox/${id}/retry`); },
+  outboxDiscard(id) { return this.del(`/api/outbox/${id}`); },
   deleteAttachment(id) { return this.del(`/api/compose/attachments/${encodeURIComponent(id)}`); },
   async uploadAttachment(file) {
     const fd = new FormData();

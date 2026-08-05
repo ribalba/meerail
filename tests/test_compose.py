@@ -199,6 +199,77 @@ def test_footer_is_stored_per_account(account):
         api("DELETE", f"/api/accounts/{second['id']}")
 
 
+# --- presentation pinned in meerail.toml -------------------------------------
+#
+# Name, colour and footer normally belong to Settings. An agent config may take
+# any of them over, in which case the agent writes the value on every pass and
+# the API has to refuse edits rather than accept one the next sync would undo.
+
+
+def test_pinned_fields_are_written_and_declared(account):
+    aid = account["id"]
+    dbfixture.report_presentation(account["email"],
+                                  {"label": "Configured", "color": "#ff8800"})
+
+    _, acc = api("GET", f"/api/accounts/{aid}")
+    assert (acc["label"], acc["color"]) == ("Configured", "#ff8800")
+    # What the UI reads to show them as set-elsewhere instead of editable.
+    assert acc["config_fields"] == ["color", "label"]
+    # Untouched by the file, so still the UI's to edit.
+    assert acc["footer"] == DEFAULT_FOOTER
+
+
+def test_patching_a_pinned_field_is_refused(account):
+    aid = account["id"]
+    dbfixture.report_presentation(account["email"], {"label": "Configured"})
+
+    code, body = api("PATCH", f"/api/accounts/{aid}", {"label": "By hand"})
+    assert code == 409 and "meerail.toml" in body["detail"]
+    _, acc = api("GET", f"/api/accounts/{aid}")
+    assert acc["label"] == "Configured"
+
+
+def test_fields_the_file_leaves_alone_stay_editable(account):
+    dbfixture.report_presentation(account["email"], {"label": "Configured"})
+
+    code, acc = api("PATCH", f"/api/accounts/{account['id']}", {"color": "#00ff00"})
+    assert code == 200 and acc["color"] == "#00ff00"
+
+
+def test_a_pinned_footer_overrides_one_saved_in_settings(account):
+    """The file is the source of truth for what it names — including over a
+    footer the UI saved before the key was added."""
+    api("PATCH", f"/api/accounts/{account['id']}", {"footer": "FROM-SETTINGS"})
+    dbfixture.report_presentation(account["email"], {"footer": "FROM-THE-FILE"})
+
+    _, acc = api("GET", f"/api/accounts/{account['id']}")
+    assert acc["footer"] == "FROM-THE-FILE"
+    assert acc["config_fields"] == ["footer"]
+
+
+def test_dropping_a_key_hands_the_field_back(account):
+    """Removing it from the file unlocks the field, keeping the value the file
+    last gave it — nothing silently reverts to a default."""
+    dbfixture.report_presentation(account["email"], {"label": "Configured"})
+    dbfixture.report_presentation(account["email"], {})
+
+    _, acc = api("GET", f"/api/accounts/{account['id']}")
+    assert acc["config_fields"] == []
+    assert acc["label"] == "Configured"
+    code, acc = api("PATCH", f"/api/accounts/{account['id']}", {"label": "By hand"})
+    assert code == 200 and acc["label"] == "By hand"
+
+
+def test_a_pinned_empty_footer_means_no_footer(account):
+    """`footer = ""` in the file is an answer, not a missing value: it must not
+    be read as "unset" and refilled with the default."""
+    dbfixture.report_presentation(account["email"], {"footer": ""})
+
+    _, acc = api("GET", f"/api/accounts/{account['id']}")
+    assert acc["footer"] == ""
+    assert acc["config_fields"] == ["footer"]
+
+
 # --- "Send as HTML email" ----------------------------------------------------
 #
 # The button makes the message an HTML one, not an HTML alternative to a

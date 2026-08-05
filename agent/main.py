@@ -116,6 +116,12 @@ def main() -> int:
                    "and it will work through them.")
             return 0
         actions.report_abandoned(db)
+        # And what is queued right now. A run that starts with mail already
+        # waiting should say so on its first breath rather than leaving it to be
+        # inferred from an SMTP error twenty lines later — or, when the mail
+        # server is unreachable and the send is never even attempted, from
+        # nothing at all.
+        actions.report_waiting(db)
     finally:
         db.close()
 
@@ -145,6 +151,14 @@ def main() -> int:
         log.ok(f"indexing complete — {extracted} attachment(s) extracted, "
                f"{thumbed} preview(s) rendered, {pruned} message(s) pruned to headers",
                "indexer")
+        # Said again on the way out, because this run is the last chance to say
+        # it: --once exits, and anything it could not send stays in the outbox
+        # until something starts the agent again.
+        db = SessionLocal()
+        try:
+            actions.report_waiting(db)
+        finally:
+            db.close()
         # The exit itself needs saying too: --once is the Getting Started
         # command, and the last thing it printed used to be a sync line that
         # left it ambiguous whether the process was done or stalled.

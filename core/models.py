@@ -97,6 +97,14 @@ class Account(Base):
     # would have DEFAULT_FOOTER put back on every restart.
     footer_customized: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
+    # Which of ``label``, ``color`` and ``footer`` are pinned in the agent's
+    # meerail.toml rather than owned by Settings. The agent rewrites both the
+    # values and this list on every pass (``ingest.record_presentation``), which
+    # is how a web app on another machine — one that never sees the file — knows
+    # to show those fields as configured elsewhere and refuse to PATCH them.
+    # Empty is the ordinary case: nothing pinned, everything editable.
+    config_fields: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+
     # Sync status (denormalized for the UI).
     backfill_complete: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     # Stamped at the start of every pass, including passes that then fail — so

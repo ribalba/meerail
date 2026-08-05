@@ -336,6 +336,72 @@ body.resizing { cursor: col-resize; user-select: none; }
 .list-more:hover:not(:disabled) { background: var(--bg-elev); color: var(--text); }
 .list-more:disabled { cursor: default; opacity: .6; }
 
+/* --- Outbox ---------------------------------------------------------------
+   The list rows and the reading pane for mail that has been written here and
+   not yet handed to a mail server (app/static/js/app.outbox.js).
+
+   Borrowed geometry, its own colour: a queued row is an ordinary .msg-row so
+   the folder does not look like a different application, and everything below
+   only adds the one thing an ordinary row has no way to say — how the sending
+   is going. Red is reserved for a message that has actually failed an attempt;
+   waiting is the normal state for the second or two after every send and must
+   not read as an alarm. */
+.ob-row .msg-main { grid-column: 1 / -1; }
+.ob-row.stuck { background: color-mix(in srgb, var(--danger) 7%, transparent); }
+.ob-row.stuck:hover { background: color-mix(in srgb, var(--danger) 12%, transparent); }
+.ob-row-state { display: flex; align-items: center; gap: .35rem; margin-top: .25rem; }
+.ob-chip { display: inline-flex; align-items: center; gap: .25rem; font-size: .72rem;
+  border-radius: 999px; padding: .05rem .45rem; color: var(--text-muted);
+  background: var(--bg-elev); border: 1px solid var(--border-strong); }
+.ob-chip.stuck { color: light-dark(var(--danger), #ff6369);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  border-color: color-mix(in srgb, var(--danger) 35%, transparent); }
+/* The sidebar row turns red the same way the strip above it does, so a folder
+   and its count never disagree about whether anything is wrong. */
+.mailbox-row.stuck:not(.active) { color: light-dark(var(--danger), #ff6369); }
+.mailbox-row.stuck:not(.active) .mb-icon,
+.mailbox-row.stuck:not(.active) .mailbox-count { color: inherit; }
+
+.ob-detail { max-width: 62rem; }
+/* Why it is still here, first: whoever opened this row did not come to re-read
+   their own mail. */
+.ob-error { padding: .6rem .8rem; border-radius: 9px; margin-bottom: .8rem;
+  background: color-mix(in srgb, var(--danger) 9%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent); }
+.ob-error-head { display: flex; align-items: center; gap: .4rem; font-weight: 600;
+  color: light-dark(var(--danger), #ff6369); }
+.ob-error pre { margin: .45rem 0 0; font-size: .76rem; line-height: 1.45; color: var(--text);
+  white-space: pre-wrap; word-break: break-word; max-height: 9rem; overflow-y: auto; }
+.ob-error-sub { margin-top: .45rem; font-size: .78rem; line-height: 1.45; color: var(--text-muted); }
+.ob-waiting { display: flex; align-items: flex-start; gap: .45rem; padding: .55rem .8rem;
+  border-radius: 9px; margin-bottom: .8rem; font-size: .82rem; line-height: 1.45;
+  color: var(--text-muted); background: var(--bg-elev); border: 1px solid var(--border); }
+.ob-waiting svg { flex: 0 0 auto; margin-top: .15rem; }
+
+.ob-actions { display: flex; align-items: center; gap: .5rem; margin-bottom: 1rem; }
+.ob-btn { display: inline-flex; align-items: center; gap: .35rem; font: inherit; font-size: .82rem;
+  padding: .3rem .6rem; border-radius: 7px; cursor: pointer;
+  border: 1px solid var(--border-strong); background: var(--bg); color: var(--text); }
+.ob-btn:hover:not(:disabled) { background: var(--bg-elev); }
+.ob-btn:disabled { opacity: .55; cursor: default; }
+.ob-btn.danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, transparent); }
+.ob-action-status { font-size: .78rem; color: var(--text-muted); }
+.ob-action-status.error { color: var(--danger); }
+
+.ob-head { border: 1px solid var(--msg-border); border-radius: 10px; padding: .8rem 1rem; }
+.ob-subject { font-size: 1.05rem; font-weight: 700; letter-spacing: -.01em; margin-bottom: .5rem; }
+.ob-meta { display: grid; grid-template-columns: auto 1fr; gap: .2rem .7rem; font-size: .82rem; }
+.ob-field { display: contents; }
+.ob-field > span { color: var(--text-muted); }
+.ob-field > div { word-break: break-word; }
+.ob-flags { margin-top: .5rem; font-size: .75rem; color: var(--text-faint); }
+/* The message as written, not as rendered: this is the author's own text, and
+   dressing it up as received mail would mean sanitizing our own outgoing HTML
+   as though a stranger had sent it. */
+.ob-body { margin-top: .9rem; padding: .9rem 1.1rem; border-radius: 10px;
+  border: 1px solid var(--msg-border); white-space: pre-wrap; word-wrap: break-word;
+  font-size: .9rem; line-height: 1.5; }
+
 /* --- Reading pane --- */
 .reading-pane { background: var(--bg); overflow-y: auto; display: flex; flex-direction: column; }
 .reader-empty { margin: auto; }
@@ -572,21 +638,31 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
 .modal.compose .modal-head { cursor: move; user-select: none; gap: .3rem; }
 .modal.compose .modal-head h2 { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .modal.compose .modal-head .icon-btn { cursor: pointer; }
-/* Minimized composer — a small bar parked bottom-right, above everything. */
-.compose-min {
+/* Minimized composers — one chip per parked draft, bottom-right above
+   everything. They fill leftwards and wrap upwards once the row is full. */
+.compose-min-bar {
   position: fixed; right: 1.2rem; bottom: 0; z-index: 200;
+  display: flex; flex-wrap: wrap-reverse; justify-content: flex-end;
+  align-items: flex-end; gap: .4rem; max-width: calc(100vw - 2.4rem);
+}
+.compose-min-bar[hidden] { display: none; }
+.compose-min {
   display: flex; align-items: center; gap: .2rem; max-width: min(320px, 80vw);
   padding: .1rem .35rem .1rem .2rem;
   background: var(--bg); border: 1px solid var(--border-strong);
   border-radius: 10px 10px 0 0; box-shadow: var(--shadow);
 }
-.compose-min[hidden] { display: none; }
 .compose-min-label {
   flex: 1; min-width: 0; font: inherit; font-size: .86rem; font-weight: 550; text-align: left;
   color: var(--text); background: none; border: none; cursor: pointer;
   padding: .6rem .5rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .compose-min-label:hover { color: var(--accent); }
+/* Attachments a parked draft is carrying, so a chip is not just a subject. */
+.compose-min-label .cm-count {
+  display: inline-flex; align-items: center; gap: .1rem;
+  margin-left: .25rem; color: var(--text-muted); font-size: .78rem; font-weight: 500;
+}
 /* Once dragged the window is placed by pixel coords instead of backdrop centering. */
 .modal.compose.dragging-placed { position: absolute; margin: 0; }
 .compose-body { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: .5rem; }
@@ -768,7 +844,22 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
   line-height: 1.45; padding: .5rem .65rem; border: 1px solid var(--border); border-radius: 8px;
   background: var(--bg); color: var(--text); resize: vertical; min-height: 3.4rem; }
 .sa-footer textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+/* Fields pinned in meerail.toml: the value stays visible, the editor does not.
+   The swatch and the name stand in for the colour picker and the name input, so
+   they take the same space in the row and the account still reads as itself. */
+.sa-swatch { flex: 0 0 auto; width: 22px; height: 22px; border-radius: 50%;
+  border: 1px solid var(--border); }
+/* Sized and padded like .sa-name, so a pinned account sits on the same grid as
+   an editable one — only the box around the name is missing. */
+.sa-name-fixed { font-weight: 550; font-size: .9rem; padding: .2rem .35rem;
+  border: 1px solid transparent; }
+.sa-pinned { margin: .45rem 0 0 1.4rem; font-size: .74rem; color: var(--text-muted); }
+.sa-pinned code { font-size: .95em; }
 .sa-footer-actions { display: flex; align-items: center; gap: .6rem; margin-top: .4rem; }
+/* Save sits outside .sa-footer now (an account may have no footer editor at
+   all), so it carries that block's indent itself. Only in the account list —
+   the Meerato section reuses this class flush with its own field. */
+.settings-account-list .sa-footer-actions { margin-left: 1.4rem; }
 .sa-footer-actions button { font: inherit; font-size: .8rem; font-weight: 600; border: none;
   border-radius: 7px; padding: .34rem .8rem; background: var(--bg-elev); color: var(--text);
   border: 1px solid var(--border); cursor: pointer; }

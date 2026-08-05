@@ -4,6 +4,11 @@ There is deliberately no create endpoint: accounts are provisioned by the agent,
 which inserts the row on its first sync pass (`core.ingest.get_or_create_account`)
 keyed on the email in its `config.toml`. What the UI owns is presentation —
 `label`, `color` and `footer` — which is what PATCH exposes.
+
+Any of those three may instead be pinned in the agent's meerail.toml, which
+takes ownership away from here: the agent rewrites the value on every pass and
+lists the field in `config_fields`, and PATCH refuses it rather than accepting a
+change the next sync would silently undo.
 """
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -36,6 +41,17 @@ def update_account(account_id: int, payload: AccountUpdate, db: DBSession = Depe
     if account is None:
         raise HTTPException(status_code=404, detail="Account not found")
     fields = payload.model_dump(exclude_unset=True)
+    # Refuse rather than accept-and-lose: the agent rewrites these on its next
+    # pass, so a silent 200 here would show the new value until the sync that
+    # replaced it, and leave the user to guess why it went back.
+    pinned = [f for f in fields if f in (account.config_fields or [])]
+    if pinned:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{', '.join(pinned)} {'is' if len(pinned) == 1 else 'are'} set for this "
+                   f"account in meerail.toml — change it there, or remove it from the file "
+                   f"to edit it here.",
+        )
     for field, value in fields.items():
         setattr(account, field, value)
     # Saving a footer — including clearing it — opts the account out of the

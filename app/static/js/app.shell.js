@@ -16,8 +16,10 @@ App.shell = (function () {
   // --- Sidebar ---
   // `star` = { id, on } on real folders, which can be pinned to Favorites;
   // omitted on the smart rows, which are always there.
-  function mailboxRow(sel, iconName, name, count, activeKey, star) {
-    const active = sel.key === activeKey ? " active" : "";
+  // `extra` is an extra class for the row — only the Outbox uses it, to go red
+  // when the mail in it has stopped going out.
+  function mailboxRow(sel, iconName, name, count, activeKey, star, extra) {
+    const active = (sel.key === activeKey ? " active" : "") + (extra ? " " + extra : "");
     const badge = count ? `<span class="mailbox-count">${count}</span>` : "";
     let pin = "";
     if (star) {
@@ -46,12 +48,30 @@ App.shell = (function () {
     // row, yet the "g f" chord still jumps to it.
     register({ key: "flagged", title: "Flagged", showAccount: true, params: { scope: "flagged" } });
 
+    // The Outbox is registered whether or not it has anything in it, so "g o"
+    // and a reload while standing in it both still resolve; the row below is
+    // what comes and goes. `outbox: true` is how loadList() knows this folder is
+    // not served by /api/messages — see App.outbox.
+    register({ key: "outbox", title: "Outbox", outbox: true, params: {} });
+
     let favs = "";
     if (multi) {
       register({ key: "unified", title: "All Inboxes", showAccount: true, ageTint: true,
                  params: { scope: "unified_inbox" } });
       favs += mailboxRow(selections["unified"], "inbox", "All Inboxes",
         sidebar.smart.unified_inbox_unread, activeKey);
+    }
+    // Shown only when it has something to say, and first when it does. An empty
+    // outbox is the normal state and a permanent row for it would be furniture;
+    // a non-empty one is either "sending, give it a second" or the reason a
+    // message never arrived, and both want to be the first thing in the tree.
+    // Kept while it is the open folder too, so the ground does not move under
+    // someone reading the last message as it goes out.
+    const unsent = sidebar.smart.outbox_unsent || 0;
+    if (unsent || activeKey === "outbox") {
+      const failing = sidebar.smart.outbox_failing || 0;
+      favs += mailboxRow(selections["outbox"], failing ? "warning" : "sent", "Outbox",
+        unsent, activeKey, null, failing ? "stuck" : "");
     }
     // Pinned folders. Keys are distinct from the account-tree copy of the same
     // folder so both rows can carry their own active state.
@@ -203,6 +223,9 @@ App.shell = (function () {
   async function select(sel) {
     if (!sel) return;
     if (App.search) App.search.clear(false);  // leaving search when a folder is picked
+    // Leaving the Outbox drops whatever it had open in the reading pane; the
+    // pane is about to be handed to a real thread (or to nothing).
+    if (App.outbox && selection && selection.outbox && sel.key !== "outbox") App.outbox.clear();
     selection = sel;
     $("#list-title").textContent = sel.title;
     document.querySelectorAll(".mailbox-row.active").forEach((n) => n.classList.remove("active"));
@@ -223,6 +246,14 @@ App.shell = (function () {
   // because mail arrived, loses their place.
   async function loadList(keepPaged = false) {
     if (!selection) return;
+    // The Outbox is this app's own queue rather than an IMAP folder, so it is
+    // read from /api/outbox and rendered by App.outbox — into the same two panes,
+    // by the same events, but with none of /api/messages' vocabulary (no thread,
+    // no UID, no seen flag) that would have to be faked to get it in here.
+    if (selection.outbox) {
+      listTotal = 0;
+      return App.outbox.load();
+    }
     const request = ++listRequest;
     const selected = selection;
     const want = keepPaged ? Math.min(MAX_ROWS, Math.max(PAGE, App.list.count())) : PAGE;
@@ -364,6 +395,23 @@ App.shell = (function () {
   }
 
   // --- Settings modal (accounts) ---
+  // The three per-account fields this modal owns — unless meerail.toml pins
+  // them, in which case the server says so in `config_fields` and they are
+  // shown here as set-elsewhere rather than edited. Order matters: it is the
+  // order they are listed in the note.
+  const FIELDS = ["label", "color", "footer"];
+  const FIELD_NAMES = { label: "name", color: "colour", footer: "footer" };
+
+  function pinnedNote(pinned) {
+    const words = FIELDS.filter((f) => pinned.has(f)).map((f) => FIELD_NAMES[f]);
+    const list = words.length > 1
+      ? `${words.slice(0, -1).join(", ")} and ${words[words.length - 1]}`
+      : words[0];
+    const verb = words.length > 1 ? "are" : "is";
+    return `The ${list} ${verb} set for this account in <code>meerail.toml</code>, ` +
+      `so ${words.length > 1 ? "they are" : "it is"} not editable here.`;
+  }
+
   async function renderSettingsAccounts() {
     const list = $("#settings-account-list");
     // A redraw replaces every input in the list, so anything being typed loses
@@ -377,27 +425,41 @@ App.shell = (function () {
     for (const a of accounts) {
       const age = App.ageSeconds(a.last_agent_seen);
       const online = age !== null && age < 120;
+      // Fields the agent's meerail.toml pins. The control is left out entirely
+      // rather than disabled — an editor that cannot be edited invites the
+      // question this note answers — but the value is still shown, since the
+      // colour and name are how the row identifies its account.
+      const pinned = new Set(a.config_fields || []);
+      const editable = FIELDS.filter((f) => !pinned.has(f));
       const li = document.createElement("li");
       li.innerHTML = `
         <div class="sa-row">
-          <input type="color" class="sa-color" data-color="${a.id}" value="${App.esc(a.color)}"
-            title="Account colour" />
+          ${pinned.has("color")
+            ? `<span class="sa-swatch" style="background:${App.esc(a.color)}"
+                 title="Account colour — set in meerail.toml"></span>`
+            : `<input type="color" class="sa-color" data-color="${a.id}" value="${App.esc(a.color)}"
+                 title="Account colour" />`}
           <span class="sa-main">
-            <input type="text" class="sa-name" data-name="${a.id}" value="${App.esc(a.label)}"
-              placeholder="${App.esc(a.email.split("@")[0])}" aria-label="Account name" />
+            ${pinned.has("label")
+              ? `<div class="sa-name-fixed">${App.esc(a.label || a.email.split("@")[0])}</div>`
+              : `<input type="text" class="sa-name" data-name="${a.id}" value="${App.esc(a.label)}"
+                   placeholder="${App.esc(a.email.split("@")[0])}" aria-label="Account name" />`}
             <div class="sa-sub">${App.esc(a.email)} · agent ${App.relTime(a.last_agent_seen)}</div>
           </span>
           <span class="status-pill ${online ? "ok" : ""}">${online ? "online" : (a.backfill_complete ? "synced" : "waiting")}</span>
         </div>
+        ${pinned.has("footer") ? "" : `
         <div class="sa-footer">
           <label for="footer-${a.id}">Footer — prefilled into the composer, editable per message</label>
           <textarea id="footer-${a.id}" data-footer="${a.id}" rows="3"
             placeholder="Empty — the composer opens without a footer">${App.esc(a.footer || "")}</textarea>
-          <div class="sa-footer-actions">
-            <button type="button" data-save="${a.id}">Save</button>
-            <span class="sa-footer-status" data-save-status="${a.id}"></span>
-          </div>
-        </div>`;
+        </div>`}
+        ${pinned.size ? `<div class="sa-pinned">${pinnedNote(pinned)}</div>` : ""}
+        ${editable.length ? `
+        <div class="sa-footer-actions">
+          <button type="button" data-save="${a.id}">Save</button>
+          <span class="sa-footer-status" data-save-status="${a.id}"></span>
+        </div>` : ""}`;
       list.appendChild(li);
     }
     // No remove button by design: the agent's config.toml is what decides which
@@ -409,26 +471,33 @@ App.shell = (function () {
       // type="color"> normalizes its value, so an untouched picker would other-
       // wise read as changed.
       const id = btn.dataset.save;
-      const base = {
-        label: $(`[data-name="${id}"]`).value,
-        color: $(`[data-color="${id}"]`).value,
-        footer: $(`[data-footer="${id}"]`).value,
-      };
+      const base = accountFields(id);
       btn.addEventListener("click", () => saveAccount(id, base));
     });
   }
 
+  // What the rendered controls currently hold, for the fields that have one — a
+  // field pinned in meerail.toml has no control, and is simply absent here and
+  // so from every payload built out of this.
+  function accountFields(accountId) {
+    const nodes = {
+      label: $(`[data-name="${accountId}"]`),
+      color: $(`[data-color="${accountId}"]`),
+      footer: $(`[data-footer="${accountId}"]`),
+    };
+    const out = {};
+    for (const field of FIELDS) if (nodes[field]) out[field] = nodes[field].value;
+    return out;
+  }
+
   async function saveAccount(accountId, base) {
     const status = $(`[data-save-status="${accountId}"]`);
-    const now = {
-      label: $(`[data-name="${accountId}"]`).value.trim(),
-      color: $(`[data-color="${accountId}"]`).value,
-      footer: $(`[data-footer="${accountId}"]`).value,
-    };
+    const now = accountFields(accountId);
+    if ("label" in now) now.label = now.label.trim();
     // Send only what moved. Sending `footer` at all flips footer_customized on
     // the server, so a colour-only save must not carry it along.
     const payload = {};
-    for (const field of ["label", "color", "footer"]) {
+    for (const field of Object.keys(now)) {
       if (now[field] !== base[field]) payload[field] = now[field];
     }
     if (!Object.keys(payload).length) { status.textContent = "No changes"; return; }
@@ -545,6 +614,7 @@ App.shell = (function () {
   // so it falls back to the first inbox rather than doing nothing.
   function goto(kind) {
     if (kind === "flagged") return select(selections["flagged"]);
+    if (kind === "outbox") return select(selections["outbox"]);
     if (kind === "unified" && selections["unified"]) return select(selections["unified"]);
     if (!sidebar || !sidebar.accounts.length) return;
     const acc = sidebar.accounts[0];

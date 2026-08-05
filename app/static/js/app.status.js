@@ -203,11 +203,16 @@ App.status = (function () {
     // Nothing here is a lost message, and the wording has to say so: the queue
     // is retried for as long as it takes, so the honest reading of a stuck
     // outbox is "not sent yet", never "not sent".
+    // Where the messages themselves are is worth saying here: this block is a
+    // summary, and the question it raises ("which mail? mine?") is answered one
+    // click away in the sidebar.
     const sub = ob.queued
       ? (ob.error
           ? `Still queued and still being retried — nothing is lost. The agent tries
-             again on a backoff, and sends as soon as the cause below is fixed.`
-          : `Handed to the agent, which sends it over SMTP on its next pass.`)
+             again on a backoff, and sends as soon as the cause below is fixed.
+             The <strong>Outbox</strong> folder in the sidebar lists them one by one.`
+          : `Handed to the agent, which sends it over SMTP on its next pass.
+             They are listed in the <strong>Outbox</strong> folder in the sidebar.`)
       : `These were given up on by an older agent and never sent. They are still
          here — put them back in the queue by running the agent once with
          <code>--requeue-abandoned</code>: <code>bash meerail.sh requeue</code> if
@@ -511,9 +516,12 @@ App.status = (function () {
       if (e.target.id === "agent-modal") close();
     });
     $("#agent-warning").addEventListener("click", open);
-    // Same destination as the warning strip: the modal is where the outbox says
-    // how long it has been waiting and what the last attempt hit.
-    $("#outbox-notice").addEventListener("click", open);
+    // The strip counts; the Outbox folder is where the messages themselves are,
+    // one row each with its own error, so that is where a click goes. The modal
+    // still carries the same summary for anyone who arrives from the other side
+    // (it is the health screen, and a queue that will not drain is a health
+    // problem) — it is simply not the place to find out *which* mail is stuck.
+    $("#outbox-notice").addEventListener("click", () => App.shell.goto("outbox"));
     // Delegated: the modal body is re-rendered on every poll, so per-button
     // listeners would not survive.
     $("#agent-body").addEventListener("click", (e) => {

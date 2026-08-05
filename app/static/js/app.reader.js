@@ -335,6 +335,57 @@ App.reader = (function () {
     })());
   }
 
+  // --- "Send & Archive" ---------------------------------------------------
+  // The composer asks for a ticket when it opens and hands it back when the
+  // mail goes out, which can be a long time later: the reader moves on while a
+  // reply is being written — another conversation gets selected, a draft sits
+  // minimized for an hour — and archiving whatever the pane happens to show at
+  // send time files the wrong mail.
+  function archiveTicket() {
+    const msgs = currentThread ? currentThread.messages : [];
+    if (!msgs.length) return null;
+    return {
+      thread_id: currentThread.thread_id || null,
+      account_id: msgs[0].account_id,
+      ids: msgs.map((m) => m.id),
+      // Only for a conversation that was never threaded, which has no id to act
+      // on: each message leaves the folder it was in when the ticket was taken.
+      targets: currentThread.thread_id ? [] :
+        moveTargets().map((t) => ({ id: t.m.id, source: t.source })),
+    };
+  }
+
+  function stillShowing(ticket) {
+    const msgs = currentThread ? currentThread.messages : [];
+    if (!msgs.length) return false;
+    if (ticket.thread_id) {
+      return currentThread.thread_id === ticket.thread_id
+        && msgs[0].account_id === ticket.account_id;
+    }
+    return msgs.some((m) => ticket.ids.includes(m.id));
+  }
+
+  // Still the conversation on screen: the ordinary path, which empties the pane
+  // and opens the next mail down. Otherwise it is filed out of sight, and only
+  // its row leaves the list.
+  function archiveTicketed(ticket) {
+    if (!ticket) return;
+    if (stillShowing(ticket)) return removeThread("archive");
+    const call = ticket.thread_id
+      ? App.api.archiveThread(ticket.thread_id, ticket.account_id)
+      : (async () => {
+        for (const t of ticket.targets) await App.api.archiveMsg(t.id, t.source);
+      })();
+    App.list.drop((r) => (ticket.thread_id
+      ? r.thread_id === ticket.thread_id && r.account_id === ticket.account_id
+      : ticket.ids.includes(r.id)));
+    call.then(() => App.shell && App.shell.reloadList())
+      .catch((e) => {
+        alert(e.message || "Archive failed");
+        if (App.shell) App.shell.reloadList();
+      });
+  }
+
   async function handleAction(act, m, anchor) {
     try {
       if (act === "new") return App.compose.openNew();
@@ -763,9 +814,10 @@ App.reader = (function () {
     // "A thread is on its way." The keyboard moves into this pane on the same
     // keystroke that asks for the thread, which is a fetch ahead of isOpen().
     isBusy: () => loading > 0,
-    // For the composer's "Send & Archive". Settles as soon as the UI has moved
-    // on — the request runs behind it and reports its own failure, which is
-    // right for the composer too: the mail is already sent by then, so a failed
+    // For the composer's "Send & Archive": which conversation it will file, and
+    // the filing itself. Both return as soon as the UI has moved on — the
+    // request runs behind them and reports its own failure, which is right for
+    // the composer too, since the mail is already sent by then and a failed
     // archive must not read as a failed send.
-    archiveThread: () => (currentThread ? removeThread("archive") : Promise.resolve()) };
+    archiveTicket, archiveTicketed };
 })();

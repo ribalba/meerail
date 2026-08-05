@@ -48,6 +48,13 @@ LEGACY_AGENT_CONFIG = BASE_DIR / "agent" / "config.toml"
 
 SECURITY_MODES = ("starttls", "ssl", "plain")
 
+# Account display fields this file may take over from the UI, in the order the
+# Settings modal shows them. See AccountConfig.presentation.
+PRESENTATION_FIELDS = ("label", "color", "footer")
+
+# How much of each the accounts table holds; `footer` is TEXT and so unbounded.
+PRESENTATION_WIDTHS = {"label": 200, "color": 32}
+
 
 class AccountConfig(BaseModel):
     """One mail account and the Bridge (or IMAP/SMTP) endpoints serving it."""
@@ -103,6 +110,25 @@ class AccountConfig(BaseModel):
     # is allowed, and is how it gets a name different from its siblings'.
     addresses: list[str] = []
 
+    # --- presentation, normally owned by the UI ------------------------------
+    # The three things Settings lets you edit about an account: its name in the
+    # sidebar, the colour of its dot, and the footer the composer prefills.
+    # Unset (the default) is the old behaviour and the usual one — the value
+    # lives in the database and Settings owns it.
+    #
+    # Set one here and the file takes it over: the agent writes it onto the row
+    # on every pass, so an edit here wins over whatever Settings last saved, and
+    # the field is shown as configured-elsewhere rather than editable. That is
+    # for the installs whose accounts are provisioned from a file rather than by
+    # hand. Removing a key again hands the field back to Settings, keeping the
+    # value the file last gave it.
+    #
+    # `label` is the account's own name in the UI and never leaves it — unlike
+    # `name` above, which is the display name recipients see on the From header.
+    label: str | None = None
+    color: str | None = None       # hex ("#1d6ff2") or a CSS colour name
+    footer: str | None = None      # empty string = this account has no footer
+
     @field_validator("imap_security", "smtp_security")
     @classmethod
     def _known_security_mode(cls, value: str, info) -> str:
@@ -140,6 +166,20 @@ class AccountConfig(BaseModel):
                     f"addresses entry {raw!r} has no email address in it; "
                     f"write either 'alias@example.com' or 'Your Name <alias@example.com>'"
                 )
+        return value
+
+    @field_validator("label", "color")
+    @classmethod
+    def _fits_its_column(cls, value: str | None, info) -> str | None:
+        # These land in fixed-width columns (see core.models.Account). Caught
+        # here, the operator gets the file and the key; caught by Postgres, they
+        # get a psycopg error on the agent's first pass naming neither.
+        limit = PRESENTATION_WIDTHS[info.field_name]
+        if value is not None and len(value) > limit:
+            raise ValueError(
+                f"{info.field_name} is {len(value)} characters; "
+                f"the limit is {limit}"
+            )
         return value
 
     @model_validator(mode="after")
@@ -180,6 +220,19 @@ class AccountConfig(BaseModel):
     def send_addresses(self) -> list[str]:
         """Every address the account may send from — primary first, deduped."""
         return [addr for _, addr in self.send_identities()]
+
+    def presentation(self) -> dict[str, str]:
+        """The display fields this block pins, keyed by column name.
+
+        Only the keys actually written in the file are in here — a field left
+        out is absent rather than empty, which is what keeps "no footer" (an
+        empty string) distinguishable from "Settings owns the footer".
+        """
+        return {
+            field: value
+            for field in PRESENTATION_FIELDS
+            if (value := getattr(self, field)) is not None
+        }
 
 
 # meerail.toml is grouped into sections for the reader's sake; the settings

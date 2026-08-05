@@ -88,6 +88,39 @@ def get_or_create_account(db, email: str) -> Account:
     return acc
 
 
+def record_presentation(db, account: Account, values: dict[str, str]) -> None:
+    """Apply the display fields the agent's config pins, and record which they are.
+
+    `values` is ``AccountConfig.presentation()``: only the fields actually
+    written in meerail.toml. They are stamped onto the row on every pass — the
+    file is the source of truth for what it names, so an edit there wins over
+    whatever Settings last saved — and their names go into ``config_fields``,
+    which is what the web app reads to lock them (it may be on another machine
+    and never see the file).
+
+    Dropping a key from the file drops it from ``config_fields`` on the next
+    pass and nothing else: the field becomes editable again, holding the value
+    the file last gave it.
+    """
+    managed = sorted(values)
+    changed = False
+    for field, value in values.items():
+        if getattr(account, field) != value:
+            setattr(account, field, value)
+            changed = True
+    if list(account.config_fields or []) != managed:
+        account.config_fields = managed
+        changed = True
+    # A pinned footer opts out of the default-footer backfill exactly as a saved
+    # one does. Without this, `footer = ""` in the file would have DEFAULT_FOOTER
+    # written back over it at every server start, and it would stand there until
+    # the agent's next pass undid it.
+    if "footer" in values and not account.footer_customized:
+        account.footer_customized = True
+    if changed:
+        events.publish({"type": "accounts", "account": account.email})
+
+
 def _delete_orphans(db, message_pks: set[int]) -> None:
     """Delete content rows left with no folder placement."""
     for pk in message_pks:

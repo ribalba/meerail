@@ -184,7 +184,13 @@ def test_an_offline_week_does_not_hold_anything_back(failing_send):
     assert all(a.attempts == 5 for a in actions)
 
 
-def test_a_healthy_drain_says_nothing_and_counts_the_action(monkeypatch, capsys):
+def test_a_send_that_works_says_so(monkeypatch, capsys):
+    """The one action whose success has no other witness.
+
+    A flag or a move is the tail end of something the user watched happen in the
+    UI; a send is not, and "did that mail actually go out on Friday" is a
+    question the log has to be able to answer months later. Everything else in a
+    healthy drain stays quiet — the pass prints its own one-line summary."""
     monkeypatch.setattr(agent_actions.smtp, "send_raw", lambda *_a, **_kw: None)
     action = Action()
     db = DB([action])
@@ -192,9 +198,24 @@ def test_a_healthy_drain_says_nothing_and_counts_the_action(monkeypatch, capsys)
     applied, failed, sent = agent_actions.drain_actions(db, Bridge(), AccountRow())
 
     assert (applied, failed, sent) == (1, 0, 1)
-    assert capsys.readouterr().out == ""
+    out = capsys.readouterr().out
+    assert "sent to arne@example.com" in out
     assert action.status == "done"
     assert db.outbound.state == "sent"
+
+
+def test_a_healthy_flag_push_says_nothing(capsys):
+    """Only sends get a line of their own; the rest of the queue is noise."""
+    action = Action("setflags", {"uid": 3, "folder": "INBOX", "add": ["\\Seen"]})
+    db = DB([action])
+    client = type("C", (), {"select_folder": lambda *_a: None,
+                            "add_flags": lambda *_a: None})()
+    bridge = type("B", (), {"acc": Account(), "ops": lambda _self: client})()
+
+    applied, failed, sent = agent_actions.drain_actions(db, bridge, AccountRow())
+
+    assert (applied, failed, sent) == (1, 0, 0)
+    assert capsys.readouterr().out == ""
 
 
 def test_mail_an_older_agent_abandoned_is_found_and_can_be_requeued(capsys):
@@ -220,10 +241,20 @@ def test_mail_an_older_agent_abandoned_is_found_and_can_be_requeued(capsys):
 
 
 class Client:
-    """An IMAP session that records the commands a move puts to it."""
+    """An IMAP session that records the commands a move puts to it.
 
-    def __init__(self):
+    ``capabilities`` is what the server advertises, and ``source_keeps_uid``
+    whether the source folder still holds the UID once the COPY has run — false
+    on a server where folders are labels and the COPY was itself the move.
+    """
+
+    def __init__(self, capabilities=(), source_keeps_uid=True):
         self.calls = []
+        self.capabilities = set(capabilities)
+        self.source_keeps_uid = source_keeps_uid
+
+    def has_capability(self, name):
+        return name in self.capabilities
 
     def select_folder(self, name):
         self.calls.append(("select", name))
@@ -231,11 +262,18 @@ class Client:
     def copy(self, uids, to_folder):
         self.calls.append(("copy", uids, to_folder))
 
+    def move(self, uids, to_folder):
+        self.calls.append(("move", uids, to_folder))
+
+    def search(self, criteria):
+        self.calls.append(("search", criteria))
+        return [criteria[1]] if self.source_keeps_uid else []
+
     def delete_messages(self, uids):
         self.calls.append(("delete", uids))
 
-    def expunge(self):
-        self.calls.append(("expunge",))
+    def expunge(self, uids=None):
+        self.calls.append(("expunge",) if uids is None else ("expunge", uids))
 
 
 class RoleDB:
@@ -248,22 +286,68 @@ class RoleDB:
         return self.role
 
 
+def _move(client, role="custom", from_folder="INBOX", to_folder="Trash"):
+    bridge = type("B", (), {"acc": Account(), "ops": lambda _self: client})()
+    action = Action("move", {"uid": 7, "from_folder": from_folder, "to_folder": to_folder})
+    agent_actions.apply_action(RoleDB(role), bridge, AccountRow(), action)
+    return client.calls
+
+
 @pytest.mark.parametrize("role, filed_by_the_copy", [("all", True), ("custom", False)])
 def test_a_move_out_of_all_mail_stops_at_the_copy(role, filed_by_the_copy):
     """\\All holds everything the account has, so nothing can be taken out of
     it: Proton answers the EXPUNGE with "operation not allowed" and the action
     fails forever over a step that had nothing to do. Archiving from there is
     the COPY alone. Every other folder still gets the full move."""
-    client = Client()
-    bridge = type("B", (), {"acc": Account(), "ops": lambda _self: client})()
-    action = Action("move", {"uid": 7, "from_folder": "All Mail",
-                             "to_folder": "Archive"})
+    calls = _move(Client(), role=role, from_folder="All Mail", to_folder="Archive")
 
-    agent_actions.apply_action(RoleDB(role), bridge, AccountRow(), action)
+    assert ("copy", [7], "Archive") in calls
+    assert (("expunge",) in calls) is not filed_by_the_copy
+    assert (("delete", [7]) in calls) is not filed_by_the_copy
 
-    assert ("copy", [7], "Archive") in client.calls
-    assert (("expunge",) in client.calls) is not filed_by_the_copy
-    assert (("delete", [7]) in client.calls) is not filed_by_the_copy
+
+def test_a_move_uses_the_servers_own_move_command_where_there_is_one():
+    """One command that the server gets to interpret, instead of a COPY plus a
+    deletion this side guessed at. Every server that files one message under
+    several labels — the ones the guesswork was wrong about — advertises it."""
+    calls = _move(Client(capabilities=("MOVE", "UIDPLUS")))
+
+    assert ("move", [7], "Trash") in calls
+    assert not [c for c in calls if c[0] in ("copy", "delete", "expunge")]
+
+
+def test_a_hand_rolled_move_removes_the_source_copy():
+    """No MOVE: COPY, then take the original out — the UID is still in the
+    source folder, so there is genuinely a second copy to remove."""
+    calls = _move(Client(capabilities=("UIDPLUS",)))
+
+    assert calls == [("select", "INBOX"), ("copy", [7], "Trash"),
+                     ("search", ["UID", 7]), ("delete", [7]), ("expunge", [7])]
+
+
+def test_a_hand_rolled_move_expunges_the_whole_folder_only_as_a_last_resort():
+    """A bare EXPUNGE takes every \\Deleted message in the folder with it,
+    including ones another client flagged and has not expunged yet."""
+    calls = _move(Client())
+
+    assert ("expunge",) in calls
+    assert ("expunge", [7]) not in calls
+
+
+def test_a_hand_rolled_move_that_the_copy_already_finished_deletes_nothing():
+    """The bug that ate 22 messages.
+
+    On a server where folders are labels, COPY to Trash *is* the move: it clears
+    every other label, so the UID is already gone from the source folder. The
+    \\Deleted + EXPUNGE that used to follow unconditionally then said "delete
+    this message, which is in Trash", and Proton spells that "delete it for
+    good" — no copy left in Trash, in \\All, or anywhere else.
+    """
+    calls = _move(Client(source_keeps_uid=False))
+
+    assert ("copy", [7], "Trash") in calls
+    assert ("search", ["UID", 7]) in calls
+    assert not [c for c in calls if c[0] in ("delete", "expunge")]
 
 
 @pytest.mark.parametrize("exc, expected", [

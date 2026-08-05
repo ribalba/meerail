@@ -31,7 +31,7 @@
       <!-- Mail written but not yet handed to a mail server. Hidden while the
            outbox is empty, which on a working setup is nearly always: sending
            takes a second when the agent is up, and days when it is not. Opens
-           the status modal, where the reason lives. -->
+           the Outbox folder, where the messages and their errors are. -->
       <button class="outbox-notice" id="outbox-notice" hidden></button>
       <!-- Shown only when the server has seen a newer release than it runs.
            Filled by app.update.js, which also hides it once dismissed for that
@@ -145,6 +145,10 @@
           agent's <code>config.toml</code> — the name, colour and footer set here
           are local settings and stay put across syncs. The footer is prefilled
           into the composer, so it can be edited or removed per message.
+          Any of the three can instead be pinned in <code>meerail.toml</code>
+          (<code>label</code>, <code>color</code>, <code>footer</code> under
+          <code>[[agent.account]]</code>); pinned ones are shown above but not
+          editable here, since every sync would write the file's value back.
         </p>
 
         <h3 class="settings-heading">Appearance</h3>
@@ -407,13 +411,9 @@
     </div>
   </div>
 
-  <!-- Minimized composer: sits outside the backdrop so it survives it hiding -->
-  <div class="compose-min" id="compose-min" hidden>
-    <button class="compose-min-label" id="compose-min-restore" title="Restore">
-      <span id="compose-min-title">New Message</span>
-    </button>
-    <button class="icon-btn" id="compose-min-close" title="Discard"></button>
-  </div>
+  <!-- Minimized composers: one chip per parked draft, outside the backdrop so
+       they survive it hiding. Filled by app.compose.js. -->
+  <div class="compose-min-bar" id="compose-min-bar" hidden></div>
 
   <!-- Bucket + date for the composer's "Send & Ticket". After the composer in
        the DOM so it stacks above it — every backdrop shares one z-index. -->
@@ -471,6 +471,7 @@
   <script src="/static/js/app.bulk.js"></script>
   <script src="/static/js/app.search.js"></script>
   <script src="/static/js/app.compose.js"></script>
+  <script src="/static/js/app.outbox.js"></script>
   <script src="/static/js/app.tasks.js"></script>
   <script src="/static/js/app.status.js"></script>
   <script src="/static/js/app.update.js"></script>

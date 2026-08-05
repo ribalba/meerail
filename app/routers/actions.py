@@ -7,6 +7,8 @@ folder's copy is re-ingested on the next sync (dedup keeps content single)."""
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select
@@ -18,7 +20,7 @@ from core.events import publish_command
 from ..deps import require_ui_auth
 from .messages import _resolve_mailbox_ids
 from core.mail.store import is_pending, place_pending, recompute_counts
-from core.models import Account, Mailbox, Message, MessageLocation, PendingAction
+from core.models import Account, Mailbox, Message, MessageLocation, PendingAction, utcnow
 
 router = APIRouter(prefix="/api/messages", tags=["actions"], dependencies=[Depends(require_ui_auth)])
 
@@ -287,8 +289,43 @@ def _retarget_pending(db: DBSession, msg: Message, target: Mailbox | None) -> bo
     return True
 
 
+# How long after the queued move has finished a placement we wrote ourselves is
+# still worth waiting on. A sync pass runs on a poll interval of seconds, so
+# anything past this is not a placement in flight — it is one whose server copy
+# is never coming. See _in_flight.
+_SETTLE_GRACE = timedelta(minutes=5)
+
+
+def _in_flight(db: DBSession, msg: Message) -> bool:
+    """Is the move behind this optimistic placement still going to land?
+
+    Only asked when the placement is one we wrote ourselves and there is no
+    queued action left to re-aim (see _retarget_pending). Two things look like
+    that from here and they want opposite answers.
+
+    The move finished seconds ago and the sync has not brought the real
+    placement back yet: in flight, and the honest answer to another keypress is
+    "not yet". The move finished long ago and the server copy has still not
+    arrived: not in flight, and never will be — the message is not where we
+    think it is, or (as when a trash-as-COPY-plus-EXPUNGE deleted it outright)
+    it is nowhere at all. Waiting on that forever is what wedged 22 messages
+    into a folder no keypress could get them out of.
+    """
+    action = db.execute(
+        select(PendingAction).where(
+            PendingAction.message_pk == msg.id,
+            PendingAction.type.in_(("move", "delete")),
+        ).order_by(PendingAction.updated_at.desc())
+    ).scalars().first()
+    if action is None:
+        return False                      # nothing was ever queued for it
+    if action.status != "done":
+        return True                       # still queued, or being applied now
+    return utcnow() - action.updated_at < _SETTLE_GRACE
+
+
 def _move_to(db: DBSession, msg: Message, source_mailbox_id: int, target: Mailbox | None,
-             touched: set[int] | None = None) -> None:
+             touched: set[int] | None = None, enqueue: bool = True) -> None:
     """Move exactly one folder placement, preserving the message's other labels.
 
     The target placement is written straight away rather than waited for. The
@@ -301,6 +338,11 @@ def _move_to(db: DBSession, msg: Message, source_mailbox_id: int, target: Mailbo
     Pass `touched` to collect the affected mailboxes instead of recounting them
     here: bulk callers move thousands of placements out of the same few folders,
     and recomputing per placement would redo that scan once per message.
+
+    `enqueue=False` files the placement locally and tells the server nothing.
+    For a label server that is not a shortcut but the correct behaviour — one
+    message wearing three labels is one message, and it only wants moving once.
+    See _move_messages.
     """
     loc = next((item for item in msg.locations if item.mailbox_id == source_mailbox_id), None)
     if loc is None:
@@ -309,20 +351,29 @@ def _move_to(db: DBSession, msg: Message, source_mailbox_id: int, target: Mailbo
     if target is not None and source.id == target.id:
         return
 
-    if is_pending(loc):
-        if not _retarget_pending(db, msg, target):
-            # The agent has just applied the first move and the sync has not yet
-            # brought the real placement back — a window of seconds, in which
-            # there is no UID to address the message by. Refusing is the honest
-            # answer: pressing the key again once the folder settles works.
-            raise HTTPException(status_code=409,
-                                detail="This message is still being moved — try again in a moment")
-    elif target is not None:
-        _enqueue(db, msg.account_id, msg.id, "move",
-                 {"from_folder": source.imap_name, "uid": loc.imap_uid, "to_folder": target.imap_name})
-    else:
-        _enqueue(db, msg.account_id, msg.id, "delete",
-                 {"folder": source.imap_name, "uid": loc.imap_uid})
+    if enqueue:
+        if is_pending(loc):
+            if not _retarget_pending(db, msg, target) and _in_flight(db, msg):
+                # The agent has just applied the first move and the sync has not
+                # yet brought the real placement back — a window of seconds, in
+                # which there is no UID to address the message by. Refusing is
+                # the honest answer: pressing the key again once the folder
+                # settles works.
+                #
+                # Past that window there is nothing to wait for, and the
+                # placement is filed locally instead: no UID means nothing to
+                # tell the server, and a message that only exists here is still
+                # one the user gets to move around.
+                raise HTTPException(
+                    status_code=409,
+                    detail="This message is still being moved — try again in a moment")
+        elif target is not None:
+            _enqueue(db, msg.account_id, msg.id, "move",
+                     {"from_folder": source.imap_name, "uid": loc.imap_uid,
+                      "to_folder": target.imap_name})
+        else:
+            _enqueue(db, msg.account_id, msg.id, "delete",
+                     {"folder": source.imap_name, "uid": loc.imap_uid})
 
     if target is not None:
         place_pending(db, msg, target.id, loc)
@@ -406,18 +457,64 @@ def _thread_move(db: DBSession, thread_id: str, account_id: int, target: Mailbox
     return moved
 
 
+def _labels_one_message(db: DBSession, account_id: int) -> bool:
+    """Does this account's server file one message under several labels?
+
+    An \\All mailbox is what says so: Proton and Gmail both publish one, and on
+    both of them the copies in INBOX, in \\All and under a user label are the
+    same message seen three times, not three messages.
+    """
+    return db.scalar(
+        select(Mailbox.id).where(Mailbox.account_id == account_id,
+                                 Mailbox.role == "all").limit(1)
+    ) is not None
+
+
 def _move_messages(db: DBSession, msgs: list[Message], target: Mailbox | None,
                    touched: set[int]) -> int:
-    """Move every placement of every message, without committing or recounting."""
+    """Move every placement of every message, without committing or recounting.
+
+    Every placement goes, but on a label server only one of them is queued for
+    the agent. The rest are the same message under another label, and the first
+    move takes them all with it: trashing on Proton clears every other label by
+    definition. Queueing them anyway meant a second command addressing a UID the
+    move it followed had just retired — "Message does not exist (Code=2501)",
+    logged once per trashed message, retried, and eventually settled as done
+    having achieved nothing. It also gave the destructive half of the old
+    hand-rolled move a second chance to run against a message already sitting in
+    Trash, which is how those messages were deleted outright.
+    """
+    collapse = _labels_one_message(db, msgs[0].account_id) if msgs else False
     moved = 0
     for msg in msgs:
         # Snapshotted: _move_to deletes out of msg.locations as it goes.
-        for mailbox_id in [loc.mailbox_id for loc in msg.locations]:
-            if target is not None and mailbox_id == target.id:
-                continue          # already filed where it is going
-            _move_to(db, msg, mailbox_id, target, touched)
+        mailbox_ids = [loc.mailbox_id for loc in msg.locations
+                       if target is None or loc.mailbox_id != target.id]
+        carrier = _carrier(db, msg, mailbox_ids) if collapse else None
+        for mailbox_id in mailbox_ids:
+            _move_to(db, msg, mailbox_id, target, touched,
+                     enqueue=not collapse or mailbox_id == carrier)
             moved += 1
     return moved
+
+
+def _carrier(db: DBSession, msg: Message, mailbox_ids: list[int]) -> int | None:
+    """Which of a message's placements the one queued move should be made from.
+
+    Not just any of them. A placement we wrote ourselves carries a UID no server
+    has heard of, so it cannot address anything. And \\All is a folder nothing
+    can be taken *out* of — a move from there is an added label and nothing
+    else, which for an archive leaves the message sitting in the inbox it was
+    supposed to leave. Either is fine as the last resort, when it is all the
+    message has.
+    """
+    candidates = [loc for loc in msg.locations if loc.mailbox_id in mailbox_ids]
+    if not candidates:
+        return None
+    def rank(loc: MessageLocation) -> tuple[bool, bool]:
+        mb = db.get(Mailbox, loc.mailbox_id)
+        return (is_pending(loc), (mb.role if mb else "") == "all")
+    return min(candidates, key=rank).mailbox_id
 
 
 @router.post("/threads/{thread_id:path}/archive")

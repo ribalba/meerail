@@ -26,6 +26,10 @@ class AccountOut(BaseModel):
     # address goes out bare; see Account.send_names.
     send_names: dict[str, str] = Field(default_factory=dict)
     footer: str = ""
+    # Which of label/color/footer are pinned in the agent's meerail.toml. The
+    # UI shows those as set-in-the-config instead of editable, and PATCH refuses
+    # them; see Account.config_fields.
+    config_fields: list[str] = Field(default_factory=list)
     last_agent_seen: datetime | None = None
     last_sync_at: datetime | None = None
     created_at: datetime

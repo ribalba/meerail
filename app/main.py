@@ -10,8 +10,8 @@ from core.config import get_settings
 from core.database import engine, init_db
 from core.version import VERSION
 from .routers import (
-    accounts, actions, analytics, auth, compose, contacts, mailboxes, messages, search,
-    stream, sync, tasks, version,
+    accounts, actions, analytics, auth, compose, contacts, mailboxes, messages, outbox,
+    search, stream, sync, tasks, version,
 )
 from .workers import contacts_loop
 
@@ -43,6 +43,7 @@ app.include_router(mailboxes.router)
 app.include_router(messages.router)
 app.include_router(actions.router)
 app.include_router(compose.router)
+app.include_router(outbox.router)
 app.include_router(contacts.router)
 app.include_router(search.router)
 app.include_router(analytics.router)

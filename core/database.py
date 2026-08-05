@@ -151,6 +151,11 @@ def init_db() -> None:
             "footer TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS "
             "footer_customized BOOLEAN NOT NULL DEFAULT FALSE",
+            # Presentation fields pinned in the agent's meerail.toml. Empty on an
+            # existing volume until the agent's next pass says otherwise, which
+            # is exactly the behaviour of an install that pins nothing.
+            "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS "
+            "config_fields JSONB NOT NULL DEFAULT '[]'::jsonb",
             # Raw MIME and attachment payloads moved from disk into the DB, so
             # the agent (which writes them) and the app (which serves them)
             # share no filesystem.

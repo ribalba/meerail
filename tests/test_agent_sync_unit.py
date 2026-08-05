@@ -183,6 +183,9 @@ class RecheckIngest:
     def clear_agent_error(self, _db, _account):
         self.errors_cleared += 1
 
+    def record_presentation(self, _db, _account, values):
+        self.presentation = values
+
     def take_recheck(self, _db, _account):
         return self.pending
 
@@ -226,6 +229,7 @@ class AccountCfg:
     imap_port = 1143
     imap_security = "starttls"
     def send_identities(self): return []
+    def presentation(self): return {}
 
 
 def _run_pass(monkeypatch, pending):

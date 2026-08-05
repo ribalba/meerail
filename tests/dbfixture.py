@@ -16,12 +16,13 @@ port docker-compose publishes.
 from __future__ import annotations
 
 import contextlib
+from datetime import timedelta
 from email.utils import parseaddr
 
 from core import ingest
 from core.database import SessionLocal
 from core.models import (
-    Account, Attachment, Mailbox, Message, MessageLocation, Outbound, PendingAction,
+    Account, Attachment, Mailbox, Message, MessageLocation, Outbound, PendingAction, utcnow,
 )
 
 
@@ -159,6 +160,18 @@ def prune_folders(email: str, present_names: set[str]) -> int:
         return ingest.prune_mailboxes(db, account, present_names)
 
 
+def report_presentation(email: str, values: dict) -> None:
+    """Pin display fields on an account the way the start of a sync pass does.
+
+    `values` is what `AccountConfig.presentation()` hands over: the subset of
+    label/color/footer that the agent's meerail.toml actually sets. An empty
+    dict is a file that pins nothing, which is how a field is handed back.
+    """
+    with session() as db:
+        account = ingest.get_or_create_account(db, email)
+        ingest.record_presentation(db, account, values)
+
+
 def report_sync(email: str, backfill_complete: bool | None = None,
                 addresses: list[str] | None = None) -> None:
     """As the agent does at the end of a pass. `addresses` takes what the config
@@ -210,6 +223,25 @@ def pending_actions(email: str, type_: str | None = None) -> list[dict]:
             q = q.filter(PendingAction.type == type_)
         return [{"id": a.id, "type": a.type, "payload": a.payload,
                  "message_pk": a.message_pk} for a in q.order_by(PendingAction.created_at)]
+
+
+def apply_actions(email: str, minutes_ago: int = 0) -> int:
+    """Retire every queued action, as a successful agent pass does.
+
+    ``minutes_ago`` backdates the settle. What the app does with a placement it
+    wrote itself turns on how long ago the move behind it finished — seconds is
+    a move still landing, an hour is one whose server copy is never coming — so
+    a test of that needs to say which of the two it is staging.
+    """
+    with session() as db:
+        account = db.query(Account).filter(Account.email == email.lower()).one()
+        rows = db.query(PendingAction).filter(PendingAction.account_id == account.id,
+                                              PendingAction.status == "pending").all()
+        for a in rows:
+            a.status = "done"
+            a.attempts += 1
+            a.updated_at = utcnow() - timedelta(minutes=minutes_ago)
+        return len(rows)
 
 
 def attachment_rows(email: str) -> list[dict]:
@@ -268,10 +300,43 @@ def location_count(email: str, folder: str) -> int:
 
 
 
-def record_send_failure(outbound_id: int, error: str) -> None:
+def record_send_failure(outbound_id: int, error: str, attempts: int = 1) -> None:
     """What the agent writes after a failed send attempt: still queued, with the
-    reason on the row. See agent/actions.py _settle."""
+    reason on the row, and the attempt counted on the queue row beside it so the
+    backoff has something to compute from. See agent/actions.py _settle."""
     with session() as db:
         ob = db.get(Outbound, outbound_id)
         ob.state = "queued"
         ob.error = error
+        for action in _send_actions(db, outbound_id):
+            action.attempts = attempts
+            action.error = error
+            action.status = "pending"
+            action.updated_at = utcnow()
+
+
+def mark_outbound_sent(outbound_id: int) -> None:
+    """The other half of _settle: the server took it, so it leaves the outbox."""
+    with session() as db:
+        ob = db.get(Outbound, outbound_id)
+        ob.state = "sent"
+        ob.error = None
+        ob.sent_at = utcnow()
+        for action in _send_actions(db, outbound_id):
+            action.status = "done"
+
+
+def _send_actions(db, outbound_id: int) -> list[PendingAction]:
+    return [a for a in db.query(PendingAction).filter(PendingAction.type == "send").all()
+            if (a.payload or {}).get("outbound_id") == outbound_id]
+
+
+def send_action_state(outbound_id: int) -> dict | None:
+    """The queue row driving a send: its status, attempt count and retry clock."""
+    with session() as db:
+        rows = _send_actions(db, outbound_id)
+        if not rows:
+            return None
+        a = rows[0]
+        return {"status": a.status, "attempts": a.attempts, "updated_at": a.updated_at,
+                "error": a.error}

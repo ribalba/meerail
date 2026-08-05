@@ -6,11 +6,12 @@ App.compose = (function () {
   let replyTo = null;      // in_reply_to message-id
   let references = [];
   let staged = [];         // [{id, filename, size}]
-  let draftGeneration = 0; // invalidates uploads still running for a discarded draft
+  let draftGeneration = 0; // which draft an upload belongs to; see stage()
+  let generationSeq = 0;   // never reused: restoring puts an *old* generation back
   let body = null;         // markdown live-preview editor over #compose-body
   let prefilledFooter = ""; // footer put in the editor on open; alone it is not a draft
   let footerTail = "";     // text that opened *below* the footer (the quote), if any
-  let archivable = false;  // opened off a thread, so "Send & Archive" has something to file
+  let archiveTicket = null; // the conversation this was opened off, for "Send & Archive"
   let fromPinned = false;  // From was decided (by the user, or by a reply) — stop guessing
   let fromDefault = 0;     // identity index the composer opened with
   let suggestSeq = 0;      // drops out-of-order sender-for replies
@@ -19,7 +20,9 @@ App.compose = (function () {
   let relatedSeq = 0;      // same, for the co-recipient suggestions
   let relatedKey = null;
   let lastField = "#compose-to";  // recipient field a suggestion would be added to
+  let suggestItems = [];   // the co-recipients currently offered, so a park can keep them
   let htmlMode = false;    // send a formatted copy alongside the plain text
+  let minimized = [];      // parked drafts, oldest first — see "Minimize" below
   const $ = (s) => document.querySelector(s);
   const HTML_KEY = "meerail.compose.html";
 
@@ -57,7 +60,7 @@ App.compose = (function () {
   }
 
   function discardStaged() {
-    draftGeneration += 1;
+    draftGeneration = ++generationSeq;
     const abandoned = staged;
     staged = [];
     if (body) renderAttachments();
@@ -66,23 +69,45 @@ App.compose = (function () {
     }
   }
 
+  // A draft can be minimized while its files are still going up, so an upload
+  // is followed home by its generation rather than assumed to belong to
+  // whatever the composer is showing when it finishes. Answers false when that
+  // draft is gone for good, which is the signal to delete the upload again.
+  function stage(generation, attachment) {
+    if (generation === draftGeneration) {
+      staged.push(attachment);
+      renderAttachments();
+      return true;
+    }
+    const parked = minimized.find((d) => d.generation === generation);
+    if (!parked) return false;
+    parked.staged.push(attachment);
+    renderBar();                 // the chip counts what it is carrying
+    return true;
+  }
+
+  function draftAlive(generation) {
+    return generation === draftGeneration || minimized.some((d) => d.generation === generation);
+  }
+
   async function onFiles(files) {
     const status = $("#compose-status");
     const generation = draftGeneration;
+    // The status line belongs to the window, so it is only written to while
+    // this draft is the one in it.
+    const onScreen = () => generation === draftGeneration;
     for (const file of files) {
-      if (generation !== draftGeneration) break;
-      status.textContent = `Uploading ${file.name}…`;
+      if (!draftAlive(generation)) break;
+      if (onScreen()) status.textContent = `Uploading ${file.name}…`;
       try {
         const attachment = await App.api.uploadAttachment(file);
-        if (generation !== draftGeneration) {
+        if (!stage(generation, attachment)) {
           App.api.deleteAttachment(attachment.id).catch(() => {});
           break;
         }
-        staged.push(attachment);
-        renderAttachments();
-        status.textContent = "";
+        if (onScreen()) status.textContent = "";
       } catch (e) {
-        if (generation === draftGeneration) status.textContent = e.message || "Upload failed";
+        if (onScreen()) status.textContent = e.message || "Upload failed";
       }
     }
     $("#compose-file").value = "";
@@ -223,6 +248,7 @@ App.compose = (function () {
 
   function setSuggestions(items) {
     const host = $("#compose-suggest");
+    suggestItems = items;
     $("#compose-suggest-row").hidden = !items.length;
     host.innerHTML = items.map((c, i) =>
       `<button type="button" class="compose-suggest-btn" data-i="${i}"
@@ -313,39 +339,169 @@ App.compose = (function () {
 
   function show(title) {
     $("#compose-title").textContent = title;
-    $("#compose-min-title").textContent = title;
     $("#compose-status").textContent = "";
-    $("#compose-min").hidden = true;
     $("#compose-modal").hidden = false;
+  }
+
+  // Hiding the window does not move the caret out of it: the field keeps the
+  // focus while invisible, and every keystroke after that — including the
+  // shortcuts that would open the next message — disappears into it. So the
+  // keyboard is handed back explicitly whenever the window goes away.
+  function dropFocus() {
+    const focused = document.activeElement;
+    if (focused && $("#compose-modal").contains(focused)) focused.blur();
   }
 
   function close() {
     showDropHint(false);
     clearTimeout(suggestTimer);      // nothing to suggest to a discarded draft
     discardStaged();
+    dropFocus();
     $("#compose-modal").hidden = true;
-    $("#compose-min").hidden = true;
   }
 
   // --- Minimize ---------------------------------------------------------
-  // Minimizing only hides the window; every field keeps its value, so the
-  // draft is still there when the bar at the bottom is clicked. Nothing but
-  // the × (here or on the bar) throws a draft away.
-  const isMinimized = () => !$("#compose-min").hidden;
+  // There is one composer window but any number of drafts: minimizing lifts
+  // the whole draft out of the window into a chip on the bar at the bottom,
+  // which frees the window for the next message. Every field, attachment and
+  // reply header travels with it, so bringing it back is the same draft and
+  // not an approximation of it. Nothing but a × throws a draft away.
+  //
+  // Because a draft can be parked rather than lost, opening a second message
+  // over a first never has to ask permission — see makeRoom().
+
+  // Everything openWith() sets, plus the bookkeeping that decides how the
+  // draft behaves from here on. The From is kept as an address rather than a
+  // dropdown index: accounts can be reconfigured while a draft sits parked,
+  // and an index would then point at somebody else.
+  function snapshot() {
+    const from = identities[Number($("#compose-from").value)] || {};
+    const def = identities[fromDefault] || {};
+    const subject = $("#compose-subject").value;
+    return {
+      generation: draftGeneration,
+      title: $("#compose-title").textContent,
+      label: subject.trim() || $("#compose-title").textContent,
+      to: $("#compose-to").value,
+      cc: $("#compose-cc").value,
+      bcc: $("#compose-bcc").value,
+      ccShown: !$("#compose-cc-row").hidden,
+      bccShown: !$("#compose-bcc-row").hidden,
+      subject,
+      bodyText: body.getText(),
+      status: $("#compose-status").textContent,
+      fromNote: $("#compose-from-note").textContent,
+      from: { account_id: from.account_id, address: from.address },
+      fromDefault: { account_id: def.account_id, address: def.address },
+      staged, replyTo, references, archiveTicket, fromPinned, htmlMode, lastField,
+      prefilledFooter, footerTail, suggestKey, relatedKey,
+      suggestions: suggestItems,
+    };
+  }
+
+  // Put a snapshot back on screen. The staged attachments come back with their
+  // original generation, so an upload that was still running when the draft was
+  // parked lands in the composer it belongs to.
+  function apply(s) {
+    draftGeneration = s.generation;
+    staged = s.staged;
+    replyTo = s.replyTo;
+    references = s.references;
+    archiveTicket = s.archiveTicket;
+    fromPinned = s.fromPinned;
+    prefilledFooter = s.prefilledFooter;
+    footerTail = s.footerTail;
+    lastField = s.lastField;
+    suggestKey = s.suggestKey;
+    relatedKey = s.relatedKey;
+    updateSendButtons();
+    renderAttachments();
+    fillFrom(s.from.account_id, s.from.address);
+    fromDefault = findIdentity(s.fromDefault.account_id, s.fromDefault.address);
+    showExtra("cc", s.ccShown);        // clears the field when off, so fill after
+    showExtra("bcc", s.bccShown);
+    $("#compose-to").value = s.to;
+    $("#compose-cc").value = s.cc;
+    $("#compose-bcc").value = s.bcc;
+    $("#compose-subject").value = s.subject;
+    setHtmlMode(s.htmlMode);
+    setSuggestions(s.suggestions);
+    setFromNote(s.fromNote);
+    body.setText(s.bodyText);
+    show(s.title);                     // clears the status line, so say this after
+    $("#compose-status").textContent = s.status;
+    focusBody();
+  }
+
+  // Hand the window over to another draft. Whatever is in it is parked, unless
+  // there is nothing in it worth parking — an untouched composer is not a draft
+  // and would only leave an empty chip behind.
+  function makeRoom() {
+    if ($("#compose-modal").hidden) return;
+    if (hasDraft()) minimize(); else close();
+  }
 
   function minimize() {
     if ($("#compose-modal").hidden) return;
     showDropHint(false);
-    const subject = $("#compose-subject").value.trim();
-    $("#compose-min-title").textContent = subject || $("#compose-title").textContent;
+    clearTimeout(suggestTimer);        // the lookups resume when it comes back
+    minimized.push(snapshot());
+    // The parked snapshot owns the files now: bumping the generation both stops
+    // the next draft's discardStaged() from deleting them and tells an upload
+    // still in flight which draft it is landing in.
+    staged = [];
+    draftGeneration = ++generationSeq;
+    dropFocus();
     $("#compose-modal").hidden = true;
-    $("#compose-min").hidden = false;
+    renderBar();
   }
 
-  function restore() {
-    $("#compose-min").hidden = true;
-    $("#compose-modal").hidden = false;
-    focusBody();
+  // Bring one back. Anything already in the window is parked first, so
+  // restoring never costs another draft.
+  function restore(draft) {
+    if (!draft) return false;
+    makeRoom();
+    minimized = minimized.filter((d) => d !== draft);
+    apply(draft);
+    renderBar();
+    return true;
+  }
+
+  // Walks the parked drafts one press at a time: the open one goes to the back
+  // of the queue and the one that has waited longest comes up, so holding the
+  // key visits every draft in turn and lands back where it started.
+  function cycle() {
+    if (!minimized.length) return false;
+    return restore(minimized[0]);
+  }
+
+  function discard(draft) {
+    minimized = minimized.filter((d) => d !== draft);
+    for (const attachment of draft.staged) {
+      App.api.deleteAttachment(attachment.id).catch(() => {});
+    }
+    renderBar();
+  }
+
+  function renderBar() {
+    const bar = $("#compose-min-bar");
+    bar.hidden = !minimized.length;
+    bar.innerHTML = minimized.map((d, i) => {
+      const n = d.staged.length;
+      return `<div class="compose-min">
+        <button class="compose-min-label" data-act="restore" data-i="${i}"
+                title="Restore (Alt+C walks the minimized drafts)">
+          ${App.esc(d.label)}${n ? ` <span class="cm-count">${App.icon("paperclip", 11)}${n}</span>` : ""}
+        </button>
+        <button class="icon-btn" data-act="discard" data-i="${i}"
+                title="Discard">${App.icon("close", 16)}</button>
+      </div>`;
+    }).join("");
+    bar.querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
+      const draft = minimized[Number(b.dataset.i)];
+      if (!draft) return;
+      if (b.dataset.act === "restore") restore(draft); else discard(draft);
+    }));
   }
 
   function hasDraft() {
@@ -353,12 +509,6 @@ App.compose = (function () {
       .some((s) => $(s).value.trim())
       || body.getText().replace(prefilledFooter, "").trim() !== ""
       || staged.length > 0;
-  }
-
-  // A minimized draft must not be silently overwritten by a new composer.
-  function mayReplaceDraft() {
-    if (!isMinimized() || !hasDraft()) return true;
-    return confirm("Discard the minimized draft and open this message instead?");
   }
 
   // The account's footer is prefilled into the editor rather than stapled on at
@@ -458,10 +608,11 @@ App.compose = (function () {
   }
 
   function openWith(ctx) {
+    makeRoom();                 // park whatever was in the window first
     discardStaged();
     replyTo = ctx.in_reply_to || null;
     references = ctx.references || [];
-    archivable = !!ctx.archivable;
+    archiveTicket = ctx.archiveTicket || null;
     updateSendButtons();
     // A forward opens with the original's attachments already staged (the
     // server copied them into the outbox). They are ordinary staged files from
@@ -513,19 +664,22 @@ App.compose = (function () {
     if ($("#compose-to").value) body.focus(false); else $("#compose-to").focus();
   }
 
+  // Always a blank message: a minimized draft is one the user put aside, not
+  // the one they are asking for now. Alt+C is how those come back.
   function openNew() {
-    // A minimized draft is what "new message" would have been — bring it back.
-    if (isMinimized()) return restore();
     openWith({ account_id: accounts[0] && accounts[0].id, title: "New Message" });
   }
 
   async function openReply(messageId, mode) {
-    if (!mayReplaceDraft()) return restore();
+    // The reader is what opened this, so the thread it is showing *now* is the
+    // one to archive. Taken before the await rather than after: the reply
+    // context is a round trip, and a keystroke landing while it loads can put
+    // another conversation on screen.
+    const ticket = App.reader && App.reader.archiveTicket();
     try {
       const ctx = await App.api.replyContext(messageId, mode);
       ctx.title = mode === "forward" ? "Forward" : (mode === "replyall" ? "Reply All" : "Reply");
-      // The reader is what opened this, so its thread is the one to archive.
-      ctx.archivable = !!(App.reader && App.reader.isOpen());
+      ctx.archiveTicket = ticket;
       openWith(ctx);
     } catch (e) { alert("Could not open composer: " + e.message); }
   }
@@ -602,12 +756,15 @@ App.compose = (function () {
   // Whatever the primary button currently is — Send & Archive when there is a
   // thread behind this, plain Send otherwise. Keeps the keyboard and the
   // buttons saying the same thing about what "the default" means.
-  function sendDefault() { return archivable ? sendAndArchive() : sendNow(); }
+  function sendDefault() { return archiveTicket ? sendAndArchive() : sendNow(); }
 
   function sendAndArchive() {
     return send(async () => {
       $("#compose-status").textContent = "Archiving…";
-      await App.reader.archiveThread();
+      // The conversation this draft was opened off, not whatever the reader
+      // has moved on to since — those are rarely the same by the time a reply
+      // is sent, let alone one that sat minimized.
+      await App.reader.archiveTicketed(archiveTicket);
       $("#compose-status").textContent = "Sent ✓ · archived";
     });
   }
@@ -643,6 +800,7 @@ App.compose = (function () {
   function updateSendButtons() {
     const archive = $("#compose-send-archive");
     const plain = $("#compose-send");
+    const archivable = !!archiveTicket;
     archive.hidden = !archivable;
     archive.classList.toggle("btn-primary", archivable);
     archive.classList.toggle("btn-secondary", !archivable);
@@ -655,12 +813,9 @@ App.compose = (function () {
     body = App.markdown.editor($("#compose-body"));
     $("#compose-close").innerHTML = App.icon("close", 18);
     $("#compose-minimize").innerHTML = App.icon("minimize", 18);
-    $("#compose-min-close").innerHTML = App.icon("close", 16);
     $("#compose-attach").innerHTML = App.icon("paperclip", 18);
     $("#compose-close").addEventListener("click", close);
     $("#compose-minimize").addEventListener("click", minimize);
-    $("#compose-min-restore").addEventListener("click", restore);
-    $("#compose-min-close").addEventListener("click", close);
     $("#compose-send").addEventListener("click", sendNow);
     $("#compose-send-archive").addEventListener("click", sendAndArchive);
     $("#compose-send-ticket").addEventListener("click", sendAndTicket);
@@ -721,10 +876,9 @@ App.compose = (function () {
 
   return {
     init, openNew, openReply, close, sendNow, sendDefault, sendAndArchive, sendAndTicket,
-    minimize, restore,
+    minimize, cycle,
     htmlDefault, setHtmlDefault,     // the settings modal owns the checkbox, not the state
     isOpen: () => !$("#compose-modal").hidden,
-    isMinimized,
     refreshAccounts: async () => {
       try { accounts = await App.api.accounts(); } catch (_) { accounts = []; }
       buildIdentities();

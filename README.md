@@ -480,6 +480,15 @@ entry in `addresses` written as `Name <alias@example.com>` overrides it for that
 the primary `email` there is how it gets a name of its own. This is not the account *label* in
 Settings, which names the account in the sidebar and never leaves the UI.
 
+`label`, `color` and `footer` pin that UI-side presentation from the file: the account's name
+in the sidebar, the colour of its dot, and the footer the composer prefills. All three are
+normally edited in Settings → Accounts and left out of the file. Set one here and the file
+owns it — the agent writes it onto the account on every pass, and Settings shows it as
+configured rather than editable, since it would otherwise take a change that the next sync
+silently undid. Delete the key again and Settings takes it back, keeping the value the file
+last gave it. `footer = ""` is an answer, not an omission: it means this account has no
+footer. Handy when accounts are provisioned from a file rather than set up by hand.
+
 ### Upgrading from the two-file layout
 
 Before this, settings lived in `.env` *and* `agent/config.toml`, with `STORE_RAW_MIME` and
@@ -555,10 +564,18 @@ server that has been down since Friday.
 - **Queued work is never dropped.** Marks, moves and above all messages you have sent sit in
   the queue until they succeed, retried on a backoff for as long as it takes. Nothing
   expires them.
-- **The outbox is on screen.** A strip under the sidebar toolbar counts what is written but
-  not yet sent — normally for the second it takes, and for as long as it takes when the
-  agent is away. It turns red once an attempt has actually failed; opening it shows how long
-  the oldest message has been waiting and what the last attempt hit.
+- **The outbox is a folder you can open.** A strip under the sidebar toolbar counts what is
+  written but not yet sent — normally for the second it takes, and for as long as it takes
+  when the agent is away — and an **Outbox** folder appears above Favorites while anything
+  is in it (`g o` any time). Both turn red once an attempt has actually failed. The folder
+  lists each waiting message with who it is for, how many attempts it has cost and what the
+  last one said; opening one shows the full error, when the next attempt is due, and two
+  buttons: **Try now**, which skips the backoff after you have fixed the cause, and
+  **Delete**, the only thing anywhere that takes a message back out of the queue.
+- **The agent says the same thing in its log.** It prints every send that goes out and every
+  one that fails, and — because a pass that dies at connect never gets as far as trying —
+  lists what is still sitting in the outbox at startup and after a failed pass. A mailbox
+  full of unsent mail can no longer be silent on both sides.
 
 ### Running the agent
 
@@ -612,6 +629,35 @@ Import into an account **no agent syncs** — the default, and the tool refuses 
 without `--force`. The agent deletes folders its IMAP server does not list ([What meerail
 deletes, and when](#what-meerail-deletes-and-when)), and an imported folder exists nowhere
 but here, so its next pass would take the imported mail with it.
+
+### Putting back mail whose move never landed
+
+Filing a message writes the placement here straight away and queues the move for the agent
+— see [What meerail deletes, and when](#what-meerail-deletes-and-when). If that move never
+lands, the placement stays behind with nothing on the server under it: the message shows in
+the folder you filed it into, and every key you press on it is refused, because there is no
+UID to address it by.
+
+Versions up to 0.3.1 could get there by deleting the message. A move was applied as COPY,
+then `\Deleted`, then EXPUNGE — and on a server where folders are labels the COPY has
+already done the move, so the EXPUNGE landed on a message sitting in Trash, which Proton
+reads as "delete it for good". The agent now uses IMAP `MOVE` where the server offers it
+(Proton Bridge and Gmail both do) and, where it does not, removes the source copy only
+after confirming there is still one there.
+
+`tools/restore_pending.py` repairs what that left behind, from the raw MIME meerail still
+holds:
+
+```bash
+tools/restore_pending.py                     # what it would put back
+tools/restore_pending.py --apply
+```
+
+It appends each message back into the folder its placement claims, and the next sync pass
+ingests it under a real UID and retires the placeholder. Nothing is written to the database
+and nothing is deleted; a message already on the server is left alone, so re-running is
+safe. It reuses `agent/.venv` and talks to Bridge and Postgres over the loopback ports, so
+the stack has to be up.
 
 ### Backing up and restoring
 

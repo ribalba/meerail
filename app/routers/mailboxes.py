@@ -3,10 +3,11 @@ from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session as DBSession
 
+from core import outbox as outbox_core
 from core.database import get_db
 from core.events import publish_command
 from ..deps import require_ui_auth
-from core.models import Account, Mailbox, MessageLocation, PendingAction
+from core.models import Account, Mailbox, MessageLocation, Outbound, PendingAction
 
 router = APIRouter(prefix="/api/mailboxes", tags=["mailboxes"], dependencies=[Depends(require_ui_auth)])
 
@@ -41,6 +42,16 @@ def list_mailboxes(db: DBSession = Depends(get_db)):
         .where(MessageLocation.flagged.is_(True), MessageLocation.deleted.is_(False))
     ) or 0
 
+    # The Outbox is not an IMAP folder — it is this app's own queue — but it is
+    # a folder to whoever wrote the mail sitting in it, so the sidebar renders
+    # it as one. `failing` rides along because the row goes red on it, and the
+    # alternative would be the sidebar fetching the whole outbox to find out.
+    outbox_unsent, outbox_failing = db.execute(
+        select(func.count(Outbound.id),
+               func.count(Outbound.id).filter(Outbound.error.is_not(None)))
+        .where(Outbound.state.in_(outbox_core.UNSENT_STATES))
+    ).one()
+
     out_accounts = []
     unified_unread = 0
     for acc in accounts:
@@ -62,7 +73,9 @@ def list_mailboxes(db: DBSession = Depends(get_db)):
     return {
         "accounts": out_accounts,
         "smart": {"unified_inbox_unread": int(unified_unread), "flagged_total": int(flagged_total),
-                  "account_count": len(accounts)},
+                  "account_count": len(accounts),
+                  "outbox_unsent": int(outbox_unsent or 0),
+                  "outbox_failing": int(outbox_failing or 0)},
     }
 
 

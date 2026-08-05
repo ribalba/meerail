@@ -165,6 +165,24 @@ smtp_timeout         = 60
 #   "Your Name <you@customdomain.com>",
 # ]
 
+# How the account looks in the web UI: its name in the sidebar, the colour of
+# its dot, and the footer the composer prefills into every new message. All
+# three are normally edited in Settings → Accounts and left out of this file.
+#
+# Set one here and this file owns it: the agent writes it onto the account on
+# every pass, so an edit here reaches the UI on the next sync, and Settings
+# shows it as configured rather than editable — it would otherwise accept a
+# change that the next sync silently undid. Delete the key again and Settings
+# takes it back, keeping whatever value this file last gave it.
+#
+# `label` is the account's name in *your* sidebar and never leaves the UI; it is
+# not `name` above, which is what recipients see on the From header.
+# label  = "Personal"
+# color  = "#1d6ff2"            # hex, or a CSS colour name
+# footer = """
+# ----
+# Sent from meerail"""          # footer = "" gives this account no footer at all
+
 # The agent speaks plain IMAP/SMTP, so non-Proton providers work too. Gmail
 # example (needs 2-Step Verification + an App Password, and IMAP enabled in
 # Gmail settings — your normal Google password will NOT work):
