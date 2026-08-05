@@ -12,6 +12,9 @@ import time
 
 from core import ingest
 from core.database import SessionLocal
+# By name, not through the module: this is a pure classifier, not part of the
+# write path the rest of ``ingest`` is reached for.
+from core.ingest import derive_role
 from core.models import utcnow
 
 import actions
@@ -692,7 +695,7 @@ def sync_once(account: AccountConfig, cfg: Settings, reconcile: bool = True) -> 
         # LIST position for display: the pair is (display position, folder).
         walk = sorted(
             enumerate(folders),
-            key=lambda p: ingest.derive_role(p[1]["name"], p[1]["role_hint"]) != "inbox",
+            key=lambda p: derive_role(p[1]["name"], p[1]["role_hint"]) != "inbox",
         )
         progress = PassProgress(len(folders))
         beat = Heartbeat(db, account_row, progress)

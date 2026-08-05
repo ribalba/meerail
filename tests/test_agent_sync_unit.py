@@ -313,6 +313,43 @@ def test_pass_clears_a_recorded_error_up_front(monkeypatch):
     assert spy.errors_cleared == 1
 
 
+def test_the_inbox_is_walked_first_but_keeps_its_listed_position(monkeypatch):
+    """Servers routinely LIST the inbox somewhere in the middle. Walking folders
+    in that order leaves the one folder the user is looking at waiting behind
+    every archive folder on the account, so the walk starts at the inbox — while
+    sort_order still records where LIST put it, because that is the order the UI
+    reads back."""
+
+    class Middling(RecheckBridge):
+        def list_folders(self):
+            return [{"name": "Archive", "role_hint": "\\Archive"},
+                    {"name": "Work", "role_hint": ""},
+                    {"name": "INBOX", "role_hint": ""},
+                    {"name": "Sent", "role_hint": "\\Sent"}]
+
+    class Recording(RecheckIngest):
+        def __init__(self):
+            super().__init__(None)
+            self.registered = []
+
+        def register_folder(self, db, acc, name, *a, **kw):
+            self.registered.append((name, kw["sort_order"]))
+            return super().register_folder(db, acc, name, *a, **kw)
+
+    spy = Recording()
+    monkeypatch.setattr(agent_sync, "ingest", spy)
+    monkeypatch.setattr(agent_sync, "Bridge", lambda _a: Middling())
+    monkeypatch.setattr(agent_sync, "SessionLocal", lambda: DB())
+    monkeypatch.setattr(agent_sync, "drain_actions", lambda *_a: (0, 0, 0))
+    agent_sync.sync_once(AccountCfg(), Cfg())
+
+    # Inbox first, and the rest still in the order the server listed them.
+    assert [name for name, _ in spy.registered] == ["INBOX", "Archive", "Work", "Sent"]
+    # Display order is untouched: reordering the walk must not reshuffle the
+    # folder list in the UI.
+    assert dict(spy.registered) == {"Archive": 0, "Work": 1, "INBOX": 2, "Sent": 3}
+
+
 # --- Progress reporting ------------------------------------------------------
 
 
