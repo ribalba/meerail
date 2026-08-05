@@ -684,12 +684,22 @@ def sync_once(account: AccountConfig, cfg: Settings, reconcile: bool = True) -> 
             log.warn("the server listed no folders — nothing was synced, and nothing "
                      "was removed. Is this account loaded and signed in in Bridge?",
                      account.email)
+        # LIST order is the display order — that is what sort_order below hands
+        # the UI — but it is not the order worth walking in. Servers commonly
+        # list INBOX somewhere in the middle, and on a first run that leaves the
+        # one folder the user is actually looking at waiting behind every
+        # archive folder on the account. So walk the inbox first and keep its
+        # LIST position for display: the pair is (display position, folder).
+        walk = sorted(
+            enumerate(folders),
+            key=lambda p: ingest.derive_role(p[1]["name"], p[1]["role_hint"]) != "inbox",
+        )
         progress = PassProgress(len(folders))
         beat = Heartbeat(db, account_row, progress)
-        for i, f in enumerate(folders):
+        for i, (order, f) in enumerate(walk):
             uidvalidity, uidnext = bridge.select(f["name"])
             mailbox = ingest.register_folder(
-                db, account_row, f["name"], f["role_hint"], uidvalidity, uidnext, sort_order=i
+                db, account_row, f["name"], f["role_hint"], uidvalidity, uidnext, sort_order=order
             )
             if recheck_at:
                 ingest.reset_cursor(db, mailbox)
