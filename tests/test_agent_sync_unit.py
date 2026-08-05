@@ -225,7 +225,7 @@ class AccountCfg:
     imap_host = "127.0.0.1"
     imap_port = 1143
     imap_security = "starttls"
-    def send_addresses(self): return []
+    def send_identities(self): return []
 
 
 def _run_pass(monkeypatch, pending):

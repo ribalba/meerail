@@ -25,12 +25,18 @@ App.compose = (function () {
 
   // One entry per sendable address: the account primary plus its extra
   // "send as" addresses (Proton aliases). Drives the From dropdown.
+  //
+  // The name shown is the one configured for that address in the agent config,
+  // and so is exactly what the recipient will see on the From header — not the
+  // account label, which names the account in the sidebar, is one per account
+  // however many addresses it owns, and never goes out on a message.
   function buildIdentities() {
     identities = [];
     for (const a of accounts) {
       const addrs = [a.email, ...(a.send_addresses || []).filter((x) => x && x !== a.email)];
+      const names = a.send_names || {};
       for (const address of addrs) {
-        identities.push({ account_id: a.id, address, label: a.label || a.email });
+        identities.push({ account_id: a.id, address, name: names[address.toLowerCase()] || "" });
       }
     }
   }
@@ -140,7 +146,8 @@ App.compose = (function () {
   function fillFrom(accountId, address) {
     const sel = $("#compose-from");
     sel.innerHTML = identities.map((id, i) =>
-      `<option value="${i}">${App.esc(id.label)} &lt;${App.esc(id.address)}&gt;</option>`).join("");
+      `<option value="${i}">${id.name ? `${App.esc(id.name)} &lt;${App.esc(id.address)}&gt;`
+                                      : App.esc(id.address)}</option>`).join("");
     sel.value = String(findIdentity(accountId, address));
     $("#compose-from-row").style.display = identities.length > 1 ? "" : "none";
   }

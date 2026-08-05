@@ -22,6 +22,9 @@ class AccountOut(BaseModel):
     active: bool
     backfill_complete: bool
     send_addresses: list[str] = Field(default_factory=list)
+    # Address (lower-cased) -> display name sent on From. Absent means the
+    # address goes out bare; see Account.send_names.
+    send_names: dict[str, str] = Field(default_factory=dict)
     footer: str = ""
     last_agent_seen: datetime | None = None
     last_sync_at: datetime | None = None

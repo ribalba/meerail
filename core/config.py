@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import tomllib
+from email.utils import parseaddr
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -88,8 +89,18 @@ class AccountConfig(BaseModel):
     # partial response or an outright disconnect often enough that a backfill
     # spends its time restarting, and asking for less is what gets it finished.
     batch_size: int | None = None
+    # The name recipients see in front of the address — the display name on the
+    # From header of everything this account sends. Empty sends the bare
+    # address, which is what every account did before this existed. Per-address
+    # names override it; see `addresses` below.
+    name: str = ""
     # Extra "send as" addresses this account owns (Proton aliases / additional
     # addresses). The primary `email` is always sendable and need not be listed.
+    #
+    # An entry is either a bare address or the RFC 5322 form `Name <addr>`,
+    # which gives that one address a display name of its own instead of the
+    # account-wide `name`. Listing the primary here is otherwise pointless but
+    # is allowed, and is how it gets a name different from its siblings'.
     addresses: list[str] = []
 
     @field_validator("imap_security", "smtp_security")
@@ -115,20 +126,60 @@ class AccountConfig(BaseModel):
             raise ValueError(f"batch_size = {value!r} must be at least 1")
         return value
 
+    @field_validator("addresses")
+    @classmethod
+    def _parseable_addresses(cls, value: list[str]) -> list[str]:
+        # `Name <addr>` is accepted here, so an entry is no longer self-evidently
+        # an address and a typo can no longer be assumed to be one. Anything with
+        # no address in it would otherwise travel all the way to the From header
+        # and go out as a mailbox nobody can reply to.
+        for raw in value:
+            _, addr = parseaddr(raw or "")
+            if "@" not in addr:
+                raise ValueError(
+                    f"addresses entry {raw!r} has no email address in it; "
+                    f"write either 'alias@example.com' or 'Your Name <alias@example.com>'"
+                )
+        return value
+
     @model_validator(mode="after")
     def _username_defaults_to_email(self) -> AccountConfig:
         if not self.username:
             self.username = self.email
         return self
 
+    def send_identities(self) -> list[tuple[str, str]]:
+        """Every mailbox the account may send from, as (display name, address).
+
+        Primary first, then `addresses` in order, deduped case-insensitively on
+        the address — the first spelling of an address is the one kept. A repeat
+        is not simply dropped, though: if it carries a display name and the
+        entry already held does not, the name is taken. That is what makes
+        listing the primary under `addresses` a way to name it.
+
+        Names fall back to the account-wide `name`, which may itself be empty —
+        an empty name means the address goes out on its own, with no display
+        name at all.
+        """
+        out: list[list[str]] = []
+        at: dict[str, int] = {}
+        for raw in [self.email, *self.addresses]:
+            name, addr = parseaddr(raw or "")
+            name, addr = name.strip(), addr.strip()
+            if not addr:
+                continue
+            key = addr.lower()
+            if key in at:
+                if name and not out[at[key]][0]:
+                    out[at[key]][0] = name
+                continue
+            at[key] = len(out)
+            out.append([name, addr])
+        return [(name or self.name.strip(), addr) for name, addr in out]
+
     def send_addresses(self) -> list[str]:
         """Every address the account may send from — primary first, deduped."""
-        out = [self.email]
-        for a in self.addresses:
-            a = a.strip()
-            if a and a.lower() not in {x.lower() for x in out}:
-                out.append(a)
-        return out
+        return [addr for _, addr in self.send_identities()]
 
 
 # meerail.toml is grouped into sections for the reader's sake; the settings

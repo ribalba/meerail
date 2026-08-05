@@ -142,6 +142,11 @@ def init_db() -> None:
         for stmt in (
             "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS "
             "send_addresses JSONB NOT NULL DEFAULT '[]'::jsonb",
+            # Display names for those addresses. Empty on an existing volume
+            # until the agent's next pass reports them, which sends exactly what
+            # was sent before: the bare address.
+            "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS "
+            "send_names JSONB NOT NULL DEFAULT '{}'::jsonb",
             "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS "
             "footer TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS "

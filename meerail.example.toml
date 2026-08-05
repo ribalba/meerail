@@ -147,10 +147,23 @@ imap_read_timeout    = 60
 # stops answering would stop this account syncing, not just sending.
 smtp_timeout         = 60
 
+# The name recipients see in front of your address — the display name on the
+# From header of everything this account sends. Leave it out and mail goes out
+# as the bare address.
+# name = "Your Name"
+
 # Extra addresses this Proton account can send from (aliases / additional
 # addresses you own in Proton). They appear in the compose "From" dropdown.
 # The primary `email` above is always sendable and need not be repeated here.
 # addresses = ["alias@proton.me", "you@customdomain.com"]
+#
+# An entry may also be written `Name <address>`, which names that one address
+# instead of using `name` above — including the primary, which is the one
+# reason to list it here:
+# addresses = [
+#   "You At Work <you@proton.me>",
+#   "Your Name <you@customdomain.com>",
+# ]
 
 # The agent speaks plain IMAP/SMTP, so non-Proton providers work too. Gmail
 # example (needs 2-Step Verification + an App Password, and IMAP enabled in

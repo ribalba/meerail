@@ -474,6 +474,12 @@ the composer's *From*. Accounts register themselves in the app on first sync; th
 nothing to add in the UI. The example file carries a commented-out Gmail block alongside the
 Proton one.
 
+`name = "Your Name"` sets the display name recipients see in front of the address; without it
+mail goes out as the bare address. It applies to every address the account sends from, and an
+entry in `addresses` written as `Name <alias@example.com>` overrides it for that one — listing
+the primary `email` there is how it gets a name of its own. This is not the account *label* in
+Settings, which names the account in the sidebar and never leaves the UI.
+
 ### Upgrading from the two-file layout
 
 Before this, settings lived in `.env` *and* `agent/config.toml`, with `STORE_RAW_MIME` and

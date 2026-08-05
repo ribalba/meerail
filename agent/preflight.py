@@ -16,6 +16,7 @@ import stat
 import sys
 import time
 from dataclasses import dataclass
+from email.utils import formataddr
 
 from core.config import AccountConfig, Settings
 from core.version import VERSION
@@ -241,7 +242,9 @@ def check_smtp(account: AccountConfig) -> Result:
     try:
         ms = int((time.monotonic() - started) * 1000)
         crypto, exposed = _encryption(server.sock, account.smtp_security)
-        sendable = ", ".join(account.send_addresses())
+        # With the display names, because preflight is where a wrong or missing
+        # one should be spotted — not in a recipient's inbox.
+        sendable = ", ".join(formataddr(i) for i in account.send_identities())
         detail = (f"{target}\n         authenticated in {ms}ms over {crypto}"
                   f"\n         can send as: {sendable}")
         if exposed:

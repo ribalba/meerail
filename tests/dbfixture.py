@@ -16,6 +16,7 @@ port docker-compose publishes.
 from __future__ import annotations
 
 import contextlib
+from email.utils import parseaddr
 
 from core import ingest
 from core.database import SessionLocal
@@ -160,9 +161,14 @@ def prune_folders(email: str, present_names: set[str]) -> int:
 
 def report_sync(email: str, backfill_complete: bool | None = None,
                 addresses: list[str] | None = None) -> None:
+    """As the agent does at the end of a pass. `addresses` takes what the config
+    takes: bare addresses, or `Name <addr>` to name one."""
+    identities = None
+    if addresses is not None:
+        identities = [parseaddr(a) for a in addresses]
     with session() as db:
         account = ingest.get_or_create_account(db, email)
-        ingest.record_sync(db, account, backfill_complete, addresses)
+        ingest.record_sync(db, account, backfill_complete, identities)
 
 
 def extract_all(max_batches: int = 50) -> int:

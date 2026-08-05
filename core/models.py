@@ -76,6 +76,17 @@ class Account(Base):
     # sync; the primary ``email`` is always a valid sender regardless of this.
     send_addresses: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
 
+    # Display name per sendable address — lower-cased address to the name that
+    # goes on the From header when sending as it, the primary ``email``
+    # included. Kept beside ``send_addresses`` rather than inside it because
+    # that list is compared against message addresses all over the app (see
+    # analytics, compose) and those comparisons want bare addresses.
+    #
+    # Not ``label``: that names the *account* in the sidebar and never leaves
+    # the UI. This is what recipients see, so it comes from the agent config
+    # alongside the addresses it names, and is rewritten on every sync pass.
+    send_names: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+
     # Signature/disclaimer appended to every message sent from this account.
     # Empty disables it. Composition is the web app's job, so unlike the sync
     # settings above this is set in the UI, not the agent config.

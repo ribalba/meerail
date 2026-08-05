@@ -10,7 +10,7 @@ import re
 import uuid
 from datetime import timedelta
 from email.message import EmailMessage
-from email.utils import formatdate, make_msgid
+from email.utils import formataddr, formatdate, make_msgid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
@@ -85,6 +85,20 @@ def _resolve_from(account: Account, requested: str | None) -> str:
             detail=f"'{requested}' is not a sender address for {account.email}",
         )
     return chosen
+
+
+def _from_header(account: Account, from_addr: str) -> str:
+    """The From header for that address: `Name <addr>`, or the bare address when
+    the agent config gave this one no name.
+
+    Deliberately not the account `label`. That is the account's name in the
+    sidebar, it defaults to the local part of the primary address, and it is
+    shared by every alias the account owns — so putting it here would sign mail
+    from three different addresses with one name the user never chose to send
+    under.
+    """
+    name = (account.send_names or {}).get(from_addr.lower(), "")
+    return formataddr((name, from_addr))
 
 
 @router.post("/attachments")
@@ -175,9 +189,12 @@ def _attach_staged(m: EmailMessage, staging_ids: list[str]) -> list[Path]:
     return paths
 
 
-def _build_mime(req: SendRequest, from_addr: str) -> tuple[EmailMessage, list[str], list[Path]]:
+def _build_mime(req: SendRequest, from_addr: str,
+                from_header: str | None = None) -> tuple[EmailMessage, list[str], list[Path]]:
     m = EmailMessage()
-    m["From"] = from_addr
+    # The header may carry a display name; `from_addr` never does — it is the
+    # envelope sender and the Message-ID domain below.
+    m["From"] = from_header or from_addr
     m["To"] = ", ".join(req.to)
     if req.cc:
         m["Cc"] = ", ".join(req.cc)
@@ -237,7 +254,7 @@ def send(req: SendRequest, db: DBSession = Depends(get_db)):
         raise HTTPException(status_code=400, detail="At least one recipient is required")
 
     from_addr = _resolve_from(account, req.from_address)
-    m, rcpt, staged_paths = _build_mime(req, from_addr)
+    m, rcpt, staged_paths = _build_mime(req, from_addr, _from_header(account, from_addr))
 
     outbound = Outbound(
         account_id=account.id, state="queued",

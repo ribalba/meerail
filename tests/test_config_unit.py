@@ -148,3 +148,43 @@ def test_send_addresses_dedupes_case_insensitively():
     account = AccountConfig(email="You@proton.me",
                             addresses=["alias@proton.me", "you@PROTON.me"])
     assert account.send_addresses() == ["You@proton.me", "alias@proton.me"]
+
+
+def test_account_name_applies_to_every_address():
+    account = AccountConfig(email="you@proton.me", name="Your Name",
+                            addresses=["alias@proton.me"])
+    assert account.send_identities() == [("Your Name", "you@proton.me"),
+                                         ("Your Name", "alias@proton.me")]
+
+
+def test_bracketed_address_names_that_one_address():
+    account = AccountConfig(email="you@proton.me", name="Your Name",
+                            addresses=["Work You <work@example.com>", "alias@proton.me"])
+    assert account.send_identities() == [("Your Name", "you@proton.me"),
+                                         ("Work You", "work@example.com"),
+                                         ("Your Name", "alias@proton.me")]
+    # The address alone is what the rest of the system compares against.
+    assert account.send_addresses() == ["you@proton.me", "work@example.com",
+                                        "alias@proton.me"]
+
+
+def test_primary_can_be_named_by_listing_it():
+    # The one reason to repeat the primary under `addresses`: it takes the name
+    # and keeps its place at the front, rather than appearing twice.
+    account = AccountConfig(email="You@proton.me",
+                            addresses=["Arne Tarara <you@proton.me>", "alias@proton.me"])
+    assert account.send_identities() == [("Arne Tarara", "You@proton.me"),
+                                         ("", "alias@proton.me")]
+
+
+def test_display_name_case_is_preserved():
+    # The whole entry used to be lower-cased on its way to the database, so a
+    # name punched in as "Arne Tarara <...>" went out as "arne tarara".
+    account = AccountConfig(email="you@proton.me",
+                            addresses=["Arne Tarara <ARNE@green-coding.io>"])
+    assert account.send_identities()[1] == ("Arne Tarara", "ARNE@green-coding.io")
+
+
+def test_address_without_an_address_is_rejected():
+    with pytest.raises(ValueError, match="no email address in it"):
+        AccountConfig(email="you@proton.me", addresses=["Arne Tarara"])

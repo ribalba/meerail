@@ -527,21 +527,34 @@ def clear_agent_error(db, account: Account) -> None:
 
 
 def record_sync(db, account: Account, backfill_complete: bool | None = None,
-                addresses: list[str] | None = None) -> None:
-    """Update per-account sync status and the agent-declared sender addresses."""
+                identities: list[tuple[str, str]] | None = None) -> None:
+    """Update per-account sync status and the agent-declared sender identities.
+
+    `identities` is (display name, address) pairs — see
+    ``AccountConfig.send_identities``. The address is lower-cased for storage
+    because everything downstream compares it against message addresses, which
+    are lower-cased at parse time; the *name* is stored as written, because it
+    is prose shown to a recipient.
+    """
     if backfill_complete is not None:
         account.backfill_complete = backfill_complete
-    if addresses is not None:
-        seen: set[str] = set()
+    if identities is not None:
         ordered: list[str] = []
-        for addr in [account.email, *addresses]:
+        names: dict[str, str] = {}
+        for name, addr in [("", account.email), *identities]:
             low = (addr or "").strip().lower()
-            if low and low not in seen:
-                seen.add(low)
+            if not low:
+                continue
+            if low not in names:
                 ordered.append(low)
+            # A later pair naming an address the primary already contributed is
+            # how the primary itself gets a name.
+            names[low] = (name or "").strip() or names.get(low, "")
         extras = ordered[1:]
-        if extras != account.send_addresses:
+        names = {a: n for a, n in names.items() if n}
+        if extras != account.send_addresses or names != account.send_names:
             account.send_addresses = extras
+            account.send_names = names
             events.publish({"type": "accounts", "account": account.email})
     account.last_sync_at = utcnow()
     # A pass got all the way here, so whatever failed last time is over. Usually

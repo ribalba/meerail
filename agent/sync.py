@@ -697,7 +697,7 @@ def sync_once(account: AccountConfig, cfg: Settings, reconcile: bool = True) -> 
         # open" as "still fetching mail". run_indexer_forever drains them on its
         # own thread, and reports its own progress.
         ingest.record_sync(db, account_row, backfill_complete=True,
-                           addresses=account.send_addresses())
+                           identities=account.send_identities())
         if recheck_at:
             ingest.clear_recheck(db, account_row, recheck_at)
         db.commit()

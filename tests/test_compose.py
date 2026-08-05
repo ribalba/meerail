@@ -77,6 +77,37 @@ def test_agent_reports_send_addresses(account):
     assert acc["send_addresses"] == [alias.lower()]
 
 
+def test_agent_reports_display_names(account):
+    email, aid = account["email"], account["id"]
+    alias = f"alias-{uuid.uuid4().hex[:8]}@example.com"
+    dbfixture.report_sync(email, addresses=[f"Arne Tarara <{email}>",
+                                            f"Work Arne <{alias}>"])
+
+    code, accounts = api("GET", "/api/accounts")
+    acc = next(a for a in accounts if a["id"] == aid)
+    assert acc["send_addresses"] == [alias.lower()]
+    # Keyed by address, primary included, and the case of the name survives —
+    # only the address is lower-cased.
+    assert acc["send_names"] == {email.lower(): "Arne Tarara",
+                                 alias.lower(): "Work Arne"}
+
+
+def test_send_puts_the_display_name_on_the_from_header(account):
+    email, aid = account["email"], account["id"]
+    alias = f"alias-{uuid.uuid4().hex[:8]}@example.com"
+    dbfixture.report_sync(email, addresses=[f"Work Arne <{alias}>"])
+
+    code, r = api("POST", "/api/compose/send", {
+        "account_id": aid, "from_address": alias, "to": ["dest@example.com"],
+        "subject": "Named", "body_text": "hi"})
+    assert code == 200, r
+
+    send, mime = _raw_mime_of_last_send(email)
+    assert f"From: Work Arne <{alias}>" in mime
+    # The envelope sender stays a bare address — Proton relays on that.
+    assert send["payload"]["mail_from"] == alias
+
+
 def test_send_from_alias_sets_from_and_envelope(account):
     email, aid = account["email"], account["id"]
     alias = f"alias-{uuid.uuid4().hex[:8]}@example.com"
