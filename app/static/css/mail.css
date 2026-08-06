@@ -180,6 +180,60 @@ body.resizing { cursor: col-resize; user-select: none; }
   border-bottom-width: 2px; border-radius: 5px; padding: .05rem .3rem; }
 .sc-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* --- Sidebar recent actions ---
+   Shares the cheat sheet's collapsible chrome (.sc-toggle, .sc-body) and its
+   place in the sidebar column; only the rows differ, because these have a
+   button on them. Capped shorter than the shortcut box: it is a list of the
+   last few things you did, and one that grew to half the sidebar would be a
+   log. */
+.recent-box { flex: 0 0 auto; border-top: 1px solid var(--border);
+  padding: .35rem .5rem .5rem; max-height: 32vh; display: flex; flex-direction: column; }
+.recent-box.collapsed .sc-glyph { transform: rotate(180deg); }
+.recent-box.collapsed .sc-body { display: none; }
+/* Before anything has been filed. Matches .sync-strip-idle, which is the same
+   sentence in the same column: the panel is working, it has nothing to say. */
+.rc-empty { font-size: .71rem; color: var(--text-muted); padding: .2rem 0 .1rem; }
+.rc-row { display: flex; align-items: center; gap: .4rem; padding: .18rem 0; }
+.rc-what { min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
+.rc-line { font-size: .74rem; color: var(--text-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rc-when { font-size: .66rem; color: var(--text-faint); }
+/* Pushed to the right edge and kept quiet until the row is under the pointer.
+   Undo is not the thing you are looking at the panel for most of the time. */
+.rc-undo { margin-left: auto; flex: 0 0 auto; font: inherit; font-size: .7rem;
+  color: var(--accent); background: none; border: 1px solid transparent;
+  border-radius: 5px; padding: .1rem .4rem; cursor: pointer; }
+.rc-row:hover .rc-undo { border-color: var(--border-strong); }
+.rc-undo:hover { background: var(--hover-tint); }
+.rc-undo:focus-visible { border-color: var(--accent); }
+/* Emptying the Trash, and anything the mail server has moved past. Left in the
+   list rather than dropped: "you cannot take this one back" is information. */
+.rc-undo:disabled { color: var(--text-faint); cursor: not-allowed;
+  border-color: transparent; background: none; }
+
+/* An undo that was tried and refused. Red on the row itself rather than in a
+   dialog: it is the state of one line in a list that is already on screen, and
+   the commonest cause ("the agent is holding this, try again in a moment") is
+   over by the time a modal has been dismissed. */
+.rc-row.failed .rc-line { color: var(--danger); }
+.rc-row.failed .rc-undo { color: var(--danger); border-color: var(--danger); }
+.rc-row.failed .rc-undo:disabled { color: var(--text-faint); border-color: transparent; }
+/* The ⓘ. Always visible when there is something to say — unlike Undo, which
+   hides until hover, because a reason nobody knows is there is a tooltip, and
+   that is what this replaced. */
+.rc-info { flex: 0 0 auto; display: flex; align-items: center; padding: .1rem;
+  background: none; border: none; cursor: pointer; color: var(--text-faint); }
+.rc-info:hover { color: var(--text); }
+.rc-row.failed .rc-info { color: var(--danger); }
+.rc-why { font-size: .68rem; line-height: 1.35; color: var(--text-muted);
+  padding: 0 0 .3rem .1rem; }
+/* The moment between pressing the key and this panel having read the operation
+   back. It occupies the same place as the Undo button so the row does not jump
+   when one becomes the other. */
+.rc-settling { margin-left: auto; flex: 0 0 auto; display: flex; align-items: center;
+  padding: .1rem .4rem; color: var(--text-faint); }
+.rc-settling svg { animation: icon-spin 1s linear infinite; }
+
 /* --- Panes --- */
 .list-pane { border-right: 1px solid var(--border); background: var(--list-bg);
   display: flex; flex-direction: column; overflow: hidden; }
@@ -284,6 +338,14 @@ body.resizing { cursor: col-resize; user-select: none; }
   display: inline-flex; align-items: center; gap: .2rem; }
 .flag-dot { color: var(--flag); display: flex; }
 .attach-glyph { color: var(--text-faint); display: flex; }
+/* "Coming back Monday 09:00", on a conversation that was put off. Keyed to
+   --accent rather than to the muted furniture around it: a row in Archive that
+   is going to reappear on its own is not the same row as one that is not, and
+   that is the whole thing this says. */
+.remind-chip { font-size: .7rem; border-radius: 999px; padding: 0 .4rem .5px;
+  display: inline-flex; align-items: center; gap: .22rem; white-space: nowrap;
+  color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent); }
 .acct-stripe { position: absolute; left: 0; top: 0; bottom: 0; width: 3px; }
 
 /* --- Swipe actions ---
@@ -619,6 +681,63 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
 .mm-icon { display: flex; color: var(--text-muted); }
 .mm-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .move-empty { padding: .5rem .6rem; font-size: .82rem; color: var(--text-muted); }
+
+/* --- "Remind me" ---
+   The menu borrows .move-menu's box and .move-item's rows: it is the same kind
+   of thing (a short list of destinations opened off a toolbar button), and the
+   only differences are the time shown against each choice and the custom field
+   at the foot. */
+.remind-menu { min-width: 250px; }
+.rm-head { padding: .35rem .5rem .25rem; font-size: .72rem; font-weight: 600;
+  letter-spacing: .04em; text-transform: uppercase; color: var(--text-faint); }
+/* The first line when the conversation is already parked. Not a label like the
+   headings around it but a statement of where things stand, so it keeps its own
+   case and takes the accent the chip and the strip use for the same fact. */
+.remind-menu .rm-head:first-child { text-transform: none; letter-spacing: 0;
+  font-size: .8rem; color: var(--accent); }
+/* Pushed to the right edge so the times line up under each other and the menu
+   reads as a column of labels and a column of clocks. */
+.rm-when { margin-left: auto; padding-left: .75rem; font-size: .78rem;
+  color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.move-item:hover .rm-when { color: var(--text); }
+.rm-sep { height: 1px; margin: .3rem .35rem; background: var(--border); }
+.rm-custom { display: flex; gap: .35rem; padding: .15rem .35rem .3rem; }
+.rm-input { flex: 1 1 auto; min-width: 0; font: inherit; font-size: .78rem;
+  padding: .25rem .35rem; border-radius: 6px; color: var(--text);
+  background: var(--bg-elev); border: 1px solid var(--border); }
+.rm-set { flex: 0 0 auto; font: inherit; font-size: .78rem; cursor: pointer;
+  padding: .25rem .55rem; border-radius: 6px; color: var(--text);
+  background: var(--bg-elev); border: 1px solid var(--border-strong); }
+.rm-set:hover { background: var(--bg); }
+
+/* The strip over a conversation that is waiting on a reminder. It sits inside
+   the reading pane above the first message because the conversation is not in
+   the folder it was filed from any more — this is the only place left that can
+   say when it is coming back, or take that back. */
+.remind-strip { display: flex; align-items: center; gap: .55rem; flex-wrap: wrap;
+  margin: 0 0 .75rem; padding: .5rem .7rem; border-radius: 8px; font-size: .82rem;
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); }
+/* Overdue: the moment has passed and the mail has not landed. Late, not lost —
+   amber rather than red, which is reserved for mail that is failing to send. */
+.remind-strip.late { background: color-mix(in srgb, var(--flag) 12%, transparent);
+  border-color: color-mix(in srgb, var(--flag) 35%, transparent); }
+.remind-strip .rs-icon { flex: 0 0 auto; display: flex; color: var(--accent); }
+.remind-strip.late .rs-icon { color: var(--flag); }
+.remind-strip .rs-text { flex: 1 1 12rem; min-width: 0; display: flex; flex-direction: column; }
+.remind-strip .rs-head { font-weight: 600; }
+.remind-strip .rs-sub { font-size: .76rem; color: var(--text-muted); }
+.rs-btn { flex: 0 0 auto; font: inherit; font-size: .78rem; cursor: pointer;
+  padding: .25rem .6rem; border-radius: 6px; color: var(--text);
+  background: var(--bg); border: 1px solid var(--border-strong); }
+.rs-btn:hover { background: var(--bg-elev); }
+/* The second verb, and deliberately the quieter one: "bring it back" is what
+   someone reaching for this strip usually means. Quieter, though, not disabled —
+   a transparent border on a tinted strip read as greyed out, which is the one
+   thing a button that works must never look like. */
+.rs-btn.ghost { background: none; border-color: var(--border-strong); }
+.rs-btn.ghost:hover { background: var(--bg); }
 
 /* --- Compose --- */
 /* Resizable via the native grip; `resize` needs a non-visible overflow, which
@@ -1129,6 +1248,11 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
 .ag-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 .ag-btn:disabled { opacity: .6; cursor: default; }
 .ag-btn-hint { flex: 1 1 12rem; font-size: .74rem; line-height: 1.35; color: var(--text-muted); }
+/* Beside a repair that changes something on the server, "Dismiss" only changes
+   what is on screen — so it steps back and lets the fix read as the action. On
+   its own (nothing to repair) it keeps the ordinary weight. */
+.ag-btn-quiet { border-color: transparent; background: transparent; color: var(--text-muted); }
+.ag-btn-quiet:hover:not(:disabled) { border-color: var(--border-strong); color: var(--text); }
 /* Pending: a recheck can run for many minutes, so it stays visible until the
    agent clears the flag rather than flashing a confirmation and vanishing. */
 .ag-recheck.pending { display: block; font-size: .76rem; line-height: 1.4;
@@ -1334,6 +1458,10 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
   /* Touch has no keyboard to learn shortcuts for, and the sheet costs 45vh of
      the folder page to say so. */
   .shortcut-box { display: none; }
+  /* Recent actions stays: undoing a mis-swipe is more use on a touch screen
+     than on a desktop, not less. Shorter, because the folder page it shares is
+     the whole screen down here. */
+  .recent-box { max-height: 26vh; }
 
   /* Back buttons. The chevron is drawn pointing down, so it turns a quarter
      turn anticlockwise to point the way it goes. */

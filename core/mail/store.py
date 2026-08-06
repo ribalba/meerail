@@ -32,7 +32,9 @@ from ..models import (
     Recipient,
     utcnow,
 )
-from .parse import ParsedEmail, canonical_message_id, html_to_text, parse_email
+from .parse import (
+    ParsedEmail, canonical_message_id, header_identity, html_to_text, parse_email,
+)
 from .threading import assign_thread
 from .thumbs import should_thumb
 from .tika import should_extract
@@ -108,7 +110,9 @@ def _queue_flag_catchup(
         return
     db.add(PendingAction(
         account_id=msg.account_id, message_pk=message_pk, type="setflags",
-        payload={"folder": mailbox.imap_name, "uid": uid,
+        # The UID epoch this number was read in rides along, as it does on every
+        # action the UI queues — see app/routers/actions.py::_enqueue.
+        payload={"folder": mailbox.imap_name, "uid": uid, "uidvalidity": mailbox.uidvalidity,
                  "add": [_INHERITED[name] for name in ahead], "remove": []},
     ))
 
@@ -154,6 +158,36 @@ def is_pending(loc: MessageLocation) -> bool:
 # database says" during the gap between them would otherwise read it as a fact.
 SETTLE_GRACE = timedelta(minutes=5)
 
+# Statuses a move can be sitting in with nothing left to happen to it. The agent
+# never retires a *failed* action — see agent/actions.py — so these are the two
+# cases where it has decided the instruction cannot be carried out at all
+# ("stale": the UID no longer names anything; "refused": the server said no to
+# something no retry can change), plus the one an old version wrote.
+#
+# "undone" is the user's own version of the same verdict: the move was taken
+# back out of the queue before any agent applied it (app/routers/undo.py), so
+# nothing is coming and the placement it would have created is already gone.
+# Reading it as in-flight would leave every later keypress on that message
+# answered with "still being moved" until the grace period ran out.
+SETTLED = ("stale", "refused", "error", "undone")
+
+# How many refusals in a row end a move's claim on the local view.
+#
+# A queued move is believed on credit: the source placement is deleted the
+# moment the key is pressed, so until the server catches up the app is showing
+# something only it knows. That credit is right for a move that has not been
+# tried yet — a laptop that is offline for a week still archived that mail — and
+# right for one that has failed once or twice, because a Bridge restart looks
+# exactly like that.
+#
+# It is wrong for a move the server keeps rejecting. Five attempts is a quarter
+# of an hour of the backoff curve (60s doubling to the 15-minute ceiling), by
+# which point "the server has not caught up yet" has stopped being a plausible
+# reading: the message is in the folder the server says it is in, and the app
+# saying otherwise is the failure. The action stays queued and keeps being
+# retried either way — this decides only who is believed in the meantime.
+STUCK_AFTER = 5
+
 
 def move_in_flight(db: Session, message_pk: int) -> bool:
     """Is a move or delete the user asked for still expected to land?
@@ -168,6 +202,14 @@ def move_in_flight(db: Session, message_pk: int) -> bool:
     be honoured (app/routers/actions.py), and by the agent, to decide whether a
     placement the server lists but the database has not got is a move in
     progress or a gap to repair (agent/sync._restore_unplaced).
+
+    "Still queued" used to be answer enough on its own, and it is the answer that
+    never ends: nothing takes a failing action out of the queue, so a move the
+    server refuses every fifteen minutes claimed to be in flight for good. That
+    is the state that hides a divergence rather than reporting one — the app went
+    on showing a message as archived while the server had it in the inbox, and
+    the sweep that exists to repair exactly that was told, forever, that it was
+    too early to look. See STUCK_AFTER.
     """
     action = db.execute(
         select(PendingAction).where(
@@ -177,8 +219,17 @@ def move_in_flight(db: Session, message_pk: int) -> bool:
     ).scalars().first()
     if action is None:
         return False                      # nothing was ever queued for it
+    if action.status in SETTLED:
+        # The agent has decided this one cannot be applied — a rebuilt folder
+        # whose UIDs mean nothing now (_settle_stale), or a destination the
+        # server will not take mail into (_settle_refused). Nothing is coming:
+        # the message is wherever the server says it is, and a fresh action
+        # queued against the re-read placement is how it moves.
+        return False
     if action.status != "done":
-        return True                       # still queued, or being applied now
+        # Queued, or being applied right now — and believed, up to the point
+        # where the refusals say it is not going to land.
+        return action.attempts < STUCK_AFTER
     return utcnow() - action.updated_at < SETTLE_GRACE
 
 
@@ -211,8 +262,13 @@ def place_pending(
     return loc
 
 
-def _drop_pending_placement(db: Session, message_pk: int, mailbox_id: int) -> None:
-    """Retire the optimistic placement now that the real one has landed."""
+def drop_pending_placement(db: Session, message_pk: int, mailbox_id: int) -> None:
+    """Retire the optimistic placement written while a move was queued.
+
+    Called when the real placement lands (upsert_location, below) and when the
+    move behind it is dropped instead of applied (agent/actions.py::_settle_stale)
+    — the two ways a placement nothing backs stops being the truth.
+    """
     loc = db.execute(
         select(MessageLocation).where(
             MessageLocation.mailbox_id == mailbox_id,
@@ -256,21 +312,142 @@ def upsert_location(
     # which is how a message archived and then read keeps its read state: the
     # optimistic row is where that state was living.
     if uid > 0:
-        _drop_pending_placement(db, message_pk, mailbox_id)
+        drop_pending_placement(db, message_pk, mailbox_id)
     return loc
 
 
-def find_message_by_message_id(db: Session, account_id: int, message_id: str) -> Message | None:
+# --- when two messages claim to be one ---------------------------------------
+#
+# A Message-ID is supposed to be unique per message, and mostly is, which is why
+# it is what collapses the same mail seen under three Proton labels into one
+# stored copy. But it is a header, written by whoever sent the message: a mailer
+# with a broken generator, a list that re-sends under the old id, or anyone at
+# all who wants two different messages to look like one can produce a collision.
+#
+# Believing it outright is how content goes missing. The second message is never
+# fetched — its UID is simply hung off the first message's row — so the reader
+# shows the first message's subject, body and attachments in the place where the
+# second one arrived, and the second one's content was never stored at all.
+#
+# So the id proposes and the message disposes: a candidate found by Message-ID
+# has to look like the same message before anything is attached to it. What that
+# means is below, and deliberately uses only fields both sides derive the same
+# way — the headers each was parsed from, plus a byte count when both numbers
+# are ours rather than the server's.
+
+
+def same_message(msg: Message, parsed: ParsedEmail) -> bool:
+    """Is this stored row the message these bytes came from?
+
+    The content decides it wherever the content is known: ``content_hash`` is a
+    hash of every byte of the message, so two mails that hash the same *are* the
+    same mail, and two that do not are not — whatever their headers claim. That
+    is the only test that cannot be talked round by a sender, which matters
+    because the question is only ever asked about messages claiming one
+    Message-ID, and a sender is who decides what a Message-ID says.
+
+    Not every row can answer. A message stored from its headers alone never had
+    a body to hash, and rows that predate the column have no hash either; those
+    fall back to sender, subject and send time — the three things a message
+    carries wherever it goes, and enough to keep a genuine collision apart in
+    every case anyone has actually met. A row like that gains its hash the moment
+    the message is stored in full, which for the headers-only case is the very
+    next pass that has the window for it.
+
+    Byte *counts* are deliberately not part of this. The same message arrives
+    with CRLF over IMAP and with LF out of an mbox, so it is a different length
+    in each — counting would call every message in an imported archive different
+    from the copy already synced and duplicate the lot. The hash is taken over
+    the normalised form for the same reason. Where two sizes *are* commensurable
+    they are used: the no-fetch shortcut compares the server's RFC822.SIZE with
+    our own (see find_message_by_message_id).
+
+    One transport difference survives that normalisation: an mbox writer escapes
+    body lines beginning "From " to ">From ", and tools/import_mbox.py refuses to
+    guess which of those were escaped and which the author typed. Such a message
+    imported into an account that already synced it hashes differently and is
+    stored twice. That is the direction to be wrong in — a duplicate is visible
+    and deletable, and a merge is a body nobody can get back.
+    """
+    if msg.content_hash and parsed.content_key:
+        return msg.content_hash == parsed.content_key
+    return (msg.date_sent, msg.from_addr, msg.subject_norm) == (
+        parsed.date_sent, parsed.from_addr, parsed.subject_norm)
+
+
+def find_message_by_message_id(db: Session, account_id: int, message_id: str,
+                               size: int | None = None, date=None,
+                               headers: bytes | None = None,
+                               content_wanted: bool = False) -> Message | None:
+    """The stored message this id names, if it is safe to say it names one.
+
+    Everything after the id comes free with the header pass the caller has
+    already done, and every one of them is a reason to answer None — which sends
+    the caller off to fetch the message properly instead of hanging its UID off a
+    row that may be a different mail, or one that is missing the body this pass
+    was supposed to bring.
+
+    ``headers`` is the block those headers were read from, and is what makes this
+    decision the same decision ``same_message`` makes on the full bytes: sender,
+    subject and send time. Without it the shortcut was down to id, date and byte
+    count — no sender, no subject, because the cheap pass did not fetch them —
+    and two different messages agreeing on those three merged, with the second
+    body never fetched at all.
+
+    ``content_wanted`` says the caller is prepared to fetch a body for this UID:
+    it is inside the content window. A stored row that has no body then is not an
+    answer to it — that is the case where the window was widened and the mail it
+    used to exclude is meant to come back — so the shortcut stands aside and lets
+    the fetch happen. Without this the fill-in path in ingest_raw was unreachable
+    from a sync pass: the recheck re-walked the folder, recognised every
+    headers-only message by its id, and skipped the download that was the whole
+    point of the recheck.
+
+    A disagreement costs one fetch and nothing else: the full ingest that follows
+    compares the two properly and still recognises a message it already holds, so
+    a server whose RFC822.SIZE does not match the bytes it hands over makes this
+    slower, never wrong.
+
+    What this cannot do is compare the *message*, because not fetching it is the
+    point — and that is why no sync pass calls it any more. Every fact available
+    here is a header, headers are written by whoever sent the mail, and a pair
+    engineered to agree on all of them was taken to be one message with the
+    second body never fetched by anything. A pass fetches every UID now and lets
+    the bytes decide in ingest_raw (see same_message); what it costs is
+    bandwidth, and what it buys is that the mirror holds what the server holds.
+    """
     message_id = canonical_message_id(message_id)
     if not message_id:
         return None
-    return db.execute(
+    rows = db.execute(
         select(Message).where(Message.account_id == account_id, Message.message_id == message_id)
-    ).scalars().first()
+        .limit(2)
+    ).scalars().all()
+    if len(rows) != 1:
+        # None, or an id this account has already caught out: two rows wearing it
+        # means it names nothing in particular, and this shortcut's whole job is
+        # to decide without reading the message. Fetch it and let the content
+        # decide (ingest_raw), which is the only place that can.
+        return None
+    msg = rows[0]
+    if content_wanted and msg.content_status != "full":
+        return None
+    if date is not None and msg.date_sent is not None and msg.date_sent != date:
+        return None
+    if size is not None and msg.content_status != "skipped" and msg.size_bytes != size:
+        return None
+    identity = header_identity(headers)
+    if identity is not None and (msg.from_addr, msg.subject_norm) != identity:
+        return None
+    return msg
 
 
 def _store_content(db: Session, msg: Message, parsed: ParsedEmail, raw: bytes) -> None:
     """Fill in everything that comes from the body: text, attachments, search."""
+    # What this row is, as opposed to what its headers say it is. Written here
+    # because here is where the whole message is in hand, and kept when the
+    # content is later pruned — the bytes go, but what they were stays knowable.
+    msg.content_hash = parsed.content_key
     msg.size_bytes = parsed.size_bytes
     msg.snippet = parsed.snippet
     msg.has_attachments = bool(parsed.attachments)
@@ -336,7 +513,7 @@ def replace_content(db: Session, msg: Message, raw: bytes) -> None:
 def ingest_raw(
     db: Session, account: Account, mailbox: Mailbox, uid: int, flags: dict, raw: bytes,
     headers_only: bool = False, size_bytes: int | None = None,
-    parsed: ParsedEmail | None = None,
+    parsed: ParsedEmail | None = None, received=None,
 ) -> tuple[Message, bool]:
     """Parse + store raw bytes. Returns (message, created_new_content).
 
@@ -358,19 +535,39 @@ def ingest_raw(
     attachment twice. It must be the parse of these exact bytes; nothing checks.
     """
     parsed = parsed if parsed is not None else parse_email(raw)
+    dedup_key = parsed.dedup_key
     msg = db.execute(
         select(Message).where(
-            Message.account_id == account.id, Message.dedup_key == parsed.dedup_key
+            Message.account_id == account.id, Message.dedup_key == dedup_key
         )
     ).scalar_one_or_none()
+
+    shared_id = msg is not None and not same_message(msg, parsed)
+    if shared_id:
+        # Same Message-ID, different message. Whoever got here first keeps the
+        # id as its key; this one is filed under its bytes instead, which cannot
+        # belong to two messages. It keeps its own subject, body and attachments,
+        # and Message.message_id is untouched, because what the sender wrote is
+        # still what the sender wrote.
+        #
+        # What it does *not* keep is the id as a conversation. A thread_id is
+        # what "archive this conversation" acts on, and two unrelated messages
+        # sharing one means archiving either files both — the collision reaching
+        # past itself into somebody's unrelated mail. See assign_thread.
+        dedup_key = parsed.content_key
+        msg = db.execute(
+            select(Message).where(
+                Message.account_id == account.id, Message.dedup_key == dedup_key
+            )
+        ).scalar_one_or_none()
 
     created = msg is None
     if created:
         msg = Message(
             account_id=account.id,
             message_id=parsed.message_id,
-            dedup_key=parsed.dedup_key,
-            thread_id=assign_thread(db, account.id, parsed),
+            dedup_key=dedup_key,
+            thread_id=assign_thread(db, account.id, parsed, shared_id=shared_id),
             in_reply_to=parsed.in_reply_to,
             references=parsed.references,
             subject=parsed.subject,
@@ -378,7 +575,14 @@ def ingest_raw(
             from_name=parsed.from_name,
             from_addr=parsed.from_addr,
             date_sent=parsed.date_sent,
-            date_received=utcnow(),
+            # When this arrived, as the *server* saw it (INTERNALDATE), falling
+            # back to now for anything with no server behind it — an mbox
+            # import, a test. Deliberately not the Date header, which is written
+            # by the sender: date_sent is what the reader shows and sorts by,
+            # and this is what decides how long the body is kept. A message
+            # dated 1998 displays as 1998 and is retained as what it is, mail
+            # that arrived today. See core.ingest.prune_expired_content.
+            date_received=received or utcnow(),
             # Headers only: the body is not here to be measured, so take the
             # size the server reported. Everything else is header-derived and
             # therefore already correct.
@@ -395,10 +599,19 @@ def ingest_raw(
 
         if not headers_only:
             _store_content(db, msg, parsed, raw)
-    elif not headers_only and msg.content_status == "skipped":
-        # We have the whole thing now and only had the headers before: the
-        # window was widened and a recheck re-walked this UID. Recipients and
-        # the header fields are already right; only content was ever missing.
+    elif not headers_only and msg.content_status != "full":
+        # We have the whole thing now and did not before — the window was widened
+        # and a recheck re-walked this UID. Recipients and the header fields are
+        # already right; only content was ever missing.
+        #
+        # Both ways of being without it end here. "skipped" never had a body
+        # (outside the window when it was first seen) and has no attachment rows;
+        # "pruned" had one and was walked back as the window slid past it, and
+        # its attachment rows are still there with their payloads emptied. Those
+        # go first, or the message would come back carrying each of its files
+        # twice — the same reason replace_content clears them.
+        db.execute(delete(Attachment).where(Attachment.message_pk == msg.id))
+        db.flush()      # autoflush is off; the DELETE must land before the INSERTs
         _store_content(db, msg, parsed, raw)
 
     upsert_location(db, msg.id, mailbox.id, uid, flags)
@@ -431,10 +644,26 @@ def strip_content(db: Session, msg: Message) -> None:
 
 
 def ingest_location_only(
-    db: Session, account: Account, mailbox: Mailbox, uid: int, flags: dict, message_id: str
+    db: Session, account: Account, mailbox: Mailbox, uid: int, flags: dict, message_id: str,
+    size: int | None = None, date=None, headers: bytes | None = None,
+    content_wanted: bool = False,
 ) -> bool:
-    """Record a folder placement for content we already have. Returns True if matched."""
-    msg = find_message_by_message_id(db, account.id, message_id)
+    """Record a folder placement for content we already have. Returns True if matched.
+
+    This is the shortcut that makes a label server's backfill finish: most of a
+    Proton walk is the same mail seen again under another label, and matching it
+    by Message-ID means the body never crosses the wire a second time.
+
+    Everything after ``message_id`` is what makes that shortcut safe to take, and
+    all of it comes out of the header pass the caller has already done: the size
+    and date the server reported, the header block those came from, and whether
+    this UID is one the caller would fetch a body for. See
+    find_message_by_message_id for what each of them rules out. Passing none of
+    them matches by id alone, which is only safe where the caller genuinely has
+    nothing else to go on.
+    """
+    msg = find_message_by_message_id(db, account.id, message_id, size=size, date=date,
+                                     headers=headers, content_wanted=content_wanted)
     if msg is None:
         return False
     upsert_location(db, msg.id, mailbox.id, uid, flags)

@@ -40,6 +40,11 @@
 #
 #   * SERVER_PASSWORD is required, not optional. This one is on the internet.
 #
+#   * TRUSTED_PROXIES is set, because Traefik is in front. TLS ends there, so
+#     without it the app sees plain HTTP from a container address and gets both
+#     the cookie's Secure flag and the login rate limiter wrong. See the
+#     `server` service.
+#
 # Plain `docker compose` REJECTS this file: the agent's config mount uses
 # Coolify's `content:` extension, which is not a Compose key. Coolify strips it
 # and writes the file before Docker sees any of it, which is also what stops
@@ -187,7 +192,39 @@ services:
       # Required here, unlike the laptop stack. An empty SERVER_PASSWORD means
       # no auth, which is right for localhost and wrong for a public hostname.
       SERVER_PASSWORD: ${SERVER_PASSWORD:?set a UI password in Coolify}
+      # Empty unless something other than a browser needs the API. It is not the
+      # UI password — that one is typed into a browser and is not a credential
+      # to hand to a script.
+      API_TOKEN: ${API_TOKEN:-}
+      # Coolify's Traefik terminates TLS and reaches this container over the
+      # project network, so every request arrives as plain HTTP from a Docker
+      # address. Without this the app believes exactly that: the session cookie
+      # goes out without Secure, and the login rate limiter counts one
+      # attacker's failed attempts against every user behind the proxy — five
+      # wrong passwords and nobody can log in.
+      #
+      # The default is the private ranges Docker hands out on its own networks,
+      # which is where Traefik is. Nothing else can reach port 8000 (the service
+      # publishes nothing to the host), so trusting them here trusts Coolify's
+      # proxy and no one else; narrow it to the network's own CIDR if you would
+      # rather be exact, and never widen it to `*` on a host where anything
+      # untrusted shares the network.
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}
       SESSION_MAX_AGE_DAYS: ${SESSION_MAX_AGE_DAYS:-30}
+      # How long a browser remembers to reach this hostname over HTTPS only.
+      # With SERVER_PASSWORD set, meerail already refuses to serve anything over
+      # a plaintext connection — this is what stops the browser making the
+      # plaintext request in the first place, which is the one that would carry
+      # a session cookie. Set it to 0 while you are still moving the install
+      # between hostnames: it is a promise, and browsers keep it.
+      HSTS_MAX_AGE_DAYS: ${HSTS_MAX_AGE_DAYS:-365}
+      # Ceiling on ordinary request bodies, applied before the body is read and
+      # before it is authenticated — FastAPI parses a body before it runs the
+      # dependency that would have said 401, so this is what stops a stranger
+      # deciding what an unauthenticated POST costs this container. Uploads to
+      # the composer are exempt and get max_attachment_bytes instead. Traefik
+      # should have a limit of its own as well; see COOLIFY.md.
+      MAX_REQUEST_BYTES: ${MAX_REQUEST_BYTES:-8388608}
       DEFAULT_SEARCH_YEARS: ${DEFAULT_SEARCH_YEARS:-0}
       CONTACTS_SCAN_YEARS: ${CONTACTS_SCAN_YEARS:-1}
     volumes:
@@ -264,11 +301,16 @@ services:
           # VPS disk that is usually the first thing to give up.
           store_raw_mime = true
 
-          # 0 keeps every message body forever. Set e.g. 24 to keep only the last
-          # two years of content — older mail stays listed, threaded and
-          # searchable by subject and correspondent, but has no body to open, and
+          # 0 keeps every message body forever, which is what this template
+          # ships with: a default that silently strips bodies out of the
+          # database after a year is not one anybody should meet by accident,
+          # and a VPS that runs out of disk is a much louder problem than mail
+          # that quietly stopped opening. Set e.g. 24 to keep only the last two
+          # years of content — older mail stays listed, threaded and searchable
+          # by subject and correspondent, but has no body to open, and
           # already-stored mail is stripped back as the window slides past it.
-          content_window_months = 12
+          # Nothing is touched on the mail server either way.
+          content_window_months = 0
 
           [[agent.account]]
           email         = "you@proton.me"

@@ -44,6 +44,11 @@ class _Stored:
     subject: str
     subject_norm: str
     date_sent: datetime | None
+    # What this message is filed under. For a message whose Message-ID turned
+    # out to be shared, that is a hash of its content — and it is the name its
+    # conversation takes, so that replaying the rules here reproduces the
+    # separation ingest made rather than merging the two back together.
+    content_key: str
 
 
 def rethread_account(db: Session, account_id: int) -> tuple[int, int]:
@@ -70,6 +75,12 @@ def rethread_account(db: Session, account_id: int) -> tuple[int, int]:
     ).scalars().all()
 
     for m in rows:
+        # A row filed under its content rather than under its Message-ID is one
+        # ingest found sharing that id with a different message. Replaying the
+        # rules without saying so would hand both the id as their thread and put
+        # the two unrelated conversations back together — which is what a thread
+        # archive or trash then acts on. See assign_thread.
+        key = m.dedup_key or ""
         m.thread_id = assign_thread(
             db,
             account_id,
@@ -80,7 +91,9 @@ def rethread_account(db: Session, account_id: int) -> tuple[int, int]:
                 subject=m.subject or "",
                 subject_norm=m.subject_norm or "",
                 date_sent=m.date_sent,
+                content_key=key,
             ),
+            shared_id=bool(m.message_id) and key.startswith("sha256:"),
         )
         # assign_thread's merge step rewrites sibling rows in the DB directly,
         # so the identity map has to see those before the next message queries.

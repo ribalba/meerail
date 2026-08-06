@@ -8,6 +8,7 @@ app: mail piling up in `outbound` with no way to know it was there.
 """
 
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -222,6 +223,168 @@ def test_a_cancelled_message_can_still_be_deleted(account, no_send_delay):
     assert api("DELETE", f"/api/outbox/{oid}")[0] == 204
     assert row_for(oid) is None
     assert dbfixture.send_action_state(oid) is None
+
+
+def test_a_message_being_sent_right_now_cannot_be_cancelled_retried_or_deleted(
+        account, no_send_delay):
+    """The race the lease exists to end.
+
+    An agent picks a send up, spends a minute inside SMTP and writes the result
+    at the end. For that whole minute the queue row used to still say "pending",
+    so the Outbox happily cancelled a message that had already been delivered —
+    the exact thing the undo window exists to prevent — and Send now re-queued
+    one that was mid-flight, which is how a single message arrives twice.
+
+    The claim is written down before the first SMTP command now, so all three
+    verbs can see it and refuse. "Too late" is a worse answer than "cancelled",
+    and the only true one.
+    """
+    no_send_delay(3600)
+    oid = queue_one(account, subject="Going out right now")
+    dbfixture.lease_send_action(oid)
+
+    assert row_for(oid)["sending"] is True
+    for method, path in (("POST", f"/api/outbox/{oid}/cancel"),
+                         ("POST", f"/api/outbox/{oid}/retry"),
+                         ("DELETE", f"/api/outbox/{oid}")):
+        code, body = api(method, path)
+        assert code == 409, (method, path, code)
+        assert "being sent right now" in body["detail"]
+
+    # And nothing was changed on the way to saying so: the agent still owns the
+    # row, with the envelope it was built with.
+    after = dbfixture.send_action_state(oid)
+    assert after["status"] == "leased"
+    assert row_for(oid)["state"] == "queued"
+
+
+def test_a_message_that_has_just_gone_cannot_be_put_back(account, no_send_delay):
+    """The other half of the same race, and the one a lock alone does not close.
+
+    These verbs are reached through the Outbound row, which is read before the
+    queue row is locked. A send that succeeds in between leaves the request
+    holding a row that still says "queued" for a message that has gone — and the
+    queue row it then looks for is finished, which reads exactly like "this was
+    never queued". Send now took that reading and *re-queued* the message, which
+    delivers it a second time; Delete took it and threw away the record of a mail
+    that had actually been sent.
+
+    Both are refused now, from the state of the row rather than from the state
+    the request started with.
+    """
+    no_send_delay(0)
+    oid = queue_one(account, subject="Already gone")
+    # The queue row finished; the Outbound row is what this request read before
+    # that happened. See dbfixture.finish_send_action.
+    dbfixture.finish_send_action(oid)
+
+    for method, path in (("POST", f"/api/outbox/{oid}/retry"),
+                         ("POST", f"/api/outbox/{oid}/cancel"),
+                         ("DELETE", f"/api/outbox/{oid}")):
+        code, body = api(method, path)
+        assert code == 409, (method, code, body)
+        assert "already been sent" in body["detail"]
+
+    # And above all: no second send was queued behind our backs, and the record
+    # of the one that did go out is still here.
+    assert dbfixture.send_action_state(oid)["status"] == "done"
+    assert len(dbfixture.send_actions_for(oid)) == 1
+
+
+def test_a_long_send_keeps_its_lease_alive(account, no_send_delay, monkeypatch):
+    """A lease that expires under a working transfer is a duplicate send.
+
+    No fixed expiry can be long enough: a large attachment over a slow uplink is
+    a send that is *succeeding* for half an hour, and the socket timeout does not
+    bound it — every chunk that goes out resets that clock. So the agent says it
+    is still there while it works, and the expiry measures silence rather than
+    duration.
+    """
+    no_send_delay(0)
+    oid = queue_one(account, subject="Slow and large")
+    monkeypatch.setattr(agent_actions, "_LEASE_RENEW", 0.2)
+    seen = {}
+
+    def slow_send(*_a, **_kw):
+        # Read from a session of its own, as a second agent would: the renewal
+        # runs on its own connection, so this is the only place it shows up —
+        # and it has to be caught while the send is still in flight, because
+        # settling the action writes the same column at the end.
+        seen["taken"] = dbfixture.send_action_state(oid)["updated_at"]
+        time.sleep(1.0)                                  # five renewal intervals
+        seen["during"] = dbfixture.send_action_state(oid)["updated_at"]
+
+    monkeypatch.setattr(agent_actions.smtp, "send_raw", slow_send)
+
+    class Bridge:
+        acc = type("A", (), {"email": account["email"], "smtp_host": "h", "smtp_port": 25,
+                             "smtp_security": "starttls"})()
+
+        def ops(self):
+            return None
+
+    with dbfixture.session() as db:
+        applied, _failed, _sent = agent_actions.drain_actions(
+            db, Bridge(), db.get(dbfixture.Account, account["id"]))
+
+    assert applied == 1
+    # Touched while the send was in progress, so a second agent reading the row
+    # mid-transfer finds a lease that is minutes from expiring rather than one
+    # it may take over — which is the duplicate this exists to prevent.
+    assert seen["during"] > seen["taken"]
+
+
+def test_mail_waiting_on_purpose_does_not_hold_up_mail_that_is_ready(
+        account, no_send_delay, monkeypatch):
+    """A pass takes the oldest *due* work, not the oldest work.
+
+    A send can be told to wait — up to a day, from the Outbox's own delay — and
+    those rows are then the oldest pending rows in the table for as long as they
+    wait. Filtering for "due" after reading a fixed slice of the oldest rows
+    meant a few hundred of them filled the slice and everything queued behind
+    went unapplied until they cleared: a flag change made this afternoon waiting
+    on mail scheduled for tomorrow morning.
+    """
+    # More waiting messages than one pass will look at, all of them older than
+    # the one that is ready — the shape the old scan could not see past, since
+    # it read a slice of the oldest rows and only then asked which were due.
+    # The pass's depth is turned down rather than the queue filled to the old
+    # 500-row window: it is the same relationship between the two numbers, and
+    # this way the test does not cost 500 composed messages to state it.
+    monkeypatch.setattr(agent_actions, "_PER_PASS", 2)
+    no_send_delay(24 * 3600)
+    held = [queue_one(account, subject=f"Later {i}") for i in range(5)]
+    no_send_delay(0)
+    ready = queue_one(account, subject="Now please")
+
+    class Bridge:
+        """A bridge for a send: no IMAP session is needed, and asking for one
+        would mean the pass had reached something other than a send."""
+        acc = type("A", (), {"email": account["email"], "smtp_host": "h", "smtp_port": 25,
+                             "smtp_security": "starttls"})()
+
+        def ops(self):
+            return None
+
+    sent = []
+    original = agent_actions.smtp.send_raw
+    agent_actions.smtp.send_raw = lambda _acc, _frm, rcpt, _mime: sent.append(rcpt)
+    try:
+        with dbfixture.session() as db:
+            applied, failed, _ = agent_actions.drain_actions(
+                db, Bridge(), db.get(dbfixture.Account, account["id"]))
+    finally:
+        agent_actions.smtp.send_raw = original
+
+    assert (applied, failed) == (1, 0)                   # the ready one, and only it
+    assert len(sent) == 1
+    assert row_for(ready) is None                        # it went out and left the outbox
+    # Every deliberately-delayed message is untouched, waiting for its own
+    # deadline rather than for a pass to work its way down to it.
+    for oid in held:
+        row = row_for(oid)
+        assert row is not None and row["send_at"] is not None
+        assert dbfixture.send_action_state(oid)["status"] == "pending"
 
 
 def test_changing_the_delay_does_not_move_a_deadline_already_running(account, no_send_delay):

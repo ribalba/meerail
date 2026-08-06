@@ -203,6 +203,37 @@ def send_actions(db, outbound_ids: list[int]) -> dict[int, PendingAction]:
     return found
 
 
+def send_actions_for(db, outbound_id: int, lock: bool = False) -> list[PendingAction]:
+    """Every queue row for one message's delivery — including finished ones —
+    optionally taken for the length of the caller's transaction.
+
+    ``send_actions`` above matches in Python, which is fine for reading a list.
+    Deciding whether a message may still be cancelled is not reading: the agent
+    can be inside the SMTP conversation about this exact row while the answer is
+    being computed, and the only way to be sure it is not is to hold the same row
+    it holds. So this one asks the database for the row by outbound id (a JSONB
+    lookup, precise enough to lock nothing else) and, with ``lock``, waits behind
+    whoever has it rather than reading around them.
+
+    Finished rows are included on purpose, and it is the whole reason this
+    returns a list. "There is no live queue row for this message" reads
+    identically whether the send has never been queued or has just this second
+    succeeded, and those two want opposite answers: one is re-queued, the other
+    must not be, because re-queueing it sends the message twice. Filtering the
+    done row out in SQL threw away the only evidence that told them apart.
+
+    See app/routers/outbox.py for what the answer is used for, and
+    agent/actions.py::_lease for the other side of the same lock.
+    """
+    q = select(PendingAction).where(
+        PendingAction.type == "send",
+        PendingAction.payload["outbound_id"].astext == str(outbound_id),
+    ).order_by(PendingAction.id)
+    if lock:
+        q = q.with_for_update()
+    return db.execute(q).scalars().all()
+
+
 def recipients(row) -> list[str]:
     """To + Cc + Bcc, in the order a reader expects to see them."""
     return [a for group in (row.to_addrs, row.cc_addrs, row.bcc_addrs)

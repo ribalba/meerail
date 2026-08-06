@@ -172,6 +172,21 @@ class Mailbox(Base):
     uidnext: Mapped[int | None] = mapped_column(BigInteger)
     last_uid: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
 
+    # When the server's LIST stopped mentioning this folder, or NULL while it is
+    # still being listed. A folder is not removed on the strength of one absence
+    # — a Bridge that is still loading answers LIST with part of the mailbox, and
+    # reading that as "the rest were deleted" takes their mail with them. See
+    # core/ingest.py::prune_mailboxes.
+    missing_since: Mapped[datetime | None] = mapped_column(DateTime)
+
+    # When the server refused mail into this folder, or NULL for every folder it
+    # has never refused — which is nearly all of them. Set by the agent, read by
+    # the app, because only one of the two has a connection and only the other
+    # one picks where a message is filed: a \\All folder that cannot be moved
+    # into (Proton Bridge) is otherwise chosen again on every archive. See
+    # agent/actions.py::_mark_write_refused.
+    writes_refused_at: Mapped[datetime | None] = mapped_column(DateTime)
+
     unread_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     total_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     subscribed: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
@@ -219,6 +234,14 @@ class Message(Base):
     # (message_id when present, else a hash synthesized from headers/body).
     message_id: Mapped[str | None] = mapped_column(String(998))
     dedup_key: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # A hash of the bytes this message was stored from, with line endings
+    # normalised so the same mail hashes the same over IMAP and out of an mbox.
+    # This is what says whether two messages claiming one Message-ID are one
+    # message — the id is a header the sender wrote, the content is the message.
+    # NULL where there was nothing to hash: rows stored from headers alone, and
+    # rows that predate the column. See core/mail/store.py::same_message.
+    content_hash: Mapped[str | None] = mapped_column(String(80))
 
     # Threading
     thread_id: Mapped[str | None] = mapped_column(String(255))
@@ -424,7 +447,114 @@ class Thread(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
 
+# --- Reminders -------------------------------------------------------------
+
+
+class Reminder(Base):
+    """A conversation the user asked to be shown again later.
+
+    Set on one message and applied to its whole conversation, for the same
+    reason archive and trash are (see actions._thread_move): mail arrives as a
+    thread, and "not now" means all of it.
+
+    The waiting is this app's, not the agent's. Nothing here reaches IMAP:
+    parking a conversation and bringing it back both queue the ordinary
+    ``PendingAction`` a move queues, so a mail server that is unreachable on
+    Monday morning delays a reminder rather than losing one. The clock is
+    watched by the worker in ``app/workers.py``; this row is the whole record of
+    what was asked for.
+
+    ``parked`` is what makes the return trip possible: for each message that was
+    moved, the folders it was moved *out of*, snapshotted before the move
+    because afterwards there is nothing left to read it off. A message that was
+    already filed away when the reminder was set records the inbox instead —
+    "remind me about this" said over an archived mail means put it in front of
+    me, and there is nowhere else it could sensibly land.
+
+    Folder ids in ``parked`` and ``park_mailbox_id`` are plain integers rather
+    than foreign keys, which is deliberate. A folder the server stops listing is
+    deleted (core/ingest.py::prune_mailboxes), and neither answer a foreign key
+    can give is the right one: CASCADE would throw a reminder away because a
+    folder got renamed, and SET NULL would quietly drop the half that says where
+    the mail goes back to while leaving the row looking healthy. So they are
+    carried as data and re-checked at the one moment the answer matters, which
+    is when the reminder fires.
+    """
+
+    __tablename__ = "reminders"
+    __table_args__ = (
+        # The worker's only query: "what is pending and due". Leading with
+        # `state` keeps it off the far larger tail of reminders already fired.
+        Index("ix_reminder_due", "state", "due_at"),
+        Index("ix_reminder_message", "message_pk"),
+        Index("ix_reminder_thread", "account_id", "thread_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    account_id: Mapped[int] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    # The message the reminder was set on. Its conversation is what actually
+    # moves, but this is what the UI points at and what a second "remind me" on
+    # the same mail finds in order to re-schedule rather than park twice.
+    message_pk: Mapped[int] = mapped_column(
+        ForeignKey("messages.id", ondelete="CASCADE"), nullable=False
+    )
+    thread_id: Mapped[str | None] = mapped_column(String(255))
+
+    # Naive UTC, like every other instant in meerail (see utcnow). The browser
+    # works out what "next Monday, 9am" is in the reader's own timezone and
+    # sends the resulting absolute instant, so a reminder means the same thing
+    # from whichever machine it is later looked at.
+    due_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+    park_mailbox_id: Mapped[int | None] = mapped_column(Integer)
+    # [{"message": <message id>, "from": [<mailbox id>, ...]}, ...]
+    parked: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+
+    # pending | done | cancelled. A reminder that cannot be applied — the folder
+    # it should go back to is gone, a move is still in flight — stays "pending"
+    # with the reason in `error` and is tried again on the next tick, because
+    # everything that stops it is a thing that can stop being true. Nothing
+    # retires a reminder except firing it or the user taking it back.
+    state: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
+    error: Mapped[str | None] = mapped_column(Text)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+    fired_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
 # --- App settings ----------------------------------------------------------
+
+
+class UiSession(Base):
+    """One browser login, so that logging out can end it.
+
+    The cookie a browser holds is signed and carries an expiry, which is enough
+    to tell a forgery from a session this server issued — and not enough to take
+    one back. Without a row to delete, "Log out" could only clear the cookie in
+    the browser doing the asking: a copy taken off the machine beforehand went on
+    working for the rest of its thirty days, and there was nothing anywhere that
+    could stop it. This table is that something.
+
+    One row per login rather than one per password, because the two questions
+    differ: changing the password invalidates every token at once (the signing
+    key is derived from it), while logging out on the laptop should not sign you
+    out on the phone.
+    """
+
+    __tablename__ = "ui_sessions"
+
+    # The id inside the cookie's signed payload — random, and the only thing that
+    # links a cookie to this row. See app/sessions.py.
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    # Roughly when this session was last used. Written at most once every few
+    # minutes (see app/deps.py): it is here so a person can see what is signed
+    # in, not as an audit trail worth a write per request.
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
 
 class Setting(Base):
@@ -473,14 +603,34 @@ class PendingAction(Base):
     type: Mapped[str] = mapped_column(String(32), nullable=False)
     # Type-specific detail. A send carries the envelope (mail_from, rcpt_to) and
     # the outbound id, and optionally "not_before": an ISO instant before which
-    # the agent must not attempt it. See core/outbox.py.
+    # the agent must not attempt it. See core/outbox.py. A move or a delete
+    # carries "op_id" and "undo_from", which are what the Recent actions panel
+    # lists and what Undo puts back — see core/undo.py.
     payload: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
-    # pending | leased | held | done. "held" is a send the user cancelled: the
-    # agent only selects "pending", so parking a row there stops it going out
-    # while keeping the envelope it was built with. "error" is written by
-    # nothing current: it is what the version with a five-attempt cap left on
-    # rows it gave up on, and those rows are still here — agent
-    # --requeue-abandoned puts them back.
+    # pending | leased | held | stale | undone | done.
+    #
+    # "leased" is an agent applying this row right now. It is written and
+    # committed before the first SMTP or IMAP command and cleared when the
+    # attempt settles, which is what lets the Outbox refuse to cancel or re-queue
+    # a send that is already going down the wire (agent/actions.py::_lease).
+    #
+    # "held" is a send the user cancelled: the agent only selects "pending", so
+    # parking a row there stops it going out while keeping the envelope it was
+    # built with.
+    #
+    # "stale" is the one thing that is dropped rather than retried: the folder's
+    # UIDVALIDITY changed, so the UID on the row no longer names the message the
+    # action was written for and no retry can ever make it again. See
+    # agent/actions.py::StaleUid.
+    #
+    # "undone" is a move the user took back before any agent applied it
+    # (app/routers/undo.py). The row is kept rather than deleted so the panel can
+    # show the operation as undone instead of it silently vanishing off the list;
+    # the agent never selects it again.
+    #
+    # "error" is written by nothing current: it is what the version with a
+    # five-attempt cap left on rows it gave up on, and those rows are still
+    # here — agent --requeue-abandoned puts them back.
     status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
     attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     # The last failure, kept while the row goes on being retried — not a verdict.

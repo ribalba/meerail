@@ -1,6 +1,13 @@
 # meerail-server dependencies. The agent has its own agent/requirements.txt;
 # both share the `core` package, so keep the overlapping pins in step.
-fastapi==0.115.6
+fastapi==0.116.1
+# Pinned directly, not left to FastAPI's range. Starlette's multipart parser
+# wrote large uploads to disk from the event loop, so one upload stalled every
+# other request on the process (CVE-2025-54121); the fix landed in 0.47.2, and
+# fastapi 0.115.x capped starlette below 0.42 and could not reach it. Both had
+# to move together, and this pin is what keeps a resolver from quietly walking
+# back into the range that carries the bug.
+starlette==0.47.3
 uvicorn[standard]==0.34.0
 sqlalchemy==2.0.51
 pydantic==2.13.4

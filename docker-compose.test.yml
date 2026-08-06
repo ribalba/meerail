@@ -81,6 +81,11 @@ services:
       # 0 = no window, so seeded fixtures dated in the past stay findable.
       DEFAULT_SEARCH_YEARS: 0
       CONTACTS_SCAN_YEARS: 0
+      # The reminder worker's poll interval. A minute in production, because
+      # that is how late a reminder may be; two seconds here so the suite can
+      # watch a parked conversation come back on its own rather than assert
+      # that the code which would have done it exists.
+      MEERAIL_REMINDER_TICK: 2
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)"]
       interval: 2s

@@ -20,6 +20,11 @@ httpx==0.28.1
 # server read-side (rendering tests)
 nh3==0.2.20
 
+# The proxy-header middleware, driven directly in tests/test_proxy_unit.py.
+# Plain uvicorn rather than the server's uvicorn[standard]: the test needs the
+# middleware, not a running server.
+uvicorn==0.34.0
+
 # agent-side preview rendering — the thumbnail tests drive ingest.thumb_pending
 # in-process, exactly as the agent does.
 PyMuPDF==1.28.0

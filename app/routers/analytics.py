@@ -101,7 +101,12 @@ def _has_location_in(entity, roles: tuple[str, ...], *, outside: bool = False):
     return (
         select(MessageLocation.id)
         .join(Mailbox, Mailbox.id == MessageLocation.mailbox_id)
-        .where(MessageLocation.message_pk == entity.id, role_test)
+        .where(MessageLocation.message_pk == entity.id, role_test,
+               # Live placements only, as every other read path counts them. A
+               # message the user deleted is not part of "how much mail do I
+               # get" — and a message with no placement at all was already out,
+               # since this is an EXISTS.
+               MessageLocation.deleted.is_(False))
         .exists()
     )
 

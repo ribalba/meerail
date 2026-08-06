@@ -5,16 +5,22 @@ agent's sync loop makes — and assert the results through the server's read API
 (Formerly test_agent_protocol.py, which drove the deleted /api/agent/* HTTP API.)
 """
 
+import sys
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
 import dbfixture
 from core import ingest
 from core.config import get_settings
+from core.mail.parse import parse_email
 from conftest import status_for
 from helpers import api, api_bytes, make_message
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agent"))
+import sync as agent_sync  # noqa: E402
 
 T0 = datetime(2026, 3, 1, 9, 0, tzinfo=timezone.utc)
 
@@ -68,6 +74,386 @@ def test_ingest_threads_dedups_flags_and_prunes(account):
     # ...but the copy in Archive2 keeps that message alive.
     assert _mb(email, "Archive2")["total"] == 1
     assert dbfixture.message_count(email) == 2
+
+
+def test_two_different_messages_sharing_a_message_id_stay_two_messages(account):
+    """A Message-ID is a header the sender writes, not a fact about the message.
+
+    Mail is stored once per Message-ID because a Proton or Gmail account hands
+    the same message over once per label — but a mailer with a broken generator,
+    a list that re-sends under the old id, or anybody who simply typed the header
+    produces two different messages wearing one id. Believing it merged them: the
+    second was never fetched, its UID was hung off the first message's row, and
+    the reader showed March's invoice where April's had arrived.
+    """
+    email, aid = account["email"], account["id"]
+    mid = f"clash-{uuid.uuid4().hex}@t"
+    march = make_message(f"<{mid}>", "Invoice MARCHTOK", "billing@vendor.example", email,
+                         "Amount due: 100", T0)
+    april = make_message(f"<{mid}>", "Invoice APRILTOK", "billing@vendor.example", email,
+                         "Amount due: 999999", T0 + timedelta(days=30))
+    dbfixture.ingest_raw_message(email, march, uid=1)
+    dbfixture.ingest_raw_message(email, april, uid=2)
+
+    assert dbfixture.message_count(email) == 2
+    # And each one is itself, body and all — not the other one seen twice.
+    for token, amount in (("MARCHTOK", "100"), ("APRILTOK", "999999")):
+        _, found = api("GET", f"/api/search?q={token}&account_id={aid}")
+        assert found["rows"], token
+        _, detail = api("GET", f"/api/messages/{found['rows'][0]['id']}")
+        assert amount in detail["body_text"]
+
+
+def test_a_collision_is_told_apart_by_its_content_not_by_its_headers(account):
+    """The four headers a message carries are all written by its sender, so a
+    sender who wants two different mails to look like one can have that. What
+    they cannot forge is the message being the same message: the bytes are
+    hashed, and two that hash differently are two.
+
+    This is the pair that agrees on everything a header can say — id, sender,
+    subject, and the second it was sent — and differs only in what it says.
+    """
+    email, aid = account["email"], account["id"]
+    mid = f"forged-{uuid.uuid4().hex}@t"
+    real = make_message(f"<{mid}>", "Your invoice FORGEDTOK", "billing@vendor.example",
+                        email, "Pay 100 to account 111", T0)
+    fake = make_message(f"<{mid}>", "Your invoice FORGEDTOK", "billing@vendor.example",
+                        email, "Pay 100 to account 999", T0)
+
+    dbfixture.ingest_raw_message(email, real, uid=1)
+    dbfixture.ingest_raw_message(email, fake, uid=2)
+
+    assert dbfixture.message_count(email) == 2
+    bodies = set()
+    _, found = api("GET", f"/api/search?q=FORGEDTOK&account_id={aid}")
+    for row in found["rows"]:
+        bodies.add(api("GET", f"/api/messages/{row['id']}")[1]["body_text"].strip())
+    assert any("account 111" in b for b in bodies)
+    assert any("account 999" in b for b in bodies)
+
+
+def test_a_collision_does_not_join_the_other_message_s_conversation(account):
+    """A thread_id is what "archive this conversation" acts on, and the id a
+    root message threads under is its Message-ID. Two unrelated messages sharing
+    one therefore became one conversation, and archiving either filed both —
+    a stranger's message moved by an action aimed at yours."""
+    email, aid = account["email"], account["id"]
+    mid = f"threadclash-{uuid.uuid4().hex}@t"
+    mine = make_message(f"<{mid}>", "Lunch on Friday THREADTOK", "friend@example.com",
+                        email, "see you there", T0)
+    theirs = make_message(f"<{mid}>", "Invoice overdue THREADTOK", "billing@vendor.example",
+                          email, "pay up", T0 + timedelta(days=90))
+    dbfixture.ingest_raw_message(email, mine, uid=1)
+    dbfixture.ingest_raw_message(email, theirs, uid=2)
+
+    _, found = api("GET", f"/api/search?q=THREADTOK&account_id={aid}")
+    threads = {r["thread_id"] for r in found["rows"]}
+    assert len(found["rows"]) == 2
+    assert len(threads) == 2, "one conversation would move both at once"
+
+    # And the one that is not the id: a thread action names a conversation, so
+    # the collision must not be reachable through the other message's.
+    _seed_folder(email, "Archive", "\\Archive")
+    row = next(r for r in found["rows"] if "Lunch" in r["subject"])
+    code, body = api("POST", f"/api/messages/threads/{row['thread_id']}/archive"
+                             f"?account_id={aid}")
+    assert code == 200 and body["moved"] == 1
+
+
+def test_a_reply_naming_a_duplicated_id_does_not_merge_the_two_conversations(account):
+    """The way the separation could be undone from outside.
+
+    Threading joins a message to whatever its References name, and every thread
+    it finds that way is *merged* — so one reply quoting an id that two messages
+    wear used to weld their conversations back together, and a thread archive
+    then filed both. An id that resolves to two conversations resolves to none:
+    the reply threads on what else it has.
+    """
+    email, aid = account["email"], account["id"]
+    mid = f"replyclash-{uuid.uuid4().hex}@t"
+    dbfixture.ingest_raw_message(email, make_message(
+        f"<{mid}>", "Lunch on Friday REPLYTOK", "friend@example.com", email, "see you", T0), uid=1)
+    dbfixture.ingest_raw_message(email, make_message(
+        f"<{mid}>", "Invoice overdue REPLYTOK", "billing@vendor.example", email, "pay up",
+        T0 + timedelta(days=90)), uid=2)
+    threads_before = _threads_for(aid, "REPLYTOK")
+    assert len(threads_before) == 2
+
+    # A reply to "the" message with that id — which is two messages.
+    dbfixture.ingest_raw_message(email, make_message(
+        f"<reply-{uuid.uuid4().hex}@t>", "Re: Lunch on Friday REPLYTOK", email,
+        "friend@example.com", "yes please", T0 + timedelta(hours=2),
+        in_reply_to=f"<{mid}>", refs=[f"<{mid}>"]), uid=3)
+
+    assert len(_threads_for(aid, "REPLYTOK")) == 2, "the two roots are still two"
+
+
+def test_rebuilding_threads_keeps_collisions_apart(account):
+    """The rethread tool replays the threading rules over stored rows, so it has
+    to replay this one too — otherwise the repair for one threading bug quietly
+    reintroduces another."""
+    email, aid = account["email"], account["id"]
+    mid = f"rethreadclash-{uuid.uuid4().hex}@t"
+    dbfixture.ingest_raw_message(email, make_message(
+        f"<{mid}>", "Dentist RETHREADTOK", "surgery@example.com", email, "2pm", T0), uid=1)
+    dbfixture.ingest_raw_message(email, make_message(
+        f"<{mid}>", "Renewal RETHREADTOK", "billing@vendor.example", email, "due",
+        T0 + timedelta(days=200)), uid=2)
+    assert len(_threads_for(aid, "RETHREADTOK")) == 2
+
+    assert dbfixture.rethread(aid)[0] >= 2
+
+    assert len(_threads_for(aid, "RETHREADTOK")) == 2
+
+
+def _threads_for(account_id: int, token: str) -> set:
+    _, found = api("GET", f"/api/search?q={token}&account_id={account_id}")
+    return {r["thread_id"] for r in found["rows"]}
+
+
+def _seed_folder(email, folder, role_hint):
+    """Give the account a folder to file into, as a real server has."""
+    dbfixture.ingest_raw_message(email, make_message(
+        f"<seed-{uuid.uuid4().hex}@t>", "Seed", "x@y.com", email, "seed", T0),
+        uid=1, folder=folder, role_hint=role_hint)
+
+
+class _Bridge:
+    """The one thing _store_chunk asks a server for: raw messages, by UID.
+
+    Enough of Bridge to drive the agent's own ingest path against the real
+    database — which is the only place the decisions being tested here are
+    actually made. Calling core.ingest directly, as the rest of this file does,
+    walks past the code that decides whether to call it at all.
+    """
+
+    def __init__(self, raws: dict[int, bytes]):
+        self.raws = raws
+        self.fetched: list[int] = []
+
+    def fetch_raw(self, uids):
+        self.fetched.extend(uids)
+        return {uid: {"raw": self.raws[uid], "flags": {}} for uid in uids if uid in self.raws}
+
+    def fetch_header_block(self, uids):
+        return {uid: {"raw": self.raws[uid].split(b"\r\n\r\n")[0] + b"\r\n\r\n", "flags": {}}
+                for uid in uids if uid in self.raws}
+
+
+def _walk(email: str, raws: dict[int, bytes], cutoff=None, folder: str = "INBOX",
+          max_bytes: int = 0) -> _Bridge:
+    """One chunk of a sync pass over these UIDs, through the agent's own code."""
+    bridge = _Bridge(raws)
+    with dbfixture.session() as db:
+        account = ingest.get_or_create_account(db, email)
+        mailbox = ingest.register_folder(db, account, folder, "", 1, None)
+        headers = {}
+        for uid, raw in raws.items():
+            parsed = parse_email(raw)
+            headers[uid] = {
+                "message_id": parsed.message_id,
+                "flags": {},
+                "date": parsed.date_sent,
+                "received": parsed.date_sent,     # as INTERNALDATE would say
+                "size": len(raw),
+                "headers": raw.split(b"\r\n\r\n")[0] + b"\r\n\r\n",
+            }
+        agent_sync._store_chunk(db, bridge, account, mailbox, headers, cutoff, email,
+                                max_bytes)
+    return bridge
+
+
+def test_widening_the_content_window_brings_the_bodies_back(account):
+    """The recovery the window is documented to have, through the code that
+    actually performs it.
+
+    Mail older than the window is stored as headers alone, and the promise is
+    that widening the window and asking for a recheck fills the bodies in rather
+    than being a one-way door. The pass never got that far: the re-walk
+    recognised each headers-only message by its Message-ID, took the shortcut
+    that exists so a Proton label costs no second download, and skipped the
+    fetch. The code that fills a headers-only row in was unreachable from a sync.
+    """
+    email, aid = account["email"], account["id"]
+    old = make_message(f"<window-{uuid.uuid4().hex}@t>", "Old but WINDOWTOK", "x@y.com",
+                       email, "the body that was left behind", T0)
+    # Naive UTC, as ingest.content_cutoff hands it to a pass, and late enough
+    # that this message falls outside the window.
+    narrow = (T0 + timedelta(days=365)).replace(tzinfo=None)
+
+    _walk(email, {1: old}, cutoff=narrow)
+    _, found = api("GET", f"/api/search?q=WINDOWTOK&account_id={aid}")
+    assert found["rows"], "headers alone still list and search"
+    detail = api("GET", f"/api/messages/{found['rows'][0]['id']}")[1]
+    assert detail["body_text"] == ""       # nothing was fetched, by design
+
+    # The window is widened and the folder re-walked: the same UID, the same
+    # Message-ID, and this time the body is meant to arrive.
+    bridge = _walk(email, {1: old}, cutoff=None)
+
+    assert bridge.fetched == [1]
+    detail = api("GET", f"/api/messages/{found['rows'][0]['id']}")[1]
+    assert "the body that was left behind" in detail["body_text"]
+    assert dbfixture.message_count(email) == 1     # filled in, not stored twice
+
+
+def test_a_message_too_big_to_hold_is_stored_as_headers(account):
+    """A fetch reads the whole message into memory before anything is parsed, so
+    one mail carrying somebody's backup is that many bytes resident in an agent
+    with a container limit — and the pass dies on the same UID every time it
+    retries. Past the cap the message lands the way mail outside the content
+    window does: every header, no body, still listed and searchable."""
+    email, aid = account["email"], account["id"]
+    raw = make_message(f"<huge-{uuid.uuid4().hex}@t>", "Subject HUGETOK", "x@y.com",
+                       email, "a body nobody can hold", T0)
+
+    bridge = _walk(email, {1: raw}, max_bytes=len(raw) - 1)
+
+    assert bridge.fetched == []                       # the body never crossed the wire
+    _, found = api("GET", f"/api/search?q=HUGETOK&account_id={aid}")
+    assert found["rows"], "it still lists and searches by subject"
+    detail = api("GET", f"/api/messages/{found['rows'][0]['id']}")[1]
+    assert detail["body_text"] == ""
+
+    # Raising the cap and re-walking brings it in, exactly as widening the
+    # content window does.
+    assert _walk(email, {1: raw}).fetched == [1]
+    detail = api("GET", f"/api/messages/{found['rows'][0]['id']}")[1]
+    assert "a body nobody can hold" in detail["body_text"]
+
+
+def test_a_second_walk_stores_a_placement_and_not_a_second_copy(account):
+    """Mail the account already holds costs a placement row and nothing else.
+
+    It is still fetched — what a message *is* is decided from the message, not
+    from a Message-ID its sender wrote — so the saving is in the database rather
+    than on the wire. That is the trade this makes: a label server hands the same
+    mail over once per label, and each copy after the first is downloaded again
+    to prove it is the same one.
+    """
+    email = account["email"]
+    raw = make_message(f"<again-{uuid.uuid4().hex}@t>", "Subject AGAINTOK", "x@y.com",
+                       email, "body", T0)
+
+    assert _walk(email, {1: raw}).fetched == [1]           # first time
+    assert _walk(email, {9: raw}, folder="Label").fetched == [9]   # and under a label
+
+    # One message, two placements — no duplicate content, and no second row.
+    assert dbfixture.message_count(email) == 1
+    assert dbfixture.location_count(email, "INBOX") == 1
+    assert dbfixture.location_count(email, "Label") == 1
+
+
+def test_a_collision_that_agrees_on_every_header_is_still_fetched(account):
+    """The last version of this hole, closed.
+
+    A pass used to be able to place a UID without downloading it, on the strength
+    of its Message-ID, sender, subject, send time and byte count agreeing with
+    something already held. Every one of those is written by whoever sent the
+    message, so a pair engineered to agree on all five was taken to be one
+    message and the second body was never fetched by anything — present on the
+    server, absent from the mirror, with another message shown in its place.
+
+    Narrowing it left the *first* such pair still merging, which is the pair that
+    matters. So the bytes decide now, which means fetching them.
+    """
+    email, aid = account["email"], account["id"]
+    mid = f"twinbytes-{uuid.uuid4().hex}@t"
+    first = make_message(f"<{mid}>", "Statement TWINTOK", "bank@example.com", email,
+                         "balance 100", T0)
+    second = make_message(f"<{mid}>", "Statement TWINTOK", "bank@example.com", email,
+                          "balance 999", T0)
+    assert len(first) == len(second), "the point is that every number agrees too"
+
+    assert _walk(email, {1: first}).fetched == [1]
+    assert _walk(email, {2: second}, folder="Second").fetched == [2]
+
+    assert dbfixture.message_count(email) == 2
+    bodies = set()
+    _, found = api("GET", f"/api/search?q=TWINTOK&account_id={aid}")
+    for row in found["rows"]:
+        bodies.add(api("GET", f"/api/messages/{row['id']}")[1]["body_text"].strip())
+    assert any("balance 100" in b for b in bodies)
+    assert any("balance 999" in b for b in bodies)
+
+
+def test_the_no_fetch_shortcut_checks_more_than_the_message_id(account):
+    """The same collision, in the path that never fetches at all.
+
+    Most of a label server's walk resolves to "we already hold this, just place
+    it", and that decision is made from the cheap header pass. Made on the
+    Message-ID alone it hangs a UID off whatever row shares the id; the size and
+    the date come free with the same pass and are what tell the two apart.
+    """
+    email = account["email"]
+    mid = f"short-{uuid.uuid4().hex}@t"
+    raw = make_message(f"<{mid}>", "Subject SHORTCUT", "x@y.com", email, "body", T0)
+    dbfixture.ingest_raw_message(email, raw, uid=1)
+    sent_at = T0.replace(tzinfo=None)
+
+    # The same message under a second label: same id, same size, same instant.
+    assert dbfixture.record_placement(email, mid, uid=201, folder="Label", role_hint="",
+                                      size=len(raw), date=sent_at) is True
+    assert dbfixture.message_count(email) == 1
+
+    # A different message wearing the same id is not this one, and saying so is
+    # what sends the agent off to fetch it properly.
+    assert dbfixture.record_placement(email, mid, uid=202, folder="Label2",
+                                      size=len(raw) + 4096, date=sent_at) is False
+    assert dbfixture.record_placement(email, mid, uid=203, folder="Label3",
+                                      size=len(raw), date=sent_at + timedelta(days=1)) is False
+
+
+def test_the_shortcut_will_not_merge_two_messages_that_only_agree_on_numbers(account):
+    """Same Message-ID, same second, same byte count — different mail.
+
+    The cheap header pass used to fetch the Message-ID and the Date and nothing
+    else, so those two numbers plus the size were the whole of the argument, and
+    a pair agreeing on them was merged without either being read. The pass now
+    asks for From and Subject in the same FETCH — free, next to a round trip —
+    and the shortcut decides on what the full ingest would decide on.
+    """
+    email, aid = account["email"], account["id"]
+    mid = f"twins-{uuid.uuid4().hex}@t"
+    first = make_message(f"<{mid}>", "Subject AAA", "one@vendor.example", email,
+                         "first body", T0)
+    # Same length, same instant, same id, and nothing else the same.
+    second = make_message(f"<{mid}>", "Subject BBB", "two@vendor.example", email,
+                          "other body", T0)
+    assert len(first) == len(second), "the point of the test is that the numbers agree"
+
+    bridge = _walk(email, {1: first})
+    bridge2 = _walk(email, {2: second}, folder="Other")
+
+    assert bridge.fetched == [1] and bridge2.fetched == [2]   # neither was skipped
+    assert dbfixture.message_count(email) == 2
+    for token, body in (("AAA", "first body"), ("BBB", "other body")):
+        _, found = api("GET", f"/api/search?q=Subject+{token}&account_id={aid}")
+        assert len(found["rows"]) == 1, token
+        assert body in api("GET", f"/api/messages/{found['rows'][0]['id']}")[1]["body_text"]
+
+
+def test_content_the_window_pruned_comes_back_the_same_way(account):
+    """A body stripped as the window slid past it is in the same position as one
+    that was never fetched, and comes back by the same route — with its
+    attachment rows replaced rather than doubled, which is the one difference
+    between the two cases."""
+    email, aid = account["email"], account["id"]
+    raw = make_message(f"<pruned-{uuid.uuid4().hex}@t>", "Subject PRUNEDTOK", "x@y.com",
+                       email, "body worth keeping", T0)
+    _walk(email, {1: raw})
+    # The window is measured from when the mail arrived, which _walk reports as
+    # the message's own date — see dbfixture.ingest_raw_message.
+    assert dbfixture.prune_content(cutoff=(T0 + timedelta(days=1)).replace(tzinfo=None)) >= 1
+
+    _, found = api("GET", f"/api/search?q=PRUNEDTOK&account_id={aid}")
+    message_id = found["rows"][0]["id"]
+    assert api("GET", f"/api/messages/{message_id}")[1]["body_text"] == ""
+
+    bridge = _walk(email, {1: raw})          # the window has been widened again
+
+    assert bridge.fetched == [1]
+    assert "body worth keeping" in api("GET", f"/api/messages/{message_id}")[1]["body_text"]
 
 
 def test_a_placement_lost_below_the_cursor_is_still_visible_to_the_repair(account):
@@ -136,6 +522,40 @@ def test_a_move_still_landing_is_not_read_as_a_gap_to_repair(account):
     dbfixture.apply_actions(email, minutes_ago=60)
     assert dbfixture.move_in_flight(email, mid) is False
     assert dbfixture.unplaced_uids(email, "INBOX", [1]) == [1]   # now safe to repair
+
+
+def test_a_move_of_mail_with_no_message_id_is_not_undone_by_the_repair(account):
+    """The same question, about mail that cannot be asked by name.
+
+    A Message-ID is optional, and mail without one really does arrive. "No id"
+    was read as "never seen before, so never moved", so the repair put the
+    message straight back into the folder it had just been archived out of, and
+    it would not stay filed. There is more to go on than the id: the queue is
+    short, and everything in it can be recognised by the headers this pass has
+    already fetched.
+    """
+    email = account["email"]
+    raw = make_message(None, "Subject NOIDTOK", "x@y.com", email, "body", T0)
+    assert b"Message-ID" not in raw
+    dbfixture.ingest_raw_message(email, raw, uid=1)
+    dbfixture.create_folder(email, "Archive", role_hint="\\Archive")
+    headers = raw.split(b"\r\n\r\n")[0] + b"\r\n\r\n"
+
+    _, boxes = api("GET", "/api/mailboxes")
+    mine = next(a for a in boxes["accounts"] if a["email"] == email)["mailboxes"]
+    inbox = next(m for m in mine if m["role"] == "inbox")
+    _, listing = api("GET", f"/api/messages?mailbox_id={inbox['id']}&limit=50")
+    message_id = next(r["id"] for r in listing["rows"] if r["subject"] == "Subject NOIDTOK")
+    assert api("POST", f"/api/messages/{message_id}/archive"
+                       f"?source_mailbox_id={inbox['id']}")[0] == 200
+
+    assert dbfixture.unplaced_uids(email, "INBOX", [1]) == [1]      # the server still lists it
+    assert dbfixture.move_in_flight(email, None, headers=headers) is True
+
+    # And once the move has landed and settled, it stops holding the repair off —
+    # the same end state as for mail that has an id.
+    dbfixture.apply_actions(email, minutes_ago=60)
+    assert dbfixture.move_in_flight(email, None, headers=headers) is False
 
 
 def test_repeated_alerts_with_one_subject_do_not_become_one_thread(account):
@@ -240,15 +660,97 @@ def test_uidvalidity_change_repoints_the_uid_without_deleting_mail(account):
     assert dbfixture.message_count(email) == 2
 
 
+def test_mail_left_behind_by_a_reused_uid_is_collected_at_the_end_of_a_pass(account):
+    """The other side of the same trade.
+
+    Keeping the old message through the re-walk is what makes a UIDVALIDITY
+    change cost nothing — the mail that is still on the server gets its new
+    placement instead of being downloaded again. But the walk finishes, and
+    whatever it did not re-place is a message no folder points at: not listed,
+    not counted, not reachable, and still holding every byte it arrived with. On
+    a mailbox that has been through a few Bridge re-logins that is a leak of
+    whole messages.
+
+    So it is collected — at the end of a pass that completed, over messages that
+    were already unplaced well before that pass began. Both halves matter: a
+    message is legitimately between folders mid-pass, and answering that question
+    too early turns a gap of seconds into mail nobody can get back.
+    """
+    email = account["email"]
+    kept = make_message(f"<kept-{uuid.uuid4().hex}@t>", "Still placed", "x@y.com", email,
+                        "body", T0)
+    dropped = make_message(f"<dropped-{uuid.uuid4().hex}@t>", "Orphaned", "x@y.com", email,
+                           "body", T0)
+    dbfixture.ingest_raw_message(email, dropped, uid=1, uidvalidity=10)
+    dbfixture.register_folder(email, "INBOX", uidvalidity=11)
+    dbfixture.ingest_raw_message(email, kept, uid=1, uidvalidity=11)   # uid 1 now means this one
+    assert dbfixture.message_count(email) == 2
+
+    # Not on the way past: too soon to know that no folder is going to hold it.
+    assert dbfixture.collect_orphans(email) == 0
+    assert dbfixture.message_count(email) == 2
+
+    assert dbfixture.collect_orphans(email, after_hours=12) == 1
+    assert dbfixture.message_count(email) == 1
+    # And the one a folder still holds is untouched, which is the whole point of
+    # asking about placements rather than about age.
+    _, found = api("GET", f"/api/search?q=Still+placed&account_id={account['id']}")
+    assert len(found["rows"]) == 1
+
+
+def test_a_message_a_queued_action_still_names_is_not_collected(account):
+    """A move waiting for the agent is a message on its way somewhere, and the
+    row it names has to be there when it arrives — the action points at it by
+    primary key, and deleting the message would take the action with it."""
+    email = account["email"]
+    raw = make_message(f"<queued-{uuid.uuid4().hex}@t>", "On its way", "x@y.com", email,
+                       "body", T0)
+    dbfixture.ingest_raw_message(email, raw, uid=1)
+    dbfixture.queue_move_for(email, "On its way")
+    dbfixture.drop_placements(email, "INBOX")
+
+    assert dbfixture.collect_orphans(email, after_hours=12) == 0
+    assert dbfixture.message_count(email) == 1
+
+
 def test_removed_folders_and_their_orphaned_messages_are_pruned(account):
     email = account["email"]
     raw = make_message(f"<gone-{uuid.uuid4().hex}@t>", "Gone folder", "x@y.com", email,
                        "gone body", T0)
     dbfixture.ingest_raw_message(email, raw, uid=1, folder="Old Folder")
 
-    assert dbfixture.prune_folders(email, {"INBOX"}) == 1
+    # Not on the first answer that leaves it out — see the test below.
+    assert dbfixture.prune_folders(email, {"INBOX"}) == 0
+    assert dbfixture.prune_folders(email, {"INBOX"}, after_hours=2) == 1
     assert dbfixture.location_count(email, "Old Folder") == 0
     assert dbfixture.message_count(email) == 0
+
+
+def test_a_folder_missing_from_one_list_keeps_its_mail(account):
+    """A partial LIST is a successful response containing a fraction of the
+    mailbox, and Bridge gives one while it is still loading — three folders out
+    of twelve. Nothing in the answer says which kind it is, so the folders it
+    left out keep their mail and are marked instead; only staying gone removes
+    them. A folder that comes back clears the mark and nothing is lost at all.
+    """
+    email = account["email"]
+    raw = make_message(f"<partial-{uuid.uuid4().hex}@t>", "Still here", "x@y.com", email,
+                       "body", T0)
+    dbfixture.ingest_raw_message(email, raw, uid=1, folder="Projects")
+
+    assert dbfixture.prune_folders(email, {"INBOX"}) == 0
+    assert dbfixture.location_count(email, "Projects") == 1
+    assert dbfixture.message_count(email) == 1
+    # And the agent can say so: this is the state an operator needs to see while
+    # it lasts, because it is also what a real deletion looks like for an hour.
+    assert dbfixture.folders_held_back(email) == ["Projects"]
+
+    # The next LIST is complete again: the mark goes, and the folder is no
+    # nearer being pruned than it was before Bridge hiccupped.
+    assert dbfixture.prune_folders(email, {"INBOX", "Projects"}) == 0
+    assert dbfixture.folders_held_back(email) == []
+    assert dbfixture.prune_folders(email, {"INBOX", "Projects"}, after_hours=2) == 0
+    assert dbfixture.location_count(email, "Projects") == 1
 
 
 def test_a_server_that_lists_nothing_prunes_nothing(account):

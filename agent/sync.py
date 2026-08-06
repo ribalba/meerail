@@ -199,8 +199,26 @@ class PassProgress:
         }
 
 
+def _too_large(size, max_bytes: int) -> bool:
+    """Is this message too big to hold in memory to store it?
+
+    A fetch reads the whole message into this process before anything is parsed,
+    so one 2 GB message — a mailing-list archive attached to itself, a backup
+    somebody mailed home — is 2 GB of resident memory in an agent with a
+    container limit measured in single gigabytes, and the pass dies at the same
+    UID on every retry.
+
+    Past the cap the message is stored the way mail outside the content window
+    is: every header, no body. That keeps it listed, threaded and searchable by
+    subject and correspondent, with the reader saying there is nothing to open —
+    which is a fair description of a message this machine cannot hold. Raising
+    the cap and re-checking brings it in, exactly as widening the window does.
+    """
+    return bool(max_bytes) and size is not None and size > max_bytes
+
+
 def _store_chunk(db, bridge: Bridge, account, mailbox, headers: dict[int, dict],
-                 cutoff, email: str | None) -> tuple[int, int]:
+                 cutoff, email: str | None, max_bytes: int = 0) -> tuple[int, int]:
     """Give every UID in ``headers`` a placement in this folder.
 
     Returns (placed, stored): how many UIDs ended up in the folder, and how many
@@ -214,45 +232,73 @@ def _store_chunk(db, bridge: Bridge, account, mailbox, headers: dict[int, dict],
     same route the first fetch did, rather than by a second implementation of it
     that can drift.
     """
-    # Content we already hold (same Message-ID under another Proton label) only
-    # needs a placement row; everything else needs fetching — in full, or
-    # headers alone if it is older than the content window. A message with no
+    # Every UID is fetched — in full, or headers alone if it is older than the
+    # content window or larger than this machine will hold. A message with no
     # date at all is fetched in full: unknown age is not evidence that mail is
     # old, and guessing wrong here silently drops a body.
+    #
+    # There used to be a shortcut in front of this: a UID whose Message-ID the
+    # account already held was given a placement against that message and never
+    # downloaded, which on a label server is most of a walk — the same mail once
+    # per label. It was fast and it decided identity from headers, and headers
+    # are written by whoever sent the message. Two different mails agreeing on
+    # Message-ID, sender, subject, send time and byte count were taken to be one,
+    # and the second one's body was then never fetched by anything: not lost on
+    # the server, but absent from the only copy the user can search, with a
+    # different message displayed in its place.
+    #
+    # Narrowing it did not fix it, it only made the collision have to be the
+    # first of its kind. So the shortcut is gone and the bytes decide, in
+    # ingest_raw, where the whole message is in hand: mail the account already
+    # holds still costs no *storage* and gains only a placement row, and what it
+    # costs instead is the fetch. On a Proton backfill that is roughly twice the
+    # bytes it was, which is the price of the local mirror being a mirror.
     placed = stored = 0
     need_raw, need_headers = [], []
     for uid, h in headers.items():
-        if ingest.record_known(db, account, mailbox, uid, h["flags"], h["message_id"]):
-            placed += 1
-            continue
-        if cutoff is not None and h["date"] is not None and h["date"] < cutoff:
-            need_headers.append(uid)
-        else:
+        # The window is measured from when the server took delivery, not from
+        # the Date header — a sender who backdates a message would otherwise
+        # decide that its body is never stored here at all. The header is still
+        # what the message is displayed and sorted by; this is only about how
+        # long the body is kept (see core.ingest.prune_expired_content).
+        age = h.get("received") or h["date"]
+        in_window = cutoff is None or age is None or age >= cutoff
+        if in_window and not _too_large(h.get("size"), max_bytes):
             need_raw.append(uid)
+        else:
+            need_headers.append(uid)
 
     if need_raw:
         raws = _fetch_all(bridge.fetch_raw, need_raw, "raw fetch", email)
         for uid, r in raws.items():
             if r["raw"]:
-                ingest.store_message(db, account, mailbox, uid, r["flags"], r["raw"])
+                # `stored` is content that was new, and the two differ on every
+                # label server: the same message arrives once per label and each
+                # copy after the first gains a placement and nothing else. What
+                # the caller does with the number — the progress bar, the pass's
+                # "N new" line — is about mail, not about fetches.
+                created = ingest.store_message(db, account, mailbox, uid,
+                                               r["flags"], r["raw"],
+                                               received=headers[uid].get("received"))
                 placed += 1
-                stored += 1
+                stored += bool(created)
 
     if need_headers:
         blocks = _fetch_all(bridge.fetch_header_block, need_headers,
                             "header fetch", email)
         for uid, r in blocks.items():
             if r["raw"]:
-                ingest.store_headers(db, account, mailbox, uid, r["flags"], r["raw"],
-                                     size_bytes=headers[uid]["size"])
+                created = ingest.store_headers(db, account, mailbox, uid, r["flags"],
+                                               r["raw"], size_bytes=headers[uid]["size"],
+                                               received=headers[uid].get("received"))
                 placed += 1
-                stored += 1
+                stored += bool(created)
     return placed, stored
 
 
 def _sync_new(db, bridge: Bridge, account, mailbox, batch: int,
               progress: PassProgress | None = None, cutoff=None,
-              beat: "Heartbeat | None" = None) -> int:
+              beat: "Heartbeat | None" = None, max_bytes: int = 0) -> int:
     """Ingest UIDs above the folder's cursor. Returns how many were stored.
 
     The cursor only advances once a chunk is fully ingested, so an interrupted or
@@ -273,7 +319,7 @@ def _sync_new(db, bridge: Bridge, account, mailbox, batch: int,
         headers = _fetch_all(bridge.fetch_headers, chunk, "header fetch", email,
                              needs_body=False)
         _placed, chunk_stored = _store_chunk(db, bridge, account, mailbox, headers,
-                                             cutoff, email)
+                                             cutoff, email, max_bytes)
         ingest.advance_cursor(db, mailbox, max(chunk))
         # Rides the cursor's own transaction on purpose. Progress that committed
         # separately could outrun a chunk that then rolled back, leaving the bar
@@ -361,7 +407,7 @@ _RESTORE_PER_PASS = 500
 
 def _restore_unplaced(db, bridge: Bridge, account, mailbox, uids: list[int], batch: int,
                       cutoff=None, beat: "Heartbeat | None" = None,
-                      email: str | None = None) -> int:
+                      email: str | None = None, max_bytes: int = 0) -> int:
     """Ingest UIDs the server lists in this folder that the database has lost.
 
     The gap this closes: nothing else in a pass can put a placement back. New
@@ -394,10 +440,13 @@ def _restore_unplaced(db, bridge: Bridge, account, mailbox, uids: list[int], bat
         headers = _fetch_all(bridge.fetch_headers, chunk, "header fetch", email,
                              needs_body=False)
         headers = {uid: h for uid, h in headers.items()
-                   if not ingest.has_move_in_flight(db, account, h["message_id"])}
+                   if not ingest.has_move_in_flight(db, account, h["message_id"],
+                                                    headers=h.get("headers"),
+                                                    date=h.get("date"))}
         if not headers:
             continue
-        placed, _stored = _store_chunk(db, bridge, account, mailbox, headers, cutoff, email)
+        placed, _stored = _store_chunk(db, bridge, account, mailbox, headers, cutoff,
+                                       email, max_bytes)
         restored += placed
         if beat is not None:
             beat.mark()
@@ -416,7 +465,7 @@ def _restore_unplaced(db, bridge: Bridge, account, mailbox, uids: list[int], bat
 
 def _reconcile(db, bridge: Bridge, account, mailbox, batch: int,
                beat: "Heartbeat | None" = None, email: str | None = None,
-               cutoff=None) -> None:
+               cutoff=None, max_bytes: int = 0) -> None:
     """Bring this folder's placements back in line with the server's.
 
     Flags are pushed onto the UIDs we hold, UIDs the server lists that we have
@@ -437,7 +486,8 @@ def _reconcile(db, bridge: Bridge, account, mailbox, batch: int,
         if beat is not None:
             beat.beat()
     try:
-        _restore_unplaced(db, bridge, account, mailbox, uids, batch, cutoff, beat, email)
+        _restore_unplaced(db, bridge, account, mailbox, uids, batch, cutoff, beat, email,
+                          max_bytes)
     except Exception as e:  # noqa: BLE001
         # Not a reason to fail the pass, for the same reason _repair_short_content
         # is not: the sweep above is the folder's actual work and it has already
@@ -705,6 +755,36 @@ def _report_error(email: str, message: str) -> None:
         db.close()
 
 
+# Folders the server has stopped listing, per account, as of the last pass that
+# said something about them. Said when it changes and not on a timer: a partial
+# LIST can persist for the whole grace period, and repeating the same warning
+# every thirty seconds for an hour buries it in itself.
+_held_folders: dict[str, frozenset] = {}
+
+
+def _report_held_folders(email: str, held: list[str]) -> None:
+    """Say which folders have gone missing from the server's LIST and are being
+    kept anyway — and say when they come back.
+
+    This is the line that tells an operator which of the two things they are
+    looking at. A Bridge that is still loading and a folder somebody really
+    deleted produce the same LIST; only what happens over the next hour differs,
+    and until then the mail is here either way (core.ingest.prune_mailboxes).
+    """
+    now = frozenset(held)
+    if now == _held_folders.get(email, frozenset()):
+        return
+    _held_folders[email] = now
+    if not now:
+        log.info("the server is listing every folder again — nothing was removed", email)
+        return
+    names = sorted(now)
+    log.warn(f"the server has stopped listing {len(names)} folder(s): "
+             f"{', '.join(names[:5])}{' …' if len(names) > 5 else ''}. Their mail is "
+             f"untouched and they are not being removed yet — if the folders are still "
+             f"there, this was an incomplete LIST and a later pass will clear it.", email)
+
+
 def sync_once(account: AccountConfig, cfg: Settings, reconcile: bool = True) -> None:
     """One full pass over every folder for an account.
 
@@ -748,6 +828,15 @@ def sync_once(account: AccountConfig, cfg: Settings, reconcile: bool = True) -> 
         # Anything that failed has already logged why; the counts here only make
         # sure the summary never reads as "applied" for a queue that did not
         # fully apply.
+        #
+        # Before the folder walk on purpose — a send that has been waiting since
+        # Friday should not queue behind an hour of backfill — and safe there
+        # because nothing in the drain trusts the folder metadata this pass has
+        # not refreshed yet. Every action that names a UID checks the epoch it
+        # was written against against the SELECT it has just made, one command
+        # before it touches anything (actions._select_verified). Ordering these
+        # the other way round would not have made that unnecessary: the folder
+        # can be rebuilt between the LIST and the write-back just as easily.
         applied, failed, sent = drain_actions(db, bridge, account_row)
         if failed:
             log.warn(f"{applied} queued action(s) applied, {failed} failed", account.email)
@@ -808,16 +897,31 @@ def sync_once(account: AccountConfig, cfg: Settings, reconcile: bool = True) -> 
             ingest.set_progress(db, account_row, progress.snapshot())
             beat.mark()
             db.commit()
-            _sync_new(db, bridge, account_row, mailbox, batch, progress, cutoff, beat)
+            _sync_new(db, bridge, account_row, mailbox, batch, progress, cutoff, beat,
+                      cfg.max_message_bytes)
             # A recheck reconciles unconditionally: flags and vanished messages
             # are as much a part of "is everything still right" as the bodies.
             if reconcile or recheck_at:
                 _reconcile(db, bridge, account_row, mailbox, batch, beat, account.email,
-                           cutoff)
+                           cutoff, cfg.max_message_bytes)
 
-        # LIST completed and every returned folder synced successfully, so it
-        # is now safe to treat absent rows as folders removed/renamed upstream.
+        # LIST completed and every returned folder synced successfully, so a row
+        # the answer did not mention is a candidate for removal — a candidate,
+        # not a verdict. A Bridge that is still loading answers LIST with part of
+        # the mailbox, so a folder has to stay missing for an hour before its
+        # mail goes; ingest.prune_mailboxes is where that is decided.
         ingest.prune_mailboxes(db, account_row, {f["name"] for f in folders})
+        _report_held_folders(account.email, ingest.deferred_folders(db, account_row))
+
+        # Only here, and only on a pass that got this far: every folder the
+        # server listed has been walked, so a message no folder points at is one
+        # nothing is going to point at. Reached mid-pass — or on a pass that died
+        # halfway — the same question has a different answer, because the
+        # placement that holds it may be in a folder this pass has not read yet.
+        collected = ingest.delete_orphan_messages(db, account_row)
+        if collected:
+            log.info(f"removed {collected} message(s) that no folder holds any more",
+                     account.email)
         db.commit()
 
         # Attachment text and previews are deliberately not done here. They are

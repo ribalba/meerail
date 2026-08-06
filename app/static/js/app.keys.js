@@ -131,6 +131,11 @@ App.keys = (function () {
         // able to ask at any moment, and the answer is the empty folder.
         { chord: ["g", "o"], show: "g o", label: "Go to Outbox",
           run: () => App.shell.goto("outbox") },
+        // Same reasoning as the Outbox: the row is only in the sidebar while
+        // something is waiting, and "what did I put off?" is a question worth
+        // being able to ask when the answer is nothing.
+        { chord: ["g", "r"], show: "g r", label: "Go to Reminders",
+          run: () => App.shell.goto("reminders") },
       ],
     },
     {
@@ -146,6 +151,8 @@ App.keys = (function () {
           run: () => App.reader.action("archive") },
         { keys: ["v"], show: "v", label: "Move to folder…",
           run: () => App.reader.action("move") },
+        { keys: ["b"], show: "b", label: "Remind me later…",
+          run: () => App.reader.action("remind") },
         // Backspace too: the Mac "delete" key reports Backspace, not Delete.
         // With rows ticked this deletes the selection rather than the open
         // thread — that is the whole point of having ticked them.
@@ -161,6 +168,12 @@ App.keys = (function () {
       group: "General",
       items: [
         { keys: ["c"], show: "c", label: "Compose", run: () => App.compose.openNew() },
+        // `z` rather than `u`, which is Mark unread, and rather than ⌘Z, which
+        // belongs to whatever is being typed. It is also what every other mail
+        // client binds undo to. Pressing it repeatedly walks back through the
+        // Recent actions box, one operation per press.
+        { keys: ["z"], show: "z", label: "Undo last action",
+          run: () => App.undo.undoLast() },
         // Handled ahead of the table in handle(), like the other modified keys:
         // it has to work while the composer has the keyboard, since swapping
         // the draft you are typing in for another one is the point of it.

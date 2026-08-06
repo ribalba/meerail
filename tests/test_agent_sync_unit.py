@@ -52,10 +52,10 @@ class IngestSpy:
     def __init__(self):
         self.advanced = False
 
-    def record_known(self, *_args):
+    def record_known(self, *_args, **_kw):
         return False
 
-    def store_message(self, *_args):
+    def store_message(self, *_args, **_kw):
         return True
 
     def advance_cursor(self, *_args):
@@ -208,8 +208,10 @@ class RecheckIngest:
     def update_flags(self, *_a): pass
     def prune_vanished(self, *_a): pass
     def unplaced_uids(self, *_a): return []
-    def has_move_in_flight(self, *_a): return False
+    def has_move_in_flight(self, *_a, **_kw): return False
     def prune_mailboxes(self, _db, _account, names): self.pruned.append(names)
+    def deferred_folders(self, _db, _account): return []
+    def delete_orphan_messages(self, _db, _account): return 0
     def extract_pending(self, _db): return 0
     def thumb_pending(self, _db): return 0
     def record_sync(self, *_a, **_kw): pass
@@ -221,6 +223,7 @@ class Cfg:
     batch_size = 100
     poll_interval = 30
     content_window_months = 0
+    max_message_bytes = 0        # no cap, as an install that has not set one
 
 
 class AccountCfg:
@@ -380,13 +383,21 @@ def test_progress_counts_uids_walked_not_messages_stored(monkeypatch):
     spy.set_progress = lambda _db, _acc, p: written.append(p)
 
     class Deduped:
-        """Two UIDs, both already held under another label — nothing to store."""
-        def new_uids(self, _last): return [1, 2]
-        def fetch_headers(self, _uids):
-            return {1: {"message_id": "one", "flags": {}},
-                    2: {"message_id": "two", "flags": {}}}
+        """Two UIDs, both already held under another label — nothing to store.
 
-    spy.record_known = lambda *_a: True     # every UID is content we have
+        They are still fetched: a pass decides what a message *is* from the
+        message, and a Message-ID is a header the sender wrote. What "already
+        held" saves is the storage, not the download.
+        """
+        def new_uids(self, _last): return [1, 2]
+        def fetch_headers(self, uids):
+            return {u: {"message_id": str(u), "flags": {}, "date": None, "size": 0}
+                    for u in uids}
+        def fetch_raw(self, uids):
+            return {u: {"raw": b"a message this account already holds", "flags": {}}
+                    for u in uids}
+
+    spy.store_message = lambda *_a, **_kw: False          # content the account has
 
     progress = agent_sync.PassProgress(1)
     progress.enter_folder("Archive", 0)
@@ -487,12 +498,15 @@ def test_ingesting_a_chunk_also_stamps_liveness(monkeypatch):
     slow link. Unlike the flag sweep this loop already commits once per chunk,
     so the stamp rides that write rather than paying for one of its own."""
     spy = _liveness_spy(monkeypatch)
-    spy.record_known = lambda *_a: True    # every UID is content we already hold
+    spy.store_message = lambda *_a, **_kw: False         # every UID is content we already hold
 
     class Deduped:
         def new_uids(self, _last): return [1, 2]
         def fetch_headers(self, uids):
             return {u: {"message_id": str(u), "flags": {}, "date": None, "size": 0}
+                    for u in uids}
+        def fetch_raw(self, uids):
+            return {u: {"raw": b"a message this account already holds", "flags": {}}
                     for u in uids}
 
     db, account = CountingDB(), object()
@@ -733,8 +747,10 @@ def _gap_spy(monkeypatch, missing=(2, 3), in_flight=()):
     spy.update_flags = lambda *_a: None
     spy.prune_vanished = lambda _db, _mb, uids: spy.pruned.append(list(uids))
     spy.unplaced_uids = lambda _db, _mb, _uids: list(missing)
-    spy.has_move_in_flight = lambda _db, _acc, message_id: message_id in in_flight
-    spy.record_known = lambda _db, _acc, _mb, uid, _f, _mid: spy.placed.append(uid) or True
+    spy.has_move_in_flight = (lambda _db, _acc, message_id, **_kw:
+                              message_id in in_flight)
+    spy.store_message = (lambda _db, _acc, _mb, uid, _f, _raw, **_kw:
+                         spy.placed.append(uid) or True)
     monkeypatch.setattr(agent_sync, "ingest", spy)
     return spy
 

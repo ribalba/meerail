@@ -158,11 +158,10 @@ def init_db() -> None:
             "config_fields JSONB NOT NULL DEFAULT '[]'::jsonb",
             # Raw MIME and attachment payloads moved from disk into the DB, so
             # the agent (which writes them) and the app (which serves them)
-            # share no filesystem.
+            # share no filesystem. The columns that used to hold the *paths* are
+            # not dropped here — see _retire_disk_columns, below.
             "ALTER TABLE messages ADD COLUMN IF NOT EXISTS raw_mime BYTEA",
-            "ALTER TABLE messages DROP COLUMN IF EXISTS raw_path",
             "ALTER TABLE attachments ADD COLUMN IF NOT EXISTS content BYTEA",
-            "ALTER TABLE attachments DROP COLUMN IF EXISTS disk_path",
             # Precomputed attachment previews. Existing rows default to
             # 'skipped' rather than 'pending' so upgrading does not silently
             # queue a full-mailbox render; see backfill_thumbs.
@@ -171,6 +170,11 @@ def init_db() -> None:
             "thumb_status VARCHAR(16) NOT NULL DEFAULT 'skipped'",
             "CREATE INDEX IF NOT EXISTS ix_attachments_thumb_pending "
             "ON attachments (id) WHERE thumb_status = 'pending'",
+            # What a message's bytes hash to, which is what tells two messages
+            # sharing a Message-ID apart. NULL on every existing row, and read as
+            # "cannot say" — those fall back to comparing headers until the next
+            # time the message is stored in full.
+            "ALTER TABLE messages ADD COLUMN IF NOT EXISTS content_hash VARCHAR(80)",
             # Content window (agent: content_window_months). Existing rows are
             # 'full' — anything already stored was stored in full, and the
             # agent's prune pass is what walks them back if a window is set.
@@ -195,6 +199,15 @@ def init_db() -> None:
             # User-pinned sidebar folders.
             "ALTER TABLE mailboxes ADD COLUMN IF NOT EXISTS "
             "favorite BOOLEAN NOT NULL DEFAULT FALSE",
+            # When the server stopped listing a folder. NULL on every existing
+            # row, which is what "the server is still listing it" looks like —
+            # the first pass after an upgrade fills it in for anything that has
+            # genuinely gone. See core/ingest.py::prune_mailboxes.
+            "ALTER TABLE mailboxes ADD COLUMN IF NOT EXISTS missing_since TIMESTAMP",
+            # When the server refused mail into a folder. NULL everywhere until
+            # an agent actually hits one, which is the state every existing row
+            # is correctly in. See agent/actions.py::_mark_write_refused.
+            "ALTER TABLE mailboxes ADD COLUMN IF NOT EXISTS writes_refused_at TIMESTAMP",
             # Backs the ingest-rate counters. Brief write lock on first run;
             # seconds on a personal mailbox, which is the target here.
             "CREATE INDEX IF NOT EXISTS ix_messages_account_created "
@@ -232,3 +245,53 @@ def init_db() -> None:
             "WHERE footer = '' AND NOT footer_customized",
             {"footer": DEFAULT_FOOTER},
         )
+
+        _retire_disk_columns()
+
+
+# The columns of the on-disk era: message bodies were .eml files and attachment
+# payloads were files beside them, and these held the paths.
+_DISK_COLUMNS = (
+    ("messages", "raw_path", "raw_mime"),
+    ("attachments", "disk_path", "content"),
+)
+
+
+def _retire_disk_columns() -> None:
+    """Drop the old path columns — but only once nothing is left in them.
+
+    They used to be dropped outright, in the same breath as adding the blob
+    columns that replaced them, and nothing ever copied the files across. On an
+    install from that era the upgrade therefore threw away the only pointer to
+    every stored attachment and every raw message: the files stayed on disk,
+    unreferenced and unreachable, and the reader started answering "not stored"
+    for mail it had been serving the day before. A schema change is not allowed
+    to be the thing that loses somebody's mail.
+
+    So the drop is conditional. An empty column is a column nothing needs and it
+    goes; a column with rows in it is left exactly where it is, and startup says
+    what to run. tools/migrate_blobs.py does the copying, on the machine that can
+    actually see those paths — which on a split deployment is not this one.
+    """
+    for table, column, replacement in _DISK_COLUMNS:
+        try:
+            with engine.connect() as conn:
+                exists = conn.execute(_COLUMN_Q, {"table": table, "column": column}).scalar()
+                if not exists:
+                    continue
+                left = conn.execute(text(
+                    f"SELECT count(*) FROM {table} WHERE {column} IS NOT NULL"
+                )).scalar() or 0
+        except Exception as exc:  # noqa: BLE001 — never block startup over this
+            print(f"[init_db] could not check {table}.{column}: {exc!r}")
+            continue
+
+        if not left:
+            _run_migration(f"ALTER TABLE {table} DROP COLUMN IF EXISTS {column}")
+            continue
+
+        print(f"[init_db] {left} row(s) in {table} still point at files on disk "
+              f"({table}.{column}). Their content has NOT been copied into "
+              f"{table}.{replacement}, and this column will not be dropped while it "
+              f"holds anything. Run tools/migrate_blobs.py on the machine holding "
+              f"those files to bring them in.")

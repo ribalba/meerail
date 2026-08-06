@@ -15,14 +15,15 @@ work does not run inside a transaction; see _release_before_slow_work.
 from __future__ import annotations
 
 import calendar
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from . import events
 from .mail import thumbs, tika
-from .mail.parse import strip_nuls
+from .mail.parse import canonical_message_id, header_identity, strip_nuls
+from .mail import store
 from .mail.store import (
     find_message_by_message_id,
     ingest_location_only,
@@ -34,7 +35,9 @@ from .mail.store import (
     replace_content,
     strip_content,
 )
-from .models import Account, Attachment, Mailbox, Message, MessageLocation, Setting, utcnow
+from .models import (
+    Account, Attachment, Mailbox, Message, MessageLocation, PendingAction, Setting, utcnow,
+)
 
 # Map an IMAP SPECIAL-USE flag / folder name to a meerail mailbox role.
 _ROLE_BY_FLAG = {
@@ -191,24 +194,45 @@ def register_folder(db, account: Account, imap_name: str, role_hint: str = "",
 
 
 def record_known(db, account: Account, mailbox: Mailbox, uid: int, flags: dict,
-                 message_id: str | None) -> bool:
-    """Record a placement for content we already have. True if it matched, in
-    which case the raw bytes need not be fetched (Proton shows one message under
-    several labels)."""
+                 message_id: str | None, size: int | None = None, date=None,
+                 headers: bytes | None = None, content_wanted: bool = False) -> bool:
+    """Record a placement for content this account already holds, without
+    fetching the message. True if it matched.
+
+    No longer used by a sync pass, and kept for what it documents as much as for
+    what it does. It was the shortcut that made a label server's backfill cheap —
+    the same mail arrives once per label, and matching it by Message-ID meant the
+    body crossed the wire once. The trouble is that every fact it can match on is
+    a header, and headers are written by whoever sent the message: two different
+    mails agreeing on all of them were taken to be one, and the second body was
+    then never fetched by anything.
+
+    A pass now fetches every UID and lets the bytes decide (core.mail.store's
+    same_message, which compares content hashes). What that costs is bandwidth,
+    not storage: mail already held still gains only a placement row.
+    """
     if not message_id:
         return False
-    return ingest_location_only(db, account, mailbox, uid, flags, message_id)
+    return ingest_location_only(db, account, mailbox, uid, flags, message_id,
+                                size=size, date=date, headers=headers,
+                                content_wanted=content_wanted)
 
 
 def store_message(db, account: Account, mailbox: Mailbox, uid: int, flags: dict,
-                  raw: bytes) -> bool:
-    """Parse and store raw MIME. Returns True if this created new content."""
-    _msg, created = ingest_raw(db, account, mailbox, uid, flags, raw)
+                  raw: bytes, received=None) -> bool:
+    """Parse and store raw MIME. Returns True if this created new content.
+
+    ``received`` is the server's own delivery time for this UID (INTERNALDATE),
+    which is what the content window is measured from — see
+    prune_expired_content for why it is not the Date header.
+    """
+    _msg, created = ingest_raw(db, account, mailbox, uid, flags, raw, received=received)
     return created
 
 
 def store_headers(db, account: Account, mailbox: Mailbox, uid: int, flags: dict,
-                  header_bytes: bytes, size_bytes: int | None = None) -> bool:
+                  header_bytes: bytes, size_bytes: int | None = None,
+                  received=None) -> bool:
     """Store a message's headers with no content, for mail outside the window.
 
     The caller has decided (from the Date header, before spending a fetch on the
@@ -217,7 +241,8 @@ def store_headers(db, account: Account, mailbox: Mailbox, uid: int, flags: dict,
     simply has no body to open. Returns True if this created new content.
     """
     _msg, created = ingest_raw(db, account, mailbox, uid, flags, header_bytes,
-                               headers_only=True, size_bytes=size_bytes)
+                               headers_only=True, size_bytes=size_bytes,
+                               received=received)
     return created
 
 
@@ -246,16 +271,23 @@ def prune_expired_content(db, cutoff: datetime, limit: int = PRUNE_BATCH) -> int
     window slides, so this has to keep running — it is not a one-off migration:
     every day moves the cutoff forward over another day's worth of mail.
 
-    Messages with no parseable Date are left alone. Their age is unknown, and
-    the safe reading of "unknown" is to keep what we already have rather than
-    throw away content on a guess.
+    Age is measured from when the mail *arrived* (Message.date_received, which
+    the agent fills in from the server's INTERNALDATE), not from its Date header.
+    The header is written by whoever sent the message, so a window that read it
+    could be aimed: a sender who dates a message 1998 gets its body stripped on
+    the pass that stores it, and the recipient has a mail they can list and never
+    open. Nobody can backdate the moment their message reached the server.
+
+    Messages with no arrival time are left alone. Their age is unknown, and the
+    safe reading of "unknown" is to keep what we already have rather than throw
+    away content on a guess.
     """
     stale = db.execute(
         select(Message)
         .where(
             Message.content_status == "full",
-            Message.date_sent.is_not(None),
-            Message.date_sent < cutoff,
+            Message.date_received.is_not(None),
+            Message.date_received < cutoff,
         )
         .limit(limit)
     ).scalars().all()
@@ -436,18 +468,67 @@ def unplaced_uids(db, mailbox: Mailbox, present_uids: list[int]) -> list[int]:
     return [uid for uid in present_uids if uid not in placed]
 
 
-def has_move_in_flight(db, account: Account, message_id: str | None) -> bool:
-    """Is this message — named by its Message-ID, which is all a UID we hold no
-    placement for can be identified by — in the middle of being moved?
+def has_move_in_flight(db, account: Account, message_id: str | None,
+                       headers: bytes | None = None, date=None) -> bool:
+    """Is this message — one the folder lists and we hold no placement for — in
+    the middle of being moved?
 
     Restoring a placement for one would undo the move: the source placement is
     deleted the moment the key is pressed, and the server goes on listing the
     UID until the agent applies the move and the server catches up.
+
+    Usually the Message-ID answers it. Where there is none — a stripped header, a
+    mailer that never wrote one, and both do occur — "no id" used to be read as
+    "never seen before, so never moved", which is a guess about mail we can
+    perfectly well identify by other means. The repair then put the message
+    straight back in the folder it had just been archived out of, and the user
+    got a message that would not stay filed.
+
+    So the queue is asked instead. Only mail with a move already queued is a
+    candidate, which is a handful of rows, and among those a match on sender,
+    subject and send time is as much as this file claims anywhere else (see
+    core.mail.store.same_message). ``headers`` is the header block the caller
+    already fetched to get here, and ``date`` the send time from the same pass.
+
+    Every row that could be the message is asked, not the first one found. An id
+    can be worn by two messages, and "is the one I happened to pick being moved"
+    is not the question — a move in flight on either of them is a reason to leave
+    this UID alone, since putting a placement back on the wrong guess undoes a
+    move the user made.
     """
-    if not message_id:
-        return False                      # never seen before, so never moved
-    msg = find_message_by_message_id(db, account.id, message_id)
-    return msg is not None and move_in_flight(db, msg.id)
+    if message_id:
+        rows = db.execute(
+            select(Message.id).where(Message.account_id == account.id,
+                                     Message.message_id == canonical_message_id(message_id))
+        ).scalars().all()
+        return any(move_in_flight(db, pk) for pk in rows)
+
+    identity = header_identity(headers)
+    if identity is None:
+        return False                      # nothing to compare; nothing to protect
+    from_addr, subject_norm = identity
+    q = (
+        select(Message.id)
+        .join(PendingAction, PendingAction.message_pk == Message.id)
+        .where(
+            Message.account_id == account.id,
+            Message.message_id.is_(None),
+            Message.from_addr == from_addr,
+            Message.subject_norm == subject_norm,
+            PendingAction.type.in_(("move", "delete")),
+            # The same rule move_in_flight applies above, written out for the
+            # join: queued or being applied, and not so far into the refusals
+            # that the local view has stopped being the one believed. A row the
+            # agent dropped, or one that has been refused for a quarter of an
+            # hour, is not a move that is about to land — and treating it as one
+            # is what left a placement unrepairable for good.
+            PendingAction.status.not_in(("done",) + store.SETTLED),
+            PendingAction.attempts < store.STUCK_AFTER,
+        )
+    )
+    if date is not None:
+        q = q.where(Message.date_sent == date)
+    return db.scalar(q.limit(1)) is not None
 
 
 def prune_vanished(db, mailbox: Mailbox, present_uids: list[int]) -> int:
@@ -484,30 +565,81 @@ def prune_vanished(db, mailbox: Mailbox, present_uids: list[int]) -> int:
     return removed
 
 
-def prune_mailboxes(db, account: Account, present_names: set[str]) -> int:
-    """Remove folders absent from the server's successful LIST response.
+# How long a folder has to be absent from the server's LIST before its mail is
+# removed here. Not politeness — evidence. See prune_mailboxes.
+MISSING_GRACE = timedelta(hours=1)
 
-    An empty LIST is never taken as evidence. Proton Bridge answers LIST from
-    whatever it has loaded, and a Bridge that is still starting, signed out, or
-    running on a machine that has been offline for days answers it with nothing
-    — preflight already warns about exactly that ("the server listed no
+
+def deferred_folders(db, account: Account) -> list[str]:
+    """Folders the server has stopped listing that are being held rather than
+    removed. What the agent warns about — see prune_mailboxes."""
+    return list(db.execute(
+        select(Mailbox.imap_name).where(Mailbox.account_id == account.id,
+                                        Mailbox.missing_since.is_not(None))
+        .order_by(Mailbox.imap_name)
+    ).scalars().all())
+
+
+def prune_mailboxes(db, account: Account, present_names: set[str], now=None) -> int:
+    """Remove folders the server has stopped listing — once it has stopped
+    listing them for long enough to be believed.
+
+    An empty LIST is never taken as evidence at all. Proton Bridge answers LIST
+    from whatever it has loaded, and a Bridge that is still starting, signed out,
+    or running on a machine that has been offline for days answers it with
+    nothing — preflight already warns about exactly that ("the server listed no
     folders"). Acting on that answer would delete every folder for the account
     and, with the last placement of each message, the mail itself: a local
     mailbox wiped because a laptop was opened on a train. There is no reading of
-    "the server told me about no folders at all" that means "the user deleted
-    all their folders", so the only safe response is to leave everything alone
-    and let a later pass, against a server that is actually answering, decide.
+    "the server told me about no folders at all" that means "the user deleted all
+    their folders".
+
+    Neither is there such a reading of a *partial* answer, and that is what this
+    grace period is for. The same Bridge that answers LIST with nothing while it
+    is starting answers it with what it has loaded so far while it is still
+    loading — three folders out of twelve, a complete and successful response
+    containing a fraction of the mailbox. Treating the other nine as deleted took
+    every message that lived only there with them. Nothing about the response
+    says which kind it is; the only thing that tells a folder somebody deleted
+    from one Bridge has not finished waking up is that the first stays gone.
+
+    So a folder that goes missing is marked and left alone, with all its mail,
+    and only removed once it has been absent for MISSING_GRACE — an hour, which
+    at a thirty-second poll is a hundred passes agreeing. Coming back clears the
+    mark. Being wrong in this direction leaves a folder on screen for an hour
+    after it was deleted elsewhere; being wrong in the other direction is mail
+    nobody can get back.
     """
     if not present_names:
         return 0
+    now = now or utcnow()
 
-    missing = db.execute(
+    # Anything the server listed is here, whatever it did last pass.
+    db.execute(
+        update(Mailbox)
+        .where(Mailbox.account_id == account.id,
+               Mailbox.imap_name.in_(present_names),
+               Mailbox.missing_since.is_not(None))
+        .values(missing_since=None)
+    )
+
+    absent = db.execute(
         select(Mailbox).where(
             Mailbox.account_id == account.id,
             Mailbox.imap_name.not_in(present_names),
         )
     ).scalars().all()
+
+    missing = []
+    for mailbox in absent:
+        if mailbox.missing_since is None:
+            # First pass without it. Nothing is removed on the strength of one
+            # answer; the clock starts here.
+            mailbox.missing_since = now
+        elif now - mailbox.missing_since >= MISSING_GRACE:
+            missing.append(mailbox)
     if not missing:
+        db.flush()
         return 0
 
     affected: set[int] = set()
@@ -524,6 +656,58 @@ def prune_mailboxes(db, account: Account, present_names: set[str]) -> int:
     events.publish({"type": "folders", "account": account.email,
                     "removed": len(missing)})
     return len(missing)
+
+
+# How long a message with no placement anywhere is kept before it is collected.
+# The window is not for the database's sake — it is the difference between "no
+# folder holds this" and "no folder holds this *yet*", and a pass is the unit of
+# time in which that changes.
+ORPHAN_GRACE = timedelta(hours=6)
+
+
+def delete_orphan_messages(db, account: Account, now=None, limit: int = 1000) -> int:
+    """Collect stored mail that no folder points at any more.
+
+    ``_delete_orphans`` catches the messages whose last placement a prune took,
+    which is most of them. The one it cannot see is the placement that was
+    *repointed*: a UIDVALIDITY change hands the same numbers out again, the walk
+    that follows binds uid 4051 to whatever message now holds it, and the message
+    it used to mean is left behind with its body, its attachments and no folder —
+    invisible in the UI, counted by nothing, and still occupying the disk it took
+    when it arrived. On a mailbox that has been through a few Bridge re-logins
+    that is a slow leak of whole messages.
+
+    Deliberately not done at the moment the placement moves. A message can be
+    between folders for perfectly good reasons — mid-pass, with the placement
+    that will hold it not walked yet; mid-move, though those carry an optimistic
+    placement of their own — and deleting on the first look would turn a gap of
+    seconds into mail nobody can get back. So this runs at the end of a pass that
+    completed, over messages that have been unplaced since well before it
+    started, and skips anything a queued action still names: a move waiting for
+    the agent is a message on its way somewhere, and the row it names has to be
+    there when it arrives.
+    """
+    now = now or utcnow()
+    placed = select(MessageLocation.id).where(MessageLocation.message_pk == Message.id).exists()
+    queued = select(PendingAction.id).where(
+        PendingAction.message_pk == Message.id, PendingAction.status != "done").exists()
+    stale = db.execute(
+        select(Message.id).where(
+            Message.account_id == account.id,
+            Message.updated_at < now - ORPHAN_GRACE,
+            ~placed,
+            ~queued,
+        ).limit(limit)
+    ).scalars().all()
+    if not stale:
+        return 0
+    for pk in stale:
+        msg = db.get(Message, pk)
+        if msg is not None:
+            db.delete(msg)
+    db.flush()
+    events.publish({"type": "pruned", "messages": len(stale)})
+    return len(stale)
 
 
 def request_recheck(db, email: str | None = None) -> list[str]:

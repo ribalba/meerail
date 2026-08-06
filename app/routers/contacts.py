@@ -24,7 +24,8 @@ MIN_WEIGHT = 2
 
 
 @router.get("")
-def suggest(q: str = "", limit: int = Query(8, le=25), db: DBSession = Depends(get_db)):
+def suggest(q: str = "", limit: int = Query(8, ge=1, le=25),
+            db: DBSession = Depends(get_db)):
     q = q.strip().replace("%", "").replace("_", "")
     if not q:
         return []
@@ -40,7 +41,7 @@ def suggest(q: str = "", limit: int = Query(8, le=25), db: DBSession = Depends(g
 @router.get("/related")
 def related(
     address: list[str] = Query(default=[]),
-    limit: int = Query(4, le=10),
+    limit: int = Query(4, ge=1, le=10),
     db: DBSession = Depends(get_db),
 ):
     """People usually addressed together with the given recipients.
@@ -80,7 +81,8 @@ def related(
 
 
 @router.post("/refresh")
-def refresh(years: int | None = None, db: DBSession = Depends(get_db)):
+def refresh(years: int | None = Query(None, ge=0, le=200),
+            db: DBSession = Depends(get_db)):
     """Rebuild the contacts index. `years` overrides the configured scan window."""
     y = years if years is not None else settings.contacts_scan_years
     count = rebuild_contacts(db, y)

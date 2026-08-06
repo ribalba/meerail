@@ -7,7 +7,9 @@ from core import outbox as outbox_core
 from core.database import get_db
 from core.events import publish_command
 from ..deps import require_ui_auth
-from core.models import Account, Mailbox, MessageLocation, Outbound, PendingAction
+from core.models import (
+    Account, Mailbox, MessageLocation, Outbound, PendingAction, Reminder, utcnow,
+)
 
 router = APIRouter(prefix="/api/mailboxes", tags=["mailboxes"], dependencies=[Depends(require_ui_auth)])
 
@@ -52,6 +54,17 @@ def list_mailboxes(db: DBSession = Depends(get_db)):
         .where(Outbound.state.in_(outbox_core.UNSENT_STATES))
     ).one()
 
+    # Conversations put off until later. Like the Outbox this is not an IMAP
+    # folder — the mail is sitting in Archive — but it is a place to the person
+    # who put something there, so the sidebar gives it a row. `overdue` counts
+    # the ones whose time has come and which have not landed: the reminder is
+    # late, and the row says so the way the Outbox says a send is failing.
+    reminders_pending, reminders_overdue = db.execute(
+        select(func.count(Reminder.id),
+               func.count(Reminder.id).filter(Reminder.due_at <= utcnow()))
+        .where(Reminder.state == "pending")
+    ).one()
+
     out_accounts = []
     unified_unread = 0
     for acc in accounts:
@@ -75,7 +88,9 @@ def list_mailboxes(db: DBSession = Depends(get_db)):
         "smart": {"unified_inbox_unread": int(unified_unread), "flagged_total": int(flagged_total),
                   "account_count": len(accounts),
                   "outbox_unsent": int(outbox_unsent or 0),
-                  "outbox_failing": int(outbox_failing or 0)},
+                  "outbox_failing": int(outbox_failing or 0),
+                  "reminders_pending": int(reminders_pending or 0),
+                  "reminders_overdue": int(reminders_overdue or 0)},
     }
 
 
@@ -136,11 +151,14 @@ def create_mailbox(body: CreateMailbox, db: DBSession = Depends(get_db)):
         raise HTTPException(status_code=409, detail="That folder already exists")
 
     # A second click before the agent has run would otherwise queue a duplicate.
+    # "leased" counts as queued: that is a row an agent is creating the folder
+    # for right now (agent/actions.py::_lease), which is as good a reason not to
+    # ask for it again as one still waiting.
     already_queued = db.execute(
         select(PendingAction).where(
             PendingAction.account_id == account.id,
             PendingAction.type == "create_folder",
-            PendingAction.status == "pending",
+            PendingAction.status.in_(("pending", "leased")),
         )
     ).scalars().all()
     if any((a.payload or {}).get("name") == name for a in already_queued):

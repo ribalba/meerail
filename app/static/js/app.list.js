@@ -153,6 +153,13 @@ App.list = (function () {
     const badge = r.thread_count > 1
       ? `<span class="thread-badge" title="${r.thread_count} messages in this thread">` +
         `${App.icon("thread", 11)}${r.thread_count}</span>` : "";
+    // A conversation put off until later. Shown in every list, not only in the
+    // Reminders one: the mail is sitting in Archive, and the difference between
+    // "filed away" and "coming back on Monday" is exactly what this says.
+    const due = r.remind_at ? App.utcDate(r.remind_at) : null;
+    const remind = due
+      ? `<span class="remind-chip" title="Coming back ${App.esc(App.fmtDateFull(r.remind_at))}"
+          >${App.icon("bell", 11)}${App.esc(App.reminders.stamp(due))}</span>` : "";
     // No snippet because there is no body: this mail is outside the content
     // window the agent keeps. Blank there reads as a broken row.
     const absent = r.content_status && r.content_status !== "full";
@@ -168,7 +175,7 @@ App.list = (function () {
         <div class="msg-subject">${App.esc(r.subject)}</div>
         <div class="msg-snippet${absent ? " is-absent" : ""}">${
           absent ? "Outside the sync window — headers only" : App.esc(r.snippet || "")}</div>
-        <div class="msg-meta">${badge}${flag}${attach}</div>
+        <div class="msg-meta">${badge}${remind}${flag}${attach}</div>
       </div>`;
 
     const box = el.querySelector(".msg-check");

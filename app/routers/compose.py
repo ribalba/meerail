@@ -13,10 +13,24 @@ from email.message import EmailMessage
 from email.utils import formataddr, formatdate, make_msgid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import distinct, func, select, tuple_
 from sqlalchemy.orm import Session as DBSession
+# Starlette's own, not the FastAPI subclass: the form is parsed by Starlette
+# here (see upload_attachment) and produces the base class, which a FastAPI
+# UploadFile is not an instance of.
+from starlette.datastructures import UploadFile
+# Both, because a malformed multipart raises one of two unrelated exceptions and
+# neither is caught for us any more. Starlette raises MultiPartException for the
+# limits it enforces itself (too many files, a part over its cap, no boundary);
+# python-multipart raises MultipartParseError from inside the parser when the
+# bytes do not match the boundary that was declared. FastAPI used to turn both
+# into a 400 on the way in, and does not see this body at all now.
+from starlette.formparsers import MultiPartException
+from python_multipart.exceptions import MultipartParseError
+
+_MALFORMED_MULTIPART = (MultiPartException, MultipartParseError)
 
 from core import outbox as outbox_core
 from core.config import get_settings
@@ -24,6 +38,7 @@ from core.database import get_db
 from core.events import publish_command
 from .. import events
 from ..deps import require_ui_auth
+from .messages import _readable
 from core.models import Account, Attachment, Message, Outbound, PendingAction, Recipient, utcnow
 from core.mail.parse import html_to_text, normalize_subject
 
@@ -103,8 +118,47 @@ def _from_header(account: Account, from_addr: str) -> str:
 
 
 @router.post("/attachments")
-async def upload_attachment(file: UploadFile = File(...)):
-    """Stage a file for an outgoing message; returns an id to include in /send."""
+async def upload_attachment(request: Request):
+    """Stage a file for an outgoing message; returns an id to include in /send.
+
+    Takes the `Request` and parses the form itself rather than declaring
+    `file: UploadFile = File(...)`, and that is the whole security of this
+    route rather than a style preference. FastAPI reads and parses a declared
+    body *before* it resolves dependencies — so with the ordinary signature,
+    `await request.form()` had already run, and Starlette had already spooled
+    the upload to a temporary file, by the time `require_ui_auth` on this router
+    got to say 401. A stranger could fill the disk of a password-protected
+    install one anonymous POST at a time, and the cap below never even ran.
+
+    Declaring no body field leaves `body_field` unset, so FastAPI skips the
+    parse entirely; the dependency runs, and an unauthenticated request is
+    turned away having had nothing read. The form below is parsed inside the
+    handler, which is to say after the gate. app/limits.py caps the size of what
+    reaches it.
+
+    Parsing it here also means owning the errors FastAPI used to turn into
+    responses on our behalf: a body that is not the multipart it claims to be is
+    a 400 about the request, not a traceback about the server.
+    """
+    try:
+        async with request.form(max_files=1, max_fields=0) as form:
+            file = form.get("file")
+            if not isinstance(file, UploadFile):
+                raise HTTPException(status_code=422,
+                                    detail="Expected a file in the 'file' field")
+            return await _stage_upload(file)
+    except _MALFORMED_MULTIPART as exc:
+        raise HTTPException(status_code=400, detail=f"Malformed upload: {exc}") from exc
+
+
+async def _stage_upload(file: UploadFile) -> dict:
+    """Write one uploaded file into the staging area, refusing it past the cap.
+
+    Counted as the bytes are written rather than read off Content-Length, which
+    is a number the client chose. app/limits.py has already bounded the request
+    as a whole; this bounds the one file inside it, and is what
+    `server.max_attachment_bytes` actually means.
+    """
     staging_id = f"{uuid.uuid4().hex}__{_safe(file.filename or 'file')}"
     path = settings.outbox_dir / staging_id
     size = 0
@@ -118,7 +172,6 @@ async def upload_attachment(file: UploadFile = File(...)):
                 staged.write(chunk)
         complete = True
     finally:
-        await file.close()
         if not complete:
             path.unlink(missing_ok=True)
     return {"id": staging_id, "filename": file.filename or "file",
@@ -387,10 +440,13 @@ def sender_for(address: list[str] = Query(default=[]), db: DBSession = Depends(g
 
 @router.get("/reply-context/{message_id}")
 def reply_context(message_id: int, mode: str = "reply", db: DBSession = Depends(get_db)):
-    """Prefill for reply / replyall / forward."""
-    msg = db.get(Message, message_id)
-    if msg is None:
-        raise HTTPException(status_code=404, detail="Message not found")
+    """Prefill for reply / replyall / forward.
+
+    Reached through the same gate as reading the message, because that is what
+    it does: a forward is the whole body quoted back out of the database, so mail
+    the user has deleted must not be reachable this way either.
+    """
+    msg = _readable(db, message_id)
     account = db.get(Account, msg.account_id)
     self_addrs = {a.lower() for a in _sender_addresses(account)} if account else set()
 

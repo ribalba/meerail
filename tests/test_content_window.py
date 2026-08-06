@@ -8,7 +8,7 @@ reader renders its notice from.
 
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -16,6 +16,7 @@ import pytest
 
 import dbfixture
 from core import ingest
+from core.models import utcnow
 from helpers import api, make_message
 
 T0 = datetime(2026, 5, 1, 9, 0, tzinfo=timezone.utc)
@@ -303,3 +304,25 @@ def test_sent_date_prefers_the_date_header(header, internal, expected):
     import imap  # noqa: PLC0415 — needs the sys.path line above
 
     assert imap._sent_date(header, internal) == expected
+
+
+def test_a_backdated_message_is_kept_by_when_it_arrived(account):
+    """The window is a promise about age, and the Date header is not an age —
+    it is a line the sender typed. Measured on it, anyone could decide that
+    their message's body is never stored here: date it 1998, and the pass that
+    stores it strips it on the way past. What nobody can backdate is the moment
+    their message reached the server.
+    """
+    email, aid = account["email"], account["id"]
+    raw = make_message(f"<backdated-{uuid.uuid4().hex}@t>", "Subject BACKTOK",
+                       "sender@example.com", email, "the body they wanted gone",
+                       datetime(1998, 6, 1, 9, 0, tzinfo=timezone.utc))
+    # Dated 1998, delivered a minute ago — which is the whole trick.
+    dbfixture.ingest_raw_message(email, raw, uid=1, received=utcnow())
+
+    # A window that would exclude 1998 several times over.
+    assert dbfixture.prune_content(cutoff=utcnow() - timedelta(days=365)) == 0
+
+    _, found = api("GET", f"/api/search?q=BACKTOK&account_id={aid}")
+    detail = api("GET", f"/api/messages/{found['rows'][0]['id']}")[1]
+    assert "the body they wanted gone" in detail["body_text"]

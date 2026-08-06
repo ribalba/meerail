@@ -44,6 +44,13 @@ for _path in (str(_REPO_ROOT), str(_REPO_ROOT / "agent")):
         sys.path.insert(0, _path)
 
 
+# How many messages in the target sharing one Message-ID are worth reading
+# before giving up on the question. More than this under one id is not a folder
+# whose contents are worth downloading to answer it, and "cannot tell" is an
+# answer this tool already knows how to report.
+_CANDIDATE_LIMIT = 5
+
+
 def _flags(row) -> list[str]:
     """The IMAP flags the restored copy should land with.
 
@@ -56,16 +63,43 @@ def _flags(row) -> list[str]:
     return [flag for on, flag in named if on]
 
 
-def _already_there(ops, folder: str, message_id: str) -> bool:
-    """Is this message in that folder on the server already?
+def _already_there(ops, folder: str, message_id: str | None, raw: bytes) -> bool | None:
+    """Is this message in that folder on the server already? None means unknown.
 
     The one check that makes a second run harmless. It also covers the case this
     tool is not the answer to: a placement still waiting on a move that simply
     has not been applied yet, where the message is exactly where the server left
     it and appending a copy would be the only damage done.
+
+    The Message-ID finds the candidates and the message itself decides between
+    them: each is read back and compared with the bytes about to be appended,
+    which this tool has in hand. An id is a header its sender wrote, so two
+    different messages can carry one — and so can a size, which is a number. A
+    match on either would report this message as safely in the folder while it is
+    in fact nowhere, and for a tool whose whole job is putting lost mail back
+    that is the one wrong answer that matters.
+
+    Message-ID is nullable, and mail without one really does exist — a stripped
+    header, a mailer that never wrote one. There is then nothing to search for:
+    passing the NULL through built ``HEADER MESSAGE-ID None``, which a server
+    answers with an error (taking the rest of the restore down with it) or, worse,
+    with whatever it makes of the literal. So that case gets its own answer, and
+    the caller decides what to do about not knowing — which is not "append
+    anyway", since the one thing worse than an unrestored message is a second
+    copy of a message that was never lost.
     """
+    from core.mail.parse import content_key
+
+    if not message_id:
+        return None
     ops.select_folder(folder, readonly=True)
-    return bool(ops.search(["HEADER", "MESSAGE-ID", message_id]))
+    uids = list(ops.search(["HEADER", "MESSAGE-ID", message_id]))[:_CANDIDATE_LIMIT]
+    if not uids:
+        return False
+    want = content_key(raw)
+    fetched = ops.fetch(uids, [b"BODY.PEEK[]"]) or {}
+    return any(content_key(data[b"BODY[]"]) == want
+               for data in fetched.values() if data.get(b"BODY[]"))
 
 
 def _stuck_placements(db, account_id: int):
@@ -123,7 +157,18 @@ def _restore_account(db, acc, account_id: int, apply: bool) -> tuple[int, int, i
                 continue
 
             ops = bridge.ops()
-            if _already_there(ops, row.imap_name, row.message_id):
+            here = _already_there(ops, row.imap_name, row.message_id, row.raw_mime)
+            if here is None:
+                # No Message-ID, so there is no way to ask the server whether it
+                # has this message — and appending on a guess would put a second
+                # copy in the folder for every run of this tool. Named in the
+                # report instead: the bytes are still in the database, and a
+                # human with the folder open can decide.
+                print(f"{what} -> no Message-ID, cannot check {row.imap_name} — "
+                      f"left alone")
+                unrestorable += 1
+                continue
+            if here:
                 print(f"{what} -> already in {row.imap_name}, left alone")
                 skipped += 1
                 continue
@@ -188,9 +233,12 @@ def main(argv: list[str] | None = None) -> int:
         db.close()
 
     restored, skipped, unrestorable = totals
+    # "not restored" rather than "no raw copy held": there are two reasons now,
+    # and the line above each message says which one it was.
     if args.apply:
         print(f"\n{restored} restored, {skipped} already there, "
-              f"{unrestorable} with no raw copy held.")
+              f"{unrestorable} not restored (no raw copy held, or no Message-ID "
+              f"to check the folder with).")
         if restored:
             print("The next sync pass ingests them and retires the placeholders.")
     else:

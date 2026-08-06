@@ -69,6 +69,9 @@ class ParsedAttachment:
 class ParsedEmail:
     message_id: str | None
     dedup_key: str
+    # A hash of the bytes this was parsed from — what identifies the message when
+    # its Message-ID turns out not to. See the two keys at the end of parse_email.
+    content_key: str
     in_reply_to: str | None
     references: list[str]
     subject: str
@@ -262,6 +265,44 @@ def make_snippet(text: str, limit: int = 240) -> str:
     return s[:limit]
 
 
+def content_key(raw: bytes) -> str:
+    """What these bytes are, as a name: a hash of the message itself.
+
+    The one identity a sender cannot write. A Message-ID is a header and two
+    different messages can carry the same one; this is what decides between them
+    (core/mail/store.py::same_message), what a collision is filed under, and what
+    the agent compares a copy against before it removes an original.
+
+    Line endings are normalised out of it first. The same message reaches us
+    through more than one transport — over IMAP with CRLF, out of an mbox with
+    those endings already converted to LF — and hashing what arrived would call
+    those two different messages, which for the importer means duplicating every
+    message in an archive that has also been synced. What is left is still the
+    message: every byte of it, in one spelling.
+    """
+    return "sha256:" + hashlib.sha256(raw.replace(b"\r\n", b"\n")).hexdigest()
+
+
+def header_identity(header_bytes: bytes | None) -> tuple[str, str] | None:
+    """``(from_addr, subject_norm)`` out of a header block, or None if there is
+    none to read.
+
+    The same two fields ``parse_email`` derives from a whole message, derived the
+    same way and from the same code, so that a comparison between a message on
+    the wire and a message in the database is a comparison of like with like.
+    That is the entire reason this exists as a function rather than as two lines
+    at the call site: the agent decides whether to fetch a message at all by
+    holding its headers up against a stored row, and a difference in how the two
+    sides were normalised would read as a difference between the messages.
+    """
+    if not header_bytes:
+        return None
+    msg: EmailMessage = message_from_bytes(header_bytes, policy=default_policy)  # type: ignore[assignment]
+    from_pairs = _addresses(msg, "From")
+    subject = strip_nuls(str(msg.get("Subject", ""))).strip()
+    return (from_pairs[0][1] if from_pairs else ""), normalize_subject(subject)[:512]
+
+
 def parse_email(raw: bytes) -> ParsedEmail:
     msg: EmailMessage = message_from_bytes(raw, policy=default_policy)  # type: ignore[assignment]
 
@@ -342,17 +383,32 @@ def parse_email(raw: bytes) -> ParsedEmail:
                              is_inline=True, payload=payload)
         )
 
-    # dedup_key: Message-ID when present, else a content hash so re-fetches of the
-    # same bytes (e.g. from another Proton label) collapse to one Message row.
+    # Two keys, because a Message-ID answers a different question than it looks
+    # like it does.
+    #
+    # dedup_key is what collapses one message seen several times into one row:
+    # the Message-ID when there is one, since a Proton or Gmail account hands the
+    # same message over once per label and each copy has its own UID. That works
+    # because senders normally issue a unique Message-ID per message — normally,
+    # and not always. Nothing stops two different messages carrying the same one:
+    # a mailer with a broken generator, a list that re-sends under the old id, or
+    # anybody who simply typed the header. So the id is a *candidate* for
+    # sameness, checked against the message itself before anything is merged (see
+    # core/mail/store.py::_same_message).
+    #
+    # content_key is what the check falls back to, and the whole key when there
+    # is no Message-ID at all: the bytes, which cannot be two messages.
+    key = content_key(raw)
     if message_id:
         dedup_key = (message_id if len(message_id) <= 255 else
                      "mid-sha256:" + hashlib.sha256(message_id.encode()).hexdigest())
     else:
-        dedup_key = "sha256:" + hashlib.sha256(raw).hexdigest()
+        dedup_key = key
 
     return ParsedEmail(
         message_id=message_id,
         dedup_key=dedup_key,
+        content_key=key,
         in_reply_to=in_reply_to,
         references=references,
         subject=subject,

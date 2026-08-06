@@ -16,7 +16,8 @@ for analytics. Runs on Linux, macOS and Windows.
 **Features:** three-pane Apple-Mail-style UI · unified inbox across accounts · conversation
 threading · POSIX-regex & keyword search (scope + "last N years" window, `:unread` / `:read` /
 `:has-attachment` / `:from` / `:to` filters, searches PDF/Office attachment text via Tika) ·
-sandboxed HTML rendering with remote-image blocking · read/flag/
+sandboxed HTML rendering that blocks every remote fetch a message can ask for — the images,
+and the CSS that would otherwise fetch them for it · read/flag/
 archive/delete and compose that **sync back to your mail server** over IMAP/SMTP · file a mail
 as a **Meerato task**, attachments and all · light + dark, following the system or pinned to
 either in Settings.
@@ -374,10 +375,16 @@ The database is the only thing the two halves share: the agent writes, the app r
 neither calls the other. Live UI updates ride Postgres `LISTEN/NOTIFY`, so the browser still
 refreshes the moment mail lands even though ingest happens in another process.
 
-Content is stored once per Message-ID with per-folder placement tracked separately (handling
-Proton exposing labels as folders). Raw MIME and attachment bytes live in the database, so
-there is no shared filesystem between the agent and the app. Sync cursors live in the database
-too, so the agent stays stateless — stop and restart it anytime.
+Content is stored once per message with per-folder placement tracked separately (handling
+Proton exposing labels as folders). What "once per message" means is a hash of the message
+itself, not its Message-ID: an id is a header the sender writes, so two mails that hash the
+same are the same mail whatever their headers claim, and two that do not are stored
+separately, under their bytes, in conversations of their own. (Where there is nothing to hash
+— a message stored from its headers alone — sender, subject and send time stand in until the
+body arrives.) That is why a label server's second copy of a message is still downloaded: it
+costs a fetch to prove it is the same one, and the alternative is trusting a header for it. Raw MIME and attachment bytes live in the database, so there is no shared
+filesystem between the agent and the app. Sync cursors live in the database too, so the agent
+stays stateless — stop and restart it anytime.
 
 ### What is exposed
 
@@ -409,9 +416,11 @@ then apply to the real server. So exposing it is two steps, in this order:
    environment), and restart the server.
 2. Set `MEERAIL_BIND=0.0.0.0` in `.env` and `docker compose up -d`.
 
-Off a network you trust, put a TLS terminator in front of it as well — the password and the
-session cookie both cross the wire in the clear otherwise. `meerail.sh` asks the same
-question at install time and refuses to widen the binding until a password is set.
+Off a network you trust, put a TLS terminator in front of it as well. This is not optional once
+a password is set: meerail refuses to serve anything over a plaintext connection to a non-loopback
+address, because handing over the page is what puts the password on the wire. Tell it about the
+terminator with `trusted_proxies`, or every request arrives looking like plaintext. `meerail.sh`
+asks the same question at install time and refuses to widen the binding until a password is set.
 
 If that terminator is Coolify, [`COOLIFY.md`](COOLIFY.md) and
 [`docker-compose.coolify.yml`](docker-compose.coolify.yml) deploy the whole stack —
@@ -459,8 +468,13 @@ keys unless you specifically want a per-machine override.
 | Key | Env | Default | What it does |
 | --- | --- | --- | --- |
 | `secret_key` | `SECRET_KEY` | `dev-insecure-…` | Signs tokens and encrypts any server-side stored credentials. **Change it** before exposing the app: `python -c "import secrets;print(secrets.token_urlsafe(48))"`. |
-| `password` | `SERVER_PASSWORD` | *(empty)* | Empty means no auth — correct for a localhost app. Set it (**with TLS**) if the server is reachable from anywhere else: the UI then shows a password screen, and a successful login holds a signed session cookie for `session_max_age_days`. Scripted clients send it as `Authorization: Bearer <password>`. Failed logins are rate-limited per address (5 per 15 minutes). |
+| `password` | `SERVER_PASSWORD` | *(empty)* | Empty means no auth — correct for a localhost app. Set it if the server is reachable from anywhere else: the UI then shows a password screen, and a successful login holds a signed session cookie for `session_max_age_days`. **Setting it also requires HTTPS for everything**, not only for signing in: with a password configured, a plaintext request never gets the page, because getting the page is what puts the password on the wire. A plain `http://` GET is redirected to `https://`; anything else is refused. Loopback is exempt, and TLS terminated by a proxy needs `trusted_proxies` below. Failed logins are rate-limited per address (5 per 15 minutes), and **Log out really ends the session**: the cookie names a row on the server, so a copy of it taken elsewhere stops working the moment you log out. Logging out in one browser leaves your other browsers signed in. |
+| `api_token` | `API_TOKEN` | *(empty)* | Credential for scripted clients: `Authorization: Bearer <token>`. Empty means the API can only be reached with a browser session. Deliberately **not** the UI password — that used to be accepted here too, which made the thing you type into a browser a permanent key to the whole mailbox, revocable only by changing the password and signing every browser out. Generate one with `python -c "import secrets;print(secrets.token_urlsafe(32))"`, and change it when a script should stop having access. |
 | `session_max_age_days` | `SESSION_MAX_AGE_DAYS` | `30` | How long a browser login lasts before the password is asked again. Changing `password` or `secret_key` logs every browser out immediately. |
+| `trusted_proxies` | `TRUSTED_PROXIES` | *(empty)* | Reverse proxies this server may believe about where a request came from — IPs or CIDR blocks, comma-separated. Empty trusts nothing, which is right when the browser reaches the server directly. **Set it whenever TLS is terminated in front** (Traefik, Caddy, nginx): without it every request looks like plain HTTP from the proxy's own address, so the session cookie goes out without `Secure` and the login rate limiter counts one attacker's failures against everyone behind the proxy. Only these addresses are believed — anything that can reach the port can set `X-Forwarded-For`. With a password set and this unset, the app cannot tell an encrypted request from a plaintext one and answers every request with a 421 naming this setting, rather than guessing. |
+| `hsts_max_age_days` | `HSTS_MAX_AGE_DAYS` | `365` | How long a browser remembers to reach this hostname over HTTPS only (`Strict-Transport-Security`), which removes the *first* plaintext request rather than turning it away. Sent only over HTTPS, so a localhost install never sees it. It is a promise browsers keep: for this long they will not speak `http://` to this name, and will not offer a way past a bad certificate. Set `0` while you are still moving the install between hostnames. `includeSubDomains` is deliberately not sent — add it at your proxy if the whole domain is yours to commit. |
+| `max_request_bytes` | `MAX_REQUEST_BYTES` | `8388608` | Ceiling on ordinary (JSON) request bodies; `0` is no limit. Uploads to the composer get `max_attachment_bytes` instead. Enforced before the body is read **and before it is authenticated** — FastAPI parses a request body before it runs the dependency that would have said 401, so without this a stranger chooses what an unauthenticated POST costs the server. A reverse proxy should cap bodies too; see [COOLIFY.md](COOLIFY.md). |
+| `meerato_allow_private_hosts` | `MEERATO_ALLOW_PRIVATE_HOSTS` | `false` | Let "Add Task" point at a Meerato on a private address (`10.x`, `192.168.x`, a container name, localhost). The URL is typed into Settings and fetched *by the server*, so leaving this off is what stops it being a way to aim this machine at whatever else is on its network. Turn it on when Meerato really is a peer service on your own network. |
 | `default_search_years` | `DEFAULT_SEARCH_YEARS` | `0` | Default search window; `0` searches everything. The UI can override per query. |
 | `contacts_scan_years` | `CONTACTS_SCAN_YEARS` | `1` | How far back to scan addresses for compose autocomplete; `0` is all time. |
 | `max_attachment_bytes` | `MAX_ATTACHMENT_BYTES` | `104857600` | Per-attachment cap for outgoing uploads. |
@@ -476,6 +490,7 @@ keys unless you specifically want a per-machine override.
 | `reconcile_interval` | `RECONCILE_INTERVAL` | `900` | Seconds between full flag/prune sweeps. |
 | `batch_size` | `BATCH_SIZE` | `200` | UIDs per fetch/ingest batch. An account may override it. |
 | `store_raw_mime` | `STORE_RAW_MIME` | `true` | Keep each message's original RFC822 bytes in `messages.raw_mime` — held for future features, and roughly half the database. `false` ingests without them. Takes effect for mail synced from then on; existing rows keep their copy. |
+| `max_message_bytes` | `MAX_MESSAGE_BYTES` | `104857600` | Largest incoming message the agent will hold in memory to store it; `0` is no limit. A fetch reads the whole message before it is parsed, so one mail carrying somebody's backup is that many bytes resident at once — and the pass dies on the same UID every time it retries. Past the cap the message is stored as headers alone, exactly as mail outside the content window is; raising it and running a recheck brings the body in. |
 | `content_window_months` | `CONTENT_WINDOW_MONTHS` | `0` | Keep the *content* of mail sent within this many months; `0` keeps everything. See [The content window](#the-content-window). |
 
 Then one `[[agent.account]]` block per address — IMAP and SMTP host/port/security, username
@@ -516,6 +531,28 @@ It reads your `.env` and `agent/config.toml`, writes `meerail.toml` at mode 0600
 values that install was actually running with, and tells you what to do next. The agent
 refuses to start until you have run it.
 
+### Upgrading from the on-disk layout
+
+The first version of meerail kept message bodies as `.eml` files and attachment payloads as
+files beside them, with the paths in `messages.raw_path` and `attachments.disk_path`;
+everything since keeps those bytes in Postgres, so the agent and the web app need no shared
+filesystem. If your database still has those columns, the server says so on startup:
+
+```
+[init_db] 4812 row(s) in attachments still point at files on disk (attachments.disk_path).
+```
+
+Bring them in, on the machine that can see those paths:
+
+```bash
+tools/migrate_blobs.py            # what it would copy
+tools/migrate_blobs.py --apply
+```
+
+Nothing on disk is deleted, and a file it cannot read keeps its path so the run can be
+repeated with the volume attached. Once a path column is empty the next start drops it —
+and until then it is left alone, because it is the only record of where that content is.
+
 ### The content window
 
 A full mailbox is tens of GB, and most of it is mail nobody will open again. Set
@@ -529,8 +566,15 @@ content_window_months = 24   # bodies and attachments for the last two years
 Older mail is still synced — it just arrives as headers alone. It lists, sorts, threads,
 counts towards the folder totals and turns up in a search for its subject or correspondent;
 it has no body to open, and the reader says so instead of showing a blank message. The body
-never crosses the wire: the agent reads each message's date in the header pass it already
-makes, and never asks for the rest.
+never crosses the wire: the agent reads each message's arrival time in the header pass it
+already makes, and never asks for the rest.
+
+"Old" means *when it arrived*, not what its `Date:` header claims. The header is written by
+whoever sent the message, so a window measured on it could be aimed — date a message 1998 and
+its body would be stripped on the very pass that stored it, leaving a mail that lists and
+never opens. The clock is the server's own `INTERNALDATE`, which nobody but the server sets.
+The reader still shows and sorts by the `Date:` header, because that is what the message says
+about itself.
 
 The window **slides**, which is what makes it a ceiling rather than a one-off tidy-up. Mail
 already stored is stripped back to headers once it falls out of the window — body, HTML,
@@ -550,10 +594,12 @@ removes one because a connection failed.
 
 | What | When | |
 | --- | --- | --- |
-| A message you trash or archive | You pressed it | Leaves the folder locally at once and is applied to IMAP on the next pass. With no Trash folder on the account, "delete" is an IMAP expunge — permanent, on the server. |
+| A message you trash or archive | You pressed it | Leaves the folder locally at once and is applied to IMAP on the next pass. It is a move, never a deletion: with no Trash folder on the account the action is refused rather than turned into an expunge. |
+| Everything in Trash | You pressed **Empty Trash**, in Trash, and confirmed | The only thing in meerail that destroys mail: `\Deleted` plus a UID `EXPUNGE`, aimed one message at a time. It cannot be reached from any other button — no ordinary delete, however many messages it covers, is ever re-read as this one. |
 | Mail deleted on your phone or in webmail | The server no longer lists its UID | meerail mirrors the server; a message deleted elsewhere goes here too. Only ever on a UID list the server has confirmed in full — see below. |
-| A folder | It is gone from the server's `LIST` | Its messages go with it, unless they are also filed elsewhere. Never on an empty `LIST`. |
-| Bodies and attachments of old mail | `content_window_months` is set | Headers stay; the mail still lists, threads and searches. Off by default. See [The content window](#the-content-window). |
+| A folder | It has been gone from the server's `LIST` for an hour | Its messages go with it, unless they are also filed elsewhere. Never on an empty `LIST`, and never on one absence: a Bridge that is still loading answers with part of the mailbox, so a folder that disappears is marked and kept — with all its mail — until it stays gone. |
+| A message no folder holds any more | At the end of a completed pass, hours after the last placement went | Almost always a reused UID after a `UIDVALIDITY` reset: the walk binds the number to the message that has it now, and the one it used to mean is left with no folder, invisible and still on disk. Never asked mid-pass, when a message is legitimately between folders, and never about one a queued action still names. |
+| Bodies and attachments of old mail | `content_window_months` is set | Headers stay; the mail still lists, threads and searches. Off by default. Age is counted from when the mail *arrived* (the server's `INTERNALDATE`), not from its `Date:` header — a header is written by the sender, and a window read from one could be aimed: date a message 1998 and its body would be stripped on the pass that stored it. See [The content window](#the-content-window). |
 | Everything for an account | `DELETE /api/accounts/{id}` | The one command that removes an account's mail wholesale. No button in the UI calls it. |
 
 Being offline is never a reason to delete anything, and the agent is written for machines
@@ -563,17 +609,56 @@ server that has been down since Friday.
 - **A connection that fails deletes nothing** — the pass ends and the next one picks up.
 - **A connection that answers *short* also deletes nothing.** This is the one that bites:
   Proton Bridge keeps serving while it cannot reach Proton, so it will answer `LIST` with no
-  folders, or a folder's `SEARCH` with a fraction of what it holds. The agent checks every
-  UID list against the message count `SELECT` reported before it removes anything, and an
-  empty `LIST` is never read as "every folder was deleted". It logs what it saw and leaves
-  your mail alone.
+  folders, with *some* of them, or a folder's `SEARCH` with a fraction of what it holds. The
+  agent checks every UID list against the message count `SELECT` reported before it removes
+  anything; an empty `LIST` is never read as "every folder was deleted"; and a folder missing
+  from one complete-looking `LIST` keeps its mail and is only removed after it has been
+  absent for an hour, because a partial answer and a folder somebody really deleted look
+  identical until one of them comes back. The log says which folders are being held that way.
 - **A new `UIDVALIDITY` does not empty the folder.** Bridge changes it for its own reasons —
   a re-login, a rebuilt cache. The agent re-walks the folder instead; mail it already holds
   is matched by `Message-ID` and keeps its content.
+- **And it does not let queued work land on the wrong message.** A UID only means something
+  within one `UIDVALIDITY`, so after a reset the number a queued delete is carrying can name
+  a message that arrived this morning. Every queued flag, move and delete records the epoch
+  it was written in and is checked against the folder the agent has just opened, one command
+  before it acts. On a mismatch it is dropped and said out loud — the flag or move is
+  re-derived from the mailbox on the next pass, and nothing is deleted on a guess.
 - **Filing works offline.** Archive and trash move the message in the app the moment you
   press them, not when the agent gets round to applying it. The copy you see in Archive is
   written locally and replaced by the server's own once the move lands; file the same
   message twice before that and it is still one move, to wherever it ended up.
+- **You can take a filing back.** A **Recent actions** box in the sidebar lists the last
+  dozen things that moved mail — trashed, archived, moved — one line per keypress rather
+  than per message, so a bulk delete of two hundred conversations is one entry and one
+  **Undo** (`z` takes back the newest; press it again to keep walking back). What Undo does
+  depends on how far the move has got, and only on that. Before the
+  agent has applied it, nothing was ever said to your mail server: the queued move is
+  deleted and the message goes back to the folder it came from with the UID and flags it
+  had. Once the move has landed and synced, Undo is an ordinary move in the opposite
+  direction. In the seconds between the two — the agent holding the row, or the move applied
+  and the folder not yet re-read — there is no UID to address the message by, and it says so
+  and asks you to press it again in a moment rather than guessing. Emptying the Trash is
+  listed too, greyed, because mail deleted from the server is not something any record here
+  can bring back.
+- **A mail can be put off until later.** *Remind me* (the bell in the reader toolbar, or `b`)
+  files the whole conversation into Archive now and puts it back in the inbox, unread, when
+  you said — *later today*, *this evening*, *tomorrow*, *this weekend*, *next week* (Monday
+  morning), or a date and time you pick. The times are worked out in your own timezone and
+  stored as an absolute instant, so a reminder set on the laptop means the same moment when
+  it comes back on the phone. A **Reminders** folder appears above Favorites while anything
+  is waiting (`g r` any time), every list draws a small clock on a conversation that is
+  coming back, and both the bell menu and a strip over the open conversation offer **Bring
+  back now** and **Clear reminder** — which are different things: one returns the mail, the
+  other leaves it filed and forgets the promise. Setting a second reminder on the same
+  conversation only moves the deadline.
+- **A reminder is late rather than lost.** The clock is watched by the server, so reminders
+  that fell due while it was off fire when it comes back, and the folder goes red while any
+  of them is overdue. Nothing about it reaches your mail server directly: parking a
+  conversation and bringing it back queue the same move an Archive keypress queues, so an
+  unreachable Bridge delays a reminder exactly as it delays everything else. If you file the
+  mail somewhere yourself while it waits, that wins — the reminder retires quietly rather
+  than dragging it back out of wherever you put it.
 - **Queued work is never dropped.** Marks, moves and above all messages you have sent sit in
   the queue until they succeed, retried on a backoff for as long as it takes. Nothing
   expires them.
@@ -593,6 +678,12 @@ server that has been down since Friday.
   buttons above are what you press when you get there first. `0`, the default, sends at the
   first opportunity. A delayed message goes out within one poll interval of its deadline
   rather than exactly on it — the agent is not woken for a send it would have to refuse.
+- **"Cancelled" never means "already sent".** An agent that picks a message up marks the
+  queue row as its own, and commits that, before it says a word to the SMTP server. While
+  that mark is there the row reads *Being sent right now* and all three buttons are refused:
+  cancelling a message that has already gone would be a lie, and re-queueing one mid-flight
+  is how a single message arrives twice. It is a window of seconds, and the only honest
+  answer inside it is that you were too late.
 - **The agent says the same thing in its log.** It prints every send that goes out and every
   one that fails, and — because a pass that dies at connect never gets as far as trying —
   lists what is still sitting in the outbox at startup and after a failed pass. A mailbox

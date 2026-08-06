@@ -2,16 +2,24 @@
 
 Login exchanges the password for a signed session cookie that lasts
 session_max_age_days (30 by default), so the browser asks once, not per visit.
+The cookie names a session row, so Log out ends it for good rather than only
+clearing the browser's copy — see app/deps.py.
+
 Failed attempts are rate-limited per source address — this endpoint is the one
 surface an internet-exposed install lets strangers hammer on.
 """
 
-from fastapi import APIRouter, HTTPException, Request, Response, status
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel
+from sqlalchemy.orm import Session as DBSession
 
 from core.config import get_settings
+from core.database import get_db
 from .. import sessions
-from ..deps import UI_SESSION_COOKIE, issue_ui_session, session_max_age_seconds, ui_password
+from ..deps import (
+    UI_SESSION_COOKIE, client_addr, is_secure_request, issue_ui_session,
+    revoke_ui_session, session_max_age_seconds, ui_password,
+)
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 settings = get_settings()
@@ -23,26 +31,44 @@ class LoginRequest(BaseModel):
     password: str
 
 
-def _client_addr(request: Request) -> str:
-    # Direct peer address. Behind a reverse proxy run uvicorn with
-    # --proxy-headers so this is the real client, not the proxy — otherwise the
-    # limiter would lock every user out together after one attacker's failures.
-    return request.client.host if request.client else "unknown"
-
-
 @router.get("/status")
 def auth_status() -> dict:
     return {"required": bool(ui_password())}
 
 
 @router.post("/login", status_code=204)
-def login(payload: LoginRequest, request: Request, response: Response) -> None:
+def login(payload: LoginRequest, request: Request, response: Response,
+          db: DBSession = Depends(get_db)) -> None:
     expected = ui_password()
     if not expected:
         # Nothing to log in to — an open install has no session to issue.
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No password is configured")
 
-    addr = _client_addr(request)
+    if not is_secure_request(request):
+        # The backstop, not the guard. app/main.py refuses to serve the shell
+        # over a plaintext connection at all, precisely because by the time a
+        # request reaches here the damage is done: the password is *in this
+        # request*, and refusing it does not take it back off the wire. This
+        # catches a client that got here some other way — a script, a stale tab
+        # loaded while the install was still on HTTPS.
+        #
+        # The Secure flag alone cannot help either: it is set from this same
+        # scheme, so a plain-HTTP deployment quietly issued a cookie that
+        # browsers were then free to send in the clear.
+        #
+        # An install that is genuinely reachable over HTTP only, and wants a
+        # password anyway, has two ways through: put TLS in front of it, or tell
+        # meerail about the proxy that already terminates TLS
+        # (server.trusted_proxies), which is what makes the scheme above true.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This connection is not encrypted, so signing in would send the "
+                   "password and the session cookie in the clear. Reach meerail over "
+                   "HTTPS — and if TLS is terminated by a proxy in front of it, set "
+                   "server.trusted_proxies so it can see that.",
+        )
+
+    addr = client_addr(request)
     retry_after = login_limiter.retry_after(addr)
     if retry_after:
         raise HTTPException(
@@ -58,7 +84,7 @@ def login(payload: LoginRequest, request: Request, response: Response) -> None:
     login_limiter.reset(addr)
     response.set_cookie(
         UI_SESSION_COOKIE,
-        issue_ui_session(),
+        issue_ui_session(db),
         max_age=session_max_age_seconds(),
         httponly=True,
         samesite="strict",
@@ -68,5 +94,15 @@ def login(payload: LoginRequest, request: Request, response: Response) -> None:
 
 
 @router.post("/logout", status_code=204)
-def logout(response: Response) -> None:
+def logout(response: Response,
+           session: str | None = Cookie(default=None, alias=UI_SESSION_COOKIE),
+           db: DBSession = Depends(get_db)) -> None:
+    """End this session — here, not only in the browser asking.
+
+    Deleting the cookie is the half a client can do for itself, and on its own
+    it was all this did: a copy of the cookie taken off the machine went on
+    working for the rest of its thirty days, because nothing recorded that the
+    session had ended. The row goes too, and every request checks for it.
+    """
+    revoke_ui_session(db, session)
     response.delete_cookie(UI_SESSION_COOKIE, path="/")

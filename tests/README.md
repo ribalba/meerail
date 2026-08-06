@@ -5,14 +5,34 @@
 - **`test_agent_sync_unit.py`** — cursor safety in the agent's sync loop, with
   `core.ingest` stubbed out (no server/DB).
 - **`test_tasks_unit.py`** — parsing the Meerato private URL that "Add Task"
-  posts to, and the create-task request body including the Backlog + move-to-Now
-  schedule "Send & Ticket" sends (no server/DB/Meerato).
+  posts to, the create-task request body including the Backlog + move-to-Now
+  schedule "Send & Ticket" sends, and which destinations the server will fetch
+  from at all (no server/DB/Meerato).
+- **`test_proxy_unit.py`** — whose `X-Forwarded-For`/`-Proto` this server
+  believes, which decides the session cookie's `Secure` flag and what the login
+  rate limiter counts as one client (no server/DB).
+- **`test_migration_unit.py`** — what the schema fixups in `init_db` may throw
+  away: a column still holding on-disk paths is not one of them (DB, no server).
+- **`test_api_bounds.py`** — what the read APIs do with input nobody would type
+  on purpose (negative page sizes, a hundred-million-year search window, a PATCH
+  field set to null): a 422 that says what to send, never a 500.
+- **`test_sessions_db.py`** — who the password gate lets in, against the real
+  session table: logging out ends the session for a copied cookie too, and the UI
+  password is not an API credential (DB, no server).
 - **`test_ingest.py`** — the ingest pipeline the agent owns: threading,
   cross-folder dedup, flag sync, vanished pruning, idempotent re-scan, account
   auto-registration, and Tika attachment extraction. Writes through
   `core.ingest` (exactly as the agent does) and asserts through the read API.
 - **`test_search.py` / `test_contacts.py` / `test_actions.py` / `test_compose.py`**
   — read APIs, the action queue, and compose, seeded via `dbfixture`.
+- **`test_undo.py`** — the Recent actions panel and Undo. The three outcomes are
+  the three tests worth having, and only how far the queued move has got tells
+  them apart: not applied yet (a true undo — the queue row goes and the
+  placements come back), the agent holding it or the move just landed (refused,
+  because there is no UID to address), and applied and synced (a move back).
+  Plus what a label server does to all three: a message whose only placement is
+  \All has no reverse move, and it is skipped rather than costing the rest of
+  the conversation its undo.
 - **`test_greenmail.py`** — drives the real `meerail-agent` binary against a live
   GreenMail IMAP server end-to-end (backfill, prune, flag write-back).
 

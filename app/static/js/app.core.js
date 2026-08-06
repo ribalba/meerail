@@ -58,7 +58,13 @@ App.api = {
   },
   async request(method, path, body) {
     const opts = { method, headers: {} };
-    if (body !== undefined) {
+    if (body instanceof FormData) {
+      // No Content-Type of ours: a multipart body needs the browser to write
+      // the header, boundary and all. Everything else about the request — the
+      // watchdog, the 401 replay — is the same, which is the point of it coming
+      // through here at all.
+      opts.body = body;
+    } else if (body !== undefined) {
       opts.headers["Content-Type"] = "application/json";
       opts.body = JSON.stringify(body);
     }
@@ -89,7 +95,17 @@ App.api = {
     }
     if (res.status === 204) return null;
     const ct = res.headers.get("content-type") || "";
-    return ct.includes("application/json") ? res.json() : res.text();
+    // Not `body` — that is this method's own parameter, and shadowing it here
+    // threw at parse time, which took the whole file (and so the whole app) with it.
+    const answer = ct.includes("application/json") ? await res.json() : await res.text();
+    // Anything that files mail hands back the id of the operation it created.
+    // Caught here, once, rather than at the five call sites that trash and
+    // archive things — the reader, the swipe, the bulk bar, the list and the
+    // keyboard all go through this method, and every one of them would
+    // otherwise need the same two lines and would be the place somebody forgot
+    // them. See app.undo.js::record for what it does with it.
+    if (answer && answer.op_id && App.undo) App.undo.record(path, answer);
+    return answer;
   },
   get(p) { return this.request("GET", p); },
   post(p, b) { return this.request("POST", p, b); },
@@ -133,9 +149,18 @@ App.api = {
     return this.get("/api/analytics/overview?" + new URLSearchParams(params).toString());
   },
 
+  // The Recent actions panel: what the last few keypresses did to the mail, and
+  // taking one back. Operations, not queue rows — one bulk delete is one entry.
+  recentActions(limit) { return this.get(`/api/actions/recent?limit=${limit}`); },
+  undoAction(opId) { return this.post(`/api/actions/${encodeURIComponent(opId)}/undo`); },
+
   requestSync() { return this.post("/api/sync/refresh"); },
   requestRecheck(email) { return this.post("/api/sync/recheck?email=" + encodeURIComponent(email)); },
   syncStatus() { return this.get("/api/sync/status"); },
+  dismissDropped() { return this.post("/api/sync/actions/dismiss"); },
+  createArchiveFolder(accountId) {
+    return this.post(`/api/sync/actions/create-archive?account_id=${accountId}`);
+  },
 
   markSeen(id, seen) { return this.post(`/api/messages/${id}/mark?seen=${seen ? 1 : 0}`); },
   flagMsg(id, flagged) { return this.post(`/api/messages/${id}/flag?flagged=${flagged ? 1 : 0}`); },
@@ -156,6 +181,29 @@ App.api = {
   // itself and deletes a chunk of everything matching it — see app.bulk.js.
   bulkTrash(items) { return this.request("POST", "/api/messages/bulk/trash", { items }); },
   bulkTrashAll(selector) { return this.request("POST", "/api/messages/bulk/trash-all", selector); },
+  // The one call that destroys mail, and the only one that has to say so: it
+  // deletes the Trash folder's contents from the server, a chunk per call.
+  // `confirm` is the server's requirement, not a formality — see
+  // app/routers/actions.py::bulk_empty_trash.
+  emptyTrash(mailboxId) {
+    return this.request("POST", "/api/messages/bulk/empty-trash",
+                        { mailbox_id: mailboxId, confirm: true });
+  },
+  // "Remind me": the conversation is filed away now and comes back at `due`.
+  // The instant is computed here rather than asked for by name because "next
+  // Monday, nine o'clock" is a question about this browser's calendar and
+  // timezone — the server has neither, and would get it wrong twice a year at
+  // the daylight-saving boundary. toISOString() sends it as absolute UTC.
+  remind(id, due) {
+    return this.post(`/api/messages/${id}/remind`, { due_at: due.toISOString() });
+  },
+  // restore=1 brings the mail back now, restore=0 leaves it filed and forgets
+  // the reminder. Two different intentions, so never inferred from one button.
+  unremind(id, restore) {
+    return this.del(`/api/messages/${id}/remind?restore=${restore ? 1 : 0}`);
+  },
+  reminders() { return this.get("/api/reminders"); },
+
   taskConfig() { return this.get("/api/tasks/config"); },
   saveTaskConfig(url) { return this.request("PUT", "/api/tasks/config", { url }); },
   taskOptions() { return this.get("/api/tasks/options"); },
@@ -184,22 +232,17 @@ App.api = {
     return this.put("/api/outbox/settings", { send_delay_seconds: seconds });
   },
   deleteAttachment(id) { return this.del(`/api/compose/attachments/${encodeURIComponent(id)}`); },
-  async uploadAttachment(file) {
+  // Multipart, so it cannot go through request() — that one JSON-encodes the
+  // body and sets a Content-Type, and a FormData upload needs the browser to
+  // set its own boundary. Everything else about it is the same call, and the
+  // part that matters is the 401: an upload is the slowest thing in the UI and
+  // therefore the likeliest to outlive a session, and it used to be the one
+  // request that answered that with a raw "401" in an alert instead of the
+  // password prompt every other request raises.
+  uploadAttachment(file) {
     const fd = new FormData();
     fd.append("file", file);
-    let res;
-    try {
-      res = await fetch("/api/compose/attachments", { method: "POST", body: fd });
-    } catch (err) {
-      App.conn.fail();
-      throw err;
-    }
-    App.conn.ok();
-    if (!res.ok) {
-      let d = res.statusText; try { d = (await res.json()).detail || d; } catch (_) {}
-      throw new Error(d);
-    }
-    return res.json();
+    return this.request("POST", "/api/compose/attachments", fd);
   },
 };
 
@@ -243,6 +286,8 @@ const ICON_PATHS = {
   stats: '<line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>',
   // A clock — mail whose body is outside the content window.
   clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+  // A bell — "remind me", and the folder of mail waiting on one.
+  bell: '<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>',
   // Tray with an arrow into it — save the attachment you are looking at.
   download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',
   // Arrow leaving a box — hand the attachment to the browser's own viewer.

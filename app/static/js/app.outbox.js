@@ -41,6 +41,14 @@ App.outbox = (function () {
   // waiting for its author, and saying "not going out — 3 failed attempts"
   // about mail they stopped themselves is answering a question nobody asked.
   function stateLabel(r) {
+    // Ahead of everything, including a stale error from a previous attempt:
+    // this one is happening right now, and it is the only state in the list
+    // that is about to stop being true on its own.
+    if (r.sending) return "Being sent right now";
+    // Parked like a cancelled message and the opposite of one: nobody stopped
+    // this, the server stopped answering. Saying "cancelled" would be a lie in
+    // the one direction that matters — it may already have arrived.
+    if (r.delivery_unknown) return "May already have been sent";
     if (r.held) return "Cancelled — not being sent";
     if (!r.queued) return "Not queued — an older agent gave up on it";
     if (r.error) return `Not going out — ${r.attempts} failed attempt${r.attempts === 1 ? "" : "s"}`;
@@ -200,23 +208,32 @@ App.outbox = (function () {
       : { label: "Try now", icon: "refresh",
           title: "Ask the agent to try this message now instead of at the end of its backoff" };
 
+    // While an agent is inside the SMTP conversation for this message, none of
+    // the three verbs is true any more: it is going, and the only honest thing
+    // the screen can do is say so. The server refuses them in this state
+    // regardless of what is on screen (app/routers/outbox.py) — this is so the
+    // refusal is not the first anyone hears of it.
+    const off = busy || r.sending ? " disabled" : "";
+    const sendingTitle = r.sending ? " title=\"This message is being sent right now\"" : "";
+
     // Cancel is only offered while there is still something to cancel. A held
     // message has already been stopped, and saying so twice would make the
     // button look like it had not worked the first time.
     const cancel = r.held ? "" : `
-      <button class="ob-btn" data-ob="cancel"${busy ? " disabled" : ""}
+      <button class="ob-btn" data-ob="cancel"${off}
         title="Stop this message going out — it stays here until you send it"
         >${App.icon("close", 15)} Cancel send</button>`;
 
-    return `<div class="ob-actions">
-      <button class="ob-btn" data-ob="retry"${busy ? " disabled" : ""}
+    return `<div class="ob-actions"${sendingTitle}>
+      <button class="ob-btn" data-ob="retry"${off}
         title="${App.esc(send.title)}"
         >${App.icon(send.icon, 15)} ${App.esc(send.label)}</button>
       ${cancel}
-      <button class="ob-btn danger" data-ob="discard"${busy ? " disabled" : ""}
+      <button class="ob-btn danger" data-ob="discard"${off}
         title="Take this message out of the queue — it will never be sent"
         >${App.icon("trash", 15)} Delete</button>
-      <span class="ob-action-status" id="ob-action-status"></span>
+      <span class="ob-action-status" id="ob-action-status"
+        >${r.sending ? "Being sent right now…" : ""}</span>
     </div>`;
   }
 
@@ -229,7 +246,19 @@ App.outbox = (function () {
     // The error is the reason this screen exists, so it goes above the message
     // rather than under it: whoever opened this row is not here to re-read
     // their own mail.
-    const why = m.held
+    const why = m.delivery_unknown
+      // The one state where sending again is a real decision rather than an
+      // obvious one, so the screen says what is and is not known and leaves it
+      // to the reader.
+      ? `<div class="ob-waiting">${App.icon("warning", 15)}
+           <span>This message was handed to the mail server, and the connection failed
+           before the server confirmed it. It may have been delivered and it may not,
+           and there is no way to ask. It has <strong>not</strong> been retried, because
+           sending again would deliver a second copy if the first one arrived —
+           <strong>Send now</strong> does exactly that, if you would rather risk the
+           duplicate than the silence. What the connection said:</span>
+         </div>${m.error ? `<pre class="ob-held-error">${App.esc(m.error)}</pre>` : ""}`
+      : m.held
       // A cancelled message can still carry the error from before it was
       // cancelled, and that error is often the reason it was: it stays on
       // screen, under a banner that no longer calls it a fault.

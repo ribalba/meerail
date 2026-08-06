@@ -22,7 +22,8 @@ from email.utils import parseaddr
 from core import ingest
 from core.database import SessionLocal
 from core.models import (
-    Account, Attachment, Mailbox, Message, MessageLocation, Outbound, PendingAction, utcnow,
+    Account, Attachment, Mailbox, Message, MessageLocation, Outbound, PendingAction,
+    Reminder, UiSession, utcnow,
 )
 
 
@@ -58,12 +59,22 @@ def _mailbox(db, account: Account, imap_name: str, role_hint: str = "",
 
 def ingest_raw_message(email: str, raw: bytes, uid: int = 1, folder: str = "INBOX",
                        flags: dict | None = None, role_hint: str = "",
-                       uidvalidity: int = 1) -> None:
-    """Ingest one raw message into a folder, exactly as a sync pass would."""
+                       uidvalidity: int = 1, received=None) -> None:
+    """Ingest one raw message into a folder, exactly as a sync pass would.
+
+    ``received`` is what the server's INTERNALDATE said — when the mail arrived,
+    which is the clock the content window is measured on. It defaults to the
+    message's own Date, which is the ordinary case (mail arrives when it is
+    sent); passing them apart is how a test stages a backdated message.
+    """
+    from core.mail.parse import parse_email
+
     with session() as db:
         account = ingest.get_or_create_account(db, email)
         mailbox = _mailbox(db, account, folder, role_hint, uidvalidity)
-        ingest.store_message(db, account, mailbox, uid, flags or {}, raw)
+        arrival = received if received is not None else parse_email(raw).date_sent
+        ingest.store_message(db, account, mailbox, uid, flags or {}, raw,
+                             received=arrival)
         ingest.advance_cursor(db, mailbox, uid)
 
 
@@ -108,16 +119,22 @@ def create_folder(email: str, name: str, role_hint: str = "") -> int:
 
 def record_placement(email: str, message_id: str, uid: int, folder: str,
                      flags: dict | None = None, role_hint: str = "",
-                     uidvalidity: int = 1) -> bool:
+                     uidvalidity: int = 1, size: int | None = None, date=None) -> bool:
     """Record a second folder placement for content already stored (Proton labels).
 
     Advances the cursor afterwards, as a real sync pass does — that is what
     refreshes the folder's denormalized counts.
+
+    ``size`` and ``date`` are what the server reported about this UID in the
+    header pass, and are what a real sync always has to hand. Passing them is how
+    a test says "and this UID really is that message"; leaving them out matches
+    by Message-ID alone.
     """
     with session() as db:
         account = ingest.get_or_create_account(db, email)
         mailbox = _mailbox(db, account, folder, role_hint, uidvalidity)
-        matched = ingest.record_known(db, account, mailbox, uid, flags or {}, message_id)
+        matched = ingest.record_known(db, account, mailbox, uid, flags or {}, message_id,
+                                      size=size, date=date)
         ingest.advance_cursor(db, mailbox, uid)
         return matched
 
@@ -163,16 +180,81 @@ def unplaced_uids(email: str, folder: str, uids: list[int]) -> list[int]:
         return ingest.unplaced_uids(db, mailbox, uids)
 
 
-def move_in_flight(email: str, message_id: str) -> bool:
+def move_in_flight(email: str, message_id: str | None, headers: bytes | None = None,
+                   date=None) -> bool:
+    """The question the repair asks before putting a placement back. ``headers``
+    and ``date`` are what it has to go on for mail whose sender wrote no
+    Message-ID."""
     with session() as db:
         account = ingest.get_or_create_account(db, email)
-        return ingest.has_move_in_flight(db, account, message_id)
+        return ingest.has_move_in_flight(db, account, message_id, headers=headers, date=date)
 
 
-def prune_folders(email: str, present_names: set[str]) -> int:
+def rethread(account_id: int) -> tuple[int, int]:
+    """Rebuild every thread_id for an account, as core.mail.rethread does when a
+    threading rule changes. Returns (messages, changed)."""
+    from core.mail.rethread import rethread_account
+
+    with session() as db:
+        return rethread_account(db, account_id)
+
+
+def prune_folders(email: str, present_names: set[str], after_hours: int = 0) -> int:
+    """One pass's folder prune. ``after_hours`` moves the pass's clock forward,
+    which is how a test says "this folder has been missing for that long" — a
+    folder is not removed on one absence (core/ingest.py::prune_mailboxes)."""
     with session() as db:
         account = ingest.get_or_create_account(db, email)
-        return ingest.prune_mailboxes(db, account, present_names)
+        return ingest.prune_mailboxes(db, account, present_names,
+                                      now=utcnow() + timedelta(hours=after_hours))
+
+
+def queue_move_for(email: str, subject: str) -> int:
+    """Queue a move naming a message, as the UI does when you archive it."""
+    with session() as db:
+        account = db.query(Account).filter(Account.email == email.lower()).one()
+        msg = db.query(Message).filter(Message.account_id == account.id,
+                                       Message.subject == subject).one()
+        action = PendingAction(account_id=account.id, message_pk=msg.id, type="move",
+                               payload={"from_folder": "INBOX", "uid": 1,
+                                        "uidvalidity": 1, "to_folder": "Archive"})
+        db.add(action)
+        db.flush()
+        return action.id
+
+
+def drop_placements(email: str, folder: str) -> int:
+    """Take a folder's placements away without touching the messages — what a
+    repointed UID leaves behind (see core.mail.store.upsert_location)."""
+    with session() as db:
+        account = db.query(Account).filter(Account.email == email.lower()).one()
+        mb = db.query(Mailbox).filter(Mailbox.account_id == account.id,
+                                      Mailbox.imap_name == folder).one()
+        rows = db.query(MessageLocation).filter(MessageLocation.mailbox_id == mb.id).all()
+        for loc in rows:
+            db.delete(loc)
+        return len(rows)
+
+
+def collect_orphans(email: str, after_hours: int = 0) -> int:
+    """Run the end-of-pass sweep for mail no folder points at any more.
+
+    ``after_hours`` moves the sweep's clock forward, which is how a test says
+    "and this has been unplaced since well before the pass started" — the window
+    core.ingest.delete_orphan_messages keeps between "no folder holds this" and
+    "no folder holds this yet".
+    """
+    with session() as db:
+        account = ingest.get_or_create_account(db, email)
+        return ingest.delete_orphan_messages(db, account,
+                                             now=utcnow() + timedelta(hours=after_hours))
+
+
+def folders_held_back(email: str) -> list[str]:
+    """Folders the server has stopped listing whose mail is being kept anyway."""
+    with session() as db:
+        account = ingest.get_or_create_account(db, email)
+        return ingest.deferred_folders(db, account)
 
 
 def report_presentation(email: str, values: dict) -> None:
@@ -228,12 +310,14 @@ def thumb_all(max_batches: int = 50) -> int:
 # --- Read helpers for asserting on agent-owned state ------------------------
 
 
-def pending_actions(email: str, type_: str | None = None) -> list[dict]:
-    """The action queue the agent would drain, as plain dicts."""
+def pending_actions(email: str, type_: str | None = None,
+                    status: str = "pending") -> list[dict]:
+    """The action queue the agent would drain, as plain dicts. ``status`` reads a
+    different slice of it — "leased" is a row an agent is applying right now."""
     with session() as db:
         account = db.query(Account).filter(Account.email == email.lower()).one()
         q = db.query(PendingAction).filter(PendingAction.account_id == account.id,
-                                           PendingAction.status == "pending")
+                                           PendingAction.status == status)
         if type_:
             q = q.filter(PendingAction.type == type_)
         return [{"id": a.id, "type": a.type, "payload": a.payload,
@@ -256,6 +340,99 @@ def apply_actions(email: str, minutes_ago: int = 0) -> int:
             a.status = "done"
             a.attempts += 1
             a.updated_at = utcnow() - timedelta(minutes=minutes_ago)
+        return len(rows)
+
+
+def fail_actions(email: str, attempts: int, error: str = "move failed: nope") -> int:
+    """Leave every queued action having failed `attempts` times, as a run of
+    unsuccessful passes does. Nothing retires it — the agent never gives up on a
+    failure — so the row stays pending, with the count and the reason on it.
+    """
+    with session() as db:
+        account = db.query(Account).filter(Account.email == email.lower()).one()
+        rows = db.query(PendingAction).filter(PendingAction.account_id == account.id,
+                                              PendingAction.status == "pending").all()
+        for a in rows:
+            a.attempts = attempts
+            a.error = error
+            a.updated_at = utcnow()
+        return len(rows)
+
+
+def refuse_writes(email: str, folder: str) -> None:
+    """Mark a folder as one the server will not accept mail into, which is what
+    the agent writes down the first time it is told so (actions._mark_write_refused)."""
+    with session() as db:
+        account = db.query(Account).filter(Account.email == email.lower()).one()
+        mailbox = db.query(Mailbox).filter(Mailbox.account_id == account.id,
+                                           Mailbox.imap_name == folder).one()
+        mailbox.writes_refused_at = utcnow()
+
+
+def drop_actions(email: str, status: str, error: str) -> int:
+    """Take every queued action out of the queue the way the agent does when it
+    decides one cannot be carried out — "stale" for a UID that no longer names
+    anything, "refused" for a destination the server will not take."""
+    with session() as db:
+        account = db.query(Account).filter(Account.email == email.lower()).one()
+        rows = db.query(PendingAction).filter(PendingAction.account_id == account.id,
+                                              PendingAction.status == "pending").all()
+        for a in rows:
+            a.status = status
+            a.error = error
+            a.updated_at = utcnow()
+        return len(rows)
+
+
+def set_mailbox_role(email: str, folder: str, role: str) -> None:
+    """Put a folder's role back to what an older pass recorded.
+
+    ``role`` is derived once, when the folder is first listed, and then stored —
+    so a row written before a flag was published, or during a pass where the
+    server answered LIST without its SPECIAL-USE flags, keeps whatever it got.
+    That is not hypothetical (it is how an account with an Archive folder ended
+    up archiving into All Mail), and it is not reachable through the fixture's
+    ingest path, which always derives the role correctly.
+    """
+    with session() as db:
+        account = db.query(Account).filter(Account.email == email.lower()).one()
+        mailbox = db.query(Mailbox).filter(Mailbox.account_id == account.id,
+                                           Mailbox.imap_name == folder).one()
+        mailbox.role = role
+
+
+def reminder_rows(email: str) -> list[dict]:
+    """Every reminder on an account, whatever state it is in.
+
+    The HTTP list only shows the pending ones — that is what the folder is —
+    so this is how a test asserts that a fired reminder was retired rather than
+    quietly left to fire again.
+    """
+    with session() as db:
+        account = db.query(Account).filter(Account.email == email.lower()).one()
+        rows = (db.query(Reminder).filter(Reminder.account_id == account.id)
+                .order_by(Reminder.id).all())
+        return [{"id": r.id, "message_pk": r.message_pk, "thread_id": r.thread_id,
+                 "state": r.state, "due_at": r.due_at, "fired_at": r.fired_at,
+                 "error": r.error, "parked": r.parked,
+                 "park_mailbox_id": r.park_mailbox_id} for r in rows]
+
+
+def make_reminder_due(email: str, seconds_ago: int = 5) -> int:
+    """Move an account's pending reminders into the past.
+
+    What waiting until Monday looks like from a test: the deadline is an
+    absolute instant, so backdating it is the same event as the clock reaching
+    it — and the worker (app/workers.py) then brings the mail back on its next
+    tick with nothing else staged.
+    """
+    with session() as db:
+        account = db.query(Account).filter(Account.email == email.lower()).one()
+        rows = (db.query(Reminder)
+                .filter(Reminder.account_id == account.id, Reminder.state == "pending")
+                .all())
+        for r in rows:
+            r.due_at = utcnow() - timedelta(seconds=seconds_ago)
         return len(rows)
 
 
@@ -295,6 +472,28 @@ def stored_raw_mime(email: str, message_id: str) -> bytes | None:
                 .filter(Message.account_id == account.id,
                         Message.message_id == message_id)
                 .one().raw_mime)
+
+
+def drop_sessions() -> None:
+    """Take every browser session away — what a logout does to one of them, and
+    what a purge or a lost row does to all."""
+    with session() as db:
+        db.query(UiSession).delete()
+
+
+def expire_sessions() -> None:
+    """Age every session out, as thirty days would."""
+    with session() as db:
+        for row in db.query(UiSession).all():
+            row.expires_at = utcnow() - timedelta(seconds=1)
+
+
+def account_row(email: str) -> dict:
+    """The account's stored presentation, straight from the table."""
+    with session() as db:
+        account = db.query(Account).filter(Account.email == email.lower()).one()
+        return {"label": account.label, "color": account.color,
+                "active": account.active, "footer": account.footer}
 
 
 def message_count(email: str) -> int:
@@ -344,6 +543,55 @@ def mark_outbound_sent(outbound_id: int) -> None:
 def _send_actions(db, outbound_id: int) -> list[PendingAction]:
     return [a for a in db.query(PendingAction).filter(PendingAction.type == "send").all()
             if (a.payload or {}).get("outbound_id") == outbound_id]
+
+
+def lease_actions(email: str) -> int:
+    """Mark this account's queued actions as an agent is applying them right now.
+
+    What ``_lease`` writes and commits before the first IMAP or SMTP command
+    (agent/actions.py) — the state in which the UI must not rewrite the row it is
+    holding.
+    """
+    with session() as db:
+        account = db.query(Account).filter(Account.email == email.lower()).one()
+        rows = db.query(PendingAction).filter(PendingAction.account_id == account.id,
+                                              PendingAction.status == "pending").all()
+        for action in rows:
+            action.status = "leased"
+            action.updated_at = utcnow()
+        return len(rows)
+
+
+def finish_send_action(outbound_id: int) -> None:
+    """Settle only the queue row, leaving the Outbound as the caller found it.
+
+    Not a state the agent ever commits — it writes both together — but exactly
+    what a request that read the Outbound row a moment *before* that commit goes
+    on to see: its own stale "queued", and a queue row that has finished. Which
+    is the whole of the race, and the only way to stage it from outside.
+    """
+    with session() as db:
+        for action in _send_actions(db, outbound_id):
+            action.status = "done"
+            action.attempts += 1
+            action.updated_at = utcnow()
+
+
+def lease_send_action(outbound_id: int) -> None:
+    """Put a send in the state an agent leaves it in while it is inside the SMTP
+    conversation for it: claimed, written down, and not yet settled. See
+    agent/actions.py::_lease — this is what the Outbox has to refuse against."""
+    with session() as db:
+        for action in _send_actions(db, outbound_id):
+            action.status = "leased"
+            action.updated_at = utcnow()
+
+
+def send_actions_for(outbound_id: int) -> list[dict]:
+    """Every queue row driving one message's delivery, finished ones included —
+    which is how a test says "and no second send was queued"."""
+    with session() as db:
+        return [{"id": a.id, "status": a.status} for a in _send_actions(db, outbound_id)]
 
 
 def send_action_state(outbound_id: int) -> dict | None:

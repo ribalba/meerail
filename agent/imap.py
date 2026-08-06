@@ -223,6 +223,25 @@ class _Ops:
         return guarded
 
 
+def refused(exc: BaseException) -> bool:
+    """Did the server consider this command and say no?
+
+    The distinction is between an answer and a silence. A tagged NO or BAD is
+    the server's verdict on the command as sent — "operation not allowed",
+    "over quota", "no such mailbox" — and asking again in fifteen minutes puts
+    the same command to the same server for the same answer. A dropped socket, a
+    read timeout, the watchdog shutting the connection down are not verdicts at
+    all: nothing was decided, and the retry is the whole point.
+
+    IMAPClient draws the same line with imaplib's own two classes, which is why
+    this can be a type check rather than a search through the error text:
+    ``Error`` for a command the server refused, its ``AbortError`` subclass for a
+    conversation that broke. Anything else — OSError, socket.timeout — never got
+    an answer either.
+    """
+    return isinstance(exc, IMAPClient.Error) and not isinstance(exc, IMAPClient.AbortError)
+
+
 def flags_to_dict(flags: tuple) -> dict:
     known = {b"\\seen": "seen", b"\\flagged": "flagged", b"\\answered": "answered",
              b"\\draft": "draft", b"\\deleted": "deleted"}
@@ -521,16 +540,28 @@ class Bridge:
                                  self.client.search, ["ALL"]))
 
     def fetch_headers(self, uids: list[int]) -> dict[int, dict]:
-        """Cheap pass: FLAGS, Message-ID, Date and size — no body.
+        """Cheap pass: FLAGS, size, and the four headers that identify a message
+        — no body.
 
-        The date is here because the content window is decided before the body
-        is ever asked for, and this pass already runs over every new UID: two
-        more header fields cost nothing next to a second round trip. RFC822.SIZE
-        comes along for the same reason — for a message we only take the headers
-        of, it is the only place the real size can come from.
+        The date is here because the content window is decided before the body is
+        ever asked for, and this pass already runs over every new UID: a few more
+        header fields cost nothing next to a second round trip. RFC822.SIZE comes
+        along for the same reason — for a message we only take the headers of, it
+        is the only place the real size can come from.
+
+        From and Subject are here because this pass is also where the agent
+        decides *not* to fetch a message: one whose Message-ID it already holds
+        is taken to be that message and never downloaded. A Message-ID is written
+        by the sender, and two different messages can carry the same one — so the
+        decision needs the same evidence the full ingest would use, and this is
+        the only chance to gather it without paying for the body. The raw block
+        is handed on rather than picked apart here: what those fields *mean* is
+        core.mail.parse's business, and both sides of the comparison have to read
+        them the same way.
         """
         resp = self._fetch(uids, [b"FLAGS", b"INTERNALDATE", b"RFC822.SIZE",
-                                  b"BODY.PEEK[HEADER.FIELDS (MESSAGE-ID DATE)]"])
+                                  b"BODY.PEEK[HEADER.FIELDS "
+                                  b"(MESSAGE-ID DATE FROM SUBJECT)]"])
         out = {}
         for uid, data in resp.items():
             hdr = _body_bytes(data)
@@ -540,7 +571,13 @@ class Bridge:
                 "message_id": message_id,
                 "flags": flags_to_dict(data.get(b"FLAGS", ())),
                 "date": _sent_date(hdr, data.get(b"INTERNALDATE")),
+                # When this server took delivery, which unlike the Date header
+                # is not written by the sender. Everything about *retention*
+                # reads this one: a message dated 1998 is displayed and sorted
+                # as 1998, and is a message that arrived today.
+                "received": _to_naive_utc(data.get(b"INTERNALDATE")),
                 "size": int(data.get(b"RFC822.SIZE") or 0),
+                "headers": hdr,
             }
         return out
 

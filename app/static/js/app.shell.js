@@ -54,6 +54,14 @@ App.shell = (function () {
     // not served by /api/messages — see App.outbox.
     register({ key: "outbox", title: "Outbox", outbox: true, params: {} });
 
+    // Mail put off until later. A query rather than a folder — the messages are
+    // filed in Archive, and this selects them by the reminder waiting on them
+    // (app/reminders.py) — so it is served by /api/messages like every other
+    // list and needs no renderer of its own. Registered unconditionally, so
+    // "g r" and a reload while standing in it both resolve.
+    register({ key: "reminders", title: "Reminders", showAccount: true,
+               params: { scope: "reminders" } });
+
     let favs = "";
     if (multi) {
       register({ key: "unified", title: "All Inboxes", showAccount: true, ageTint: true,
@@ -73,6 +81,17 @@ App.shell = (function () {
       favs += mailboxRow(selections["outbox"], failing ? "warning" : "sent", "Outbox",
         unsent, activeKey, null, failing ? "stuck" : "");
     }
+    // Same rule as the Outbox: shown while it has something in it, and while it
+    // is the folder on screen, so the row does not vanish under someone who has
+    // just brought back the last thing in it. It goes red when a reminder is
+    // overdue — the moment has passed and the mail has not landed — which means
+    // the same thing here as a stuck send does there: it is late, not lost.
+    const waiting = sidebar.smart.reminders_pending || 0;
+    if (waiting || activeKey === "reminders") {
+      const late = sidebar.smart.reminders_overdue || 0;
+      favs += mailboxRow(selections["reminders"], "bell", "Reminders",
+        waiting, activeKey, null, late ? "stuck" : "");
+    }
     // Pinned folders. Keys are distinct from the account-tree copy of the same
     // folder so both rows can carry their own active state.
     for (const acc of sidebar.accounts) {
@@ -80,8 +99,11 @@ App.shell = (function () {
         if (!mb.favorite) continue;
         const key = "fav-" + mb.id;
         const title = multi ? `${mb.display_name} — ${acc.label || acc.email}` : mb.display_name;
+        // `role` rides along because one bulk action is not the same action in
+        // every folder: Delete files mail in Trash, and in Trash itself there is
+        // nowhere left to file it — see app.bulk.js.
         register({ key, title, showAccount: false, ageTint: mb.role === "inbox",
-                   params: { mailbox_id: mb.id } });
+                   role: mb.role, params: { mailbox_id: mb.id } });
         favs += mailboxRow(selections[key], App.roleIcon(mb.role), mb.display_name,
           mb.unread, activeKey, { id: mb.id, on: true });
       }
@@ -100,7 +122,7 @@ App.shell = (function () {
       for (const mb of acc.mailboxes) {
         const key = "mb-" + mb.id;
         register({ key, title: mb.display_name, showAccount: false, ageTint: mb.role === "inbox",
-                   params: { mailbox_id: mb.id } });
+                   role: mb.role, params: { mailbox_id: mb.id } });
         html += mailboxRow(selections[key], App.roleIcon(mb.role), mb.display_name, mb.unread,
           activeKey, { id: mb.id, on: mb.favorite });
       }
@@ -305,6 +327,10 @@ App.shell = (function () {
       if (!$("#settings-modal").hidden) renderSettingsAccounts();
       // Activity of any kind is evidence about the agent — recheck its health.
       App.status.refresh();
+      // An action's queue row changes state as the agent works through it, and
+      // "Undo" on a move that has just landed does something different from
+      // "Undo" on one still waiting. The panel rides the same debounce.
+      if (App.undo) App.undo.refresh();
       // Don't clobber a live search result set with the folder list.
       if (!App.search || !App.search.isActive()) await loadList(true);
     }, 500);
@@ -362,6 +388,11 @@ App.shell = (function () {
   }
 
   function currentTitle() { return selection ? selection.title : ""; }
+
+  // The role of the folder on screen ("trash", "inbox", …), or "" for the smart
+  // rows, which are queries rather than folders. Read by app.bulk.js, which has
+  // one button whose meaning depends on it.
+  function currentRole() { return (selection && selection.role) || ""; }
 
   // Called after an action changed what the list should show. loadList() bails
   // while a search is up (it would replace the results with the folder), so the
@@ -650,6 +681,7 @@ App.shell = (function () {
   function goto(kind) {
     if (kind === "flagged") return select(selections["flagged"]);
     if (kind === "outbox") return select(selections["outbox"]);
+    if (kind === "reminders") return select(selections["reminders"]);
     if (kind === "unified" && selections["unified"]) return select(selections["unified"]);
     if (!sidebar || !sidebar.accounts.length) return;
     const acc = sidebar.accounts[0];
@@ -725,6 +757,7 @@ App.shell = (function () {
       App.bulk.init();
       App.tasks.init();
       App.status.init();
+      App.undo.init();
       App.stats.init();
       // Last of the initialisers and deliberately fire-and-forget: an update
       // notice is the least urgent thing on the page, and it must not be able
@@ -743,7 +776,8 @@ App.shell = (function () {
   }
 
   return { boot, currentMailboxId, mailboxesFor, accounts, reloadList, goto, closeSettings, settingsOpen,
-           closeFolder, folderOpen, listSelector, currentTitle, listTotal: () => listTotal,
+           closeFolder, folderOpen, listSelector, currentTitle, currentRole,
+           listTotal: () => listTotal,
            moveFolder, moveFolderAndOpen, openFocusedFolder, setFolderKeyFocus };
 })();
 

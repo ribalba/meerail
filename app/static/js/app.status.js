@@ -230,6 +230,142 @@ App.status = (function () {
     </div>`;
   }
 
+  // --- Queued changes that are not reaching the server ---
+  // The other half of the outbox story. A move or a flag change is applied here
+  // the moment you press the key and queued for the agent to repeat against
+  // IMAP; when that write-back stops working there is nothing on screen to say
+  // so — the message is already showing the change — and the app goes on
+  // disagreeing with the server in silence. So the count comes to the same place
+  // the outbox does, in the same words: still being retried, or given up on.
+  function actions() {
+    const a = latest && latest.actions;
+    return a && (a.stuck || a.dropped) ? a : null;
+  }
+
+  // Three different pieces of news, and only two of them are a problem.
+  //
+  //   stuck    something you did has not reached the server yet and is still
+  //            being tried. It will keep failing until the cause is fixed.
+  //   refused  the server said no to the destination. It will say no again, so
+  //            the account needs changing before that key works at all.
+  //   stale    the change was skipped because meerail could no longer be sure
+  //            which message it named. Nothing is wrong with anything; doing it
+  //            again is the whole of the fix, and it does not recur.
+  //
+  // Only the first two are faults, and this is what says so — a red box for the
+  // third would be warning somebody about a thing they cannot act on and do not
+  // need to. It decides the icon, the colour, and whether the toolbar goes red.
+  function actionsTone(ac) {
+    return ac.stuck || ac.dropped_kind !== "stale" ? "warn" : "note";
+  }
+
+  function actionsLabel(ac) {
+    if (ac.stuck) {
+      const what = ac.stuck === 1 ? "1 change" : `${num(ac.stuck)} changes`;
+      return `${what} not reaching the server`;
+    }
+    const n = ac.dropped === 1 ? "1 change" : `${num(ac.dropped)} changes`;
+    return ac.dropped_kind === "stale" ? `${n} were skipped`
+                                       : `${n} could not be made`;
+  }
+
+  // Written for somebody reading their mail, not for somebody reading the
+  // queue. Every one of these has to answer the three questions the box itself
+  // raises: is my mail all right, do I have to do something, will it come back.
+  // Whether anything below the notice will actually repair it. The server
+  // answers this per account, because the advice these refusals used to carry —
+  // go and make an Archive folder — is only true for an account that has not got
+  // one, and was being printed at accounts that had. See sync._dropped_fix.
+  function droppedSub(kind, fix) {
+    if (kind === "refused") {
+      return `Your mail server will not file mail into that folder, so the change
+              was not made. Nothing on the server changed and no mail is lost —
+              ${fix
+                ? `but this will happen again every time, because it is the
+                   folder that is the problem, not this attempt. The fix is
+                   below.`
+                : `and this account already has somewhere to archive to, so there
+                   is nothing to create. The change simply could not be made;
+                   doing it again is all it needs.`}`;
+    }
+    if (kind === "stale") {
+      return `Filing or flagging that meerail could no longer match to a message
+              for certain — usually because the mail server reorganised the
+              folder in between, which Proton Bridge does when it signs in again.
+              It was skipped rather than applied to the wrong message.
+              <strong>Your mail is fine: nothing was changed, nothing was deleted,
+              nothing is lost.</strong> You do not have to do anything, and this
+              notice disappears on its own. If those changes mattered — a message
+              you archived or flagged — simply do it again; the messages are back
+              in the folder your server has them in after the next check, or
+              straight away with <em>Recheck all mail</em> below.`;
+    }
+    return `Some of these were refused by the mail server and some could no longer
+            be matched to a message for certain. Nothing on the server changed and
+            no mail is lost. ${fix
+              ? `The unmatched ones only need doing again; the refused one needs
+                 the fix below first.`
+              : `They only need doing again — there is nothing to repair on the
+                 account itself.`}`;
+  }
+
+  // What can be pressed about a notice reporting something already over.
+  //
+  // Dismiss is always there, and is the point: this is a record of the past, so
+  // without it the notice stood for a full day no matter what the reader did
+  // about it — including fixing the cause, which is the one case where going on
+  // warning them is actively wrong. The repair sits beside it only when the
+  // server says there is one to make.
+  function droppedActions(ac) {
+    if (!ac.dropped) return "";
+    const fix = ac.dropped_fix;
+    const repair = fix && fix.kind === "create_archive"
+      ? `<button class="ag-btn" data-fix-archive="${App.esc(String(fix.account_id))}">
+           Create an Archive folder</button>
+         <span class="ag-btn-hint">Makes <strong>${App.esc(fix.name)}</strong> on the
+           server for ${App.esc(fix.label)}, which is what this account is missing.
+           The agent creates it on its next pass, and archiving works from then on.</span>`
+      : "";
+    return `<div class="ag-recheck">
+      ${repair}
+      <button class="ag-btn ${repair ? "ag-btn-quiet" : ""}" data-dismiss-dropped>Dismiss</button>
+      ${repair ? "" : `<span class="ag-btn-hint">Clears this notice. Anything that
+        fails after this brings it back on its own.</span>`}
+    </div>`;
+  }
+
+  function actionsBlock() {
+    const ac = actions();
+    if (!ac) return "";
+    const tone = actionsTone(ac);
+    // Deliberately not the same reassurance the outbox gets. A queued send is
+    // still going to be sent; a queued move that keeps being refused is a
+    // difference between what this app shows and what the server holds, and the
+    // honest thing to say is which side is now believed.
+    const sub = ac.stuck
+      ? `meerail files, flags and deletes here first, then repeats it to your mail
+         server. These have not got through yet and are still being retried — the
+         reason is below, and they go through by themselves as soon as it is fixed.
+         Nothing is lost. Until then, where your server has this mail is what the
+         app falls back to showing.`
+      : droppedSub(ac.dropped_kind, ac.dropped_fix);
+    const oldest = ac.stuck && ac.oldest_at
+      ? ` · oldest ${App.esc(App.relTime(ac.oldest_at))}` : "";
+    // The raw reason is the actionable part of a fault and clutter on a notice:
+    // "the folder was rebuilt" adds nothing to the sentence above it, and a line
+    // of exception text is what makes a harmless message look alarming.
+    const why = tone === "warn" ? (ac.error || ac.dropped_error) : null;
+    return `<div class="ag-outbox ${tone === "warn" ? "stuck" : ""}">
+      <div class="ob-head">
+        ${App.icon(tone === "warn" ? "warning" : "info", 15)}
+        <span>${App.esc(actionsLabel(ac))}${oldest}</span>
+      </div>
+      <div class="ob-sub">${sub}</div>
+      ${why ? `<pre>${App.esc(why)}</pre>` : ""}
+      ${droppedActions(ac)}
+    </div>`;
+  }
+
   // "A mail pass is running somewhere" — drives the toolbar spinner. `active`
   // is the agent's own flag, cleared in the finally block of the pass, so it
   // survives a crash mid-folder. Mail only: attachment indexing has its own
@@ -374,22 +510,34 @@ App.status = (function () {
 
     const accounts = latest.accounts || [];
     const bad = accounts.filter(isBad);
-    btn.classList.toggle("warn", bad.length > 0);
-    btn.innerHTML = App.icon(bad.length ? "warning" : "activity", 17);
-    btn.title = bad.length
-      ? `Agent problem — ${summarize(bad)}`
+    // A queue that will not drain is a fault of the same kind: the agent may be
+    // running and syncing perfectly while everything this app asks it to write
+    // back is being refused, and that state used to reach the screen nowhere at
+    // all. A sick account is the louder of the two, so it keeps the sentence.
+    //
+    // Only the faults, though. A change that was skipped because it could not be
+    // matched to a message is news for the panel and nothing more: it needs no
+    // decision, it does not recur, and a red toolbar over it teaches people that
+    // the red toolbar does not mean anything.
+    const all = actions();
+    const ac = all && actionsTone(all) === "warn" ? all : null;
+    const trouble = bad.length > 0 || !!ac;
+    btn.classList.toggle("warn", trouble);
+    btn.innerHTML = App.icon(trouble ? "warning" : "activity", 17);
+    btn.title = trouble
+      ? `Agent problem — ${bad.length ? summarize(bad) : actionsLabel(ac)}`
       : "Agent status";
 
     // No accounts at all is the first-run state, not a fault. The empty message
     // list already explains it, so a red strip on top would just be noise.
-    if (!bad.length || !accounts.length) {
+    if (!trouble || !accounts.length) {
       strip.hidden = true;
       return;
     }
     strip.hidden = false;
     strip.innerHTML =
       `<span class="aw-icon">${App.icon("warning", 14)}</span>` +
-      `<span class="aw-text">${App.esc(summarize(bad))}</span>`;
+      `<span class="aw-text">${App.esc(bad.length ? summarize(bad) : actionsLabel(ac))}</span>`;
   }
 
   function summarize(bad) {
@@ -470,6 +618,41 @@ App.status = (function () {
     refresh();
   }
 
+  // Both of these re-read rather than patching `latest` locally, so what the
+  // panel shows next is what the server will actually act on — the same reason
+  // requestRecheck does. The buttons carry their own state meanwhile: the modal
+  // re-renders on a poll, and a button that looked untouched for two seconds is
+  // one people press twice.
+  async function createArchive(accountId, btn) {
+    btn.disabled = true;
+    btn.textContent = "Creating…";
+    try {
+      await App.api.createArchiveFolder(accountId);
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = "Create an Archive folder";
+      alert(`Could not ask for the folder: ${e.message}`);
+      return;
+    }
+    // The folder does not exist yet — the agent makes it on its next pass and
+    // the LIST that follows registers it. Saying so is the honest report, and
+    // dismissing here would hide the notice before the fix had landed.
+    btn.textContent = "Requested — the agent creates it on its next pass";
+    refresh();
+  }
+
+  async function dismissDropped(btn) {
+    btn.disabled = true;
+    try {
+      await App.api.dismissDropped();
+    } catch (e) {
+      btn.disabled = false;
+      alert(`Could not dismiss this: ${e.message}`);
+      return;
+    }
+    refresh();
+  }
+
   function renderModal() {
     const body = $("#agent-body");
     if (!latest) { body.innerHTML = `<p class="muted small">Loading…</p>`; return; }
@@ -483,6 +666,7 @@ App.status = (function () {
     // whole agent rather than to any one address.
     body.innerHTML =
       outboxBlock() +
+      actionsBlock() +
       indexBlock() +
       `<ul class="ag-list">${accounts.map(accountCard).join("")}</ul>` +
       `<p class="muted small">The agent syncs on its own schedule and writes
@@ -525,8 +709,12 @@ App.status = (function () {
     // Delegated: the modal body is re-rendered on every poll, so per-button
     // listeners would not survive.
     $("#agent-body").addEventListener("click", (e) => {
-      const btn = e.target.closest("[data-recheck]");
-      if (btn) requestRecheck(btn.dataset.recheck, btn);
+      const recheck = e.target.closest("[data-recheck]");
+      if (recheck) return requestRecheck(recheck.dataset.recheck, recheck);
+      const fix = e.target.closest("[data-fix-archive]");
+      if (fix) return createArchive(Number(fix.dataset.fixArchive), fix);
+      const dismiss = e.target.closest("[data-dismiss-dropped]");
+      if (dismiss) return dismissDropped(dismiss);
     });
     refresh();   // schedules the first poll itself
   }

@@ -5,6 +5,7 @@ from datetime import timedelta
 
 import dbfixture
 from conftest import T0, ingest_one
+from core.mail.store import STUCK_AFTER
 from helpers import api, make_message
 
 
@@ -138,8 +139,14 @@ def test_archive_thread_clears_every_message_and_every_folder(account):
     assert len([m for m in moves if m["payload"]["to_folder"] == "Archive"]) == 3
 
 
-def test_archive_thread_is_idempotent(account):
-    """A second press must not 400 on messages already sitting in Archive."""
+def test_archiving_a_conversation_twice_says_it_is_already_filed(account):
+    """A second press moves nothing, and says so.
+
+    It used to answer 200 with `moved: 0`, which the reader shows as a
+    successful archive: the row leaves the list, the next refresh puts it back,
+    and nothing anywhere explains why. The same silence is what made Delete look
+    broken in Trash — see test_deleting_something_already_in_trash_says_so.
+    """
     email, aid = account["email"], account["id"]
     tok = "IDEMTOK" + uuid.uuid4().hex[:6]
     mid_rfc = f"i-{uuid.uuid4().hex}@t"
@@ -155,7 +162,8 @@ def test_archive_thread_is_idempotent(account):
     code, first = api("POST", f"/api/messages/threads/{thread_id}/archive?account_id={aid}")
     assert code == 200 and first["moved"] == 1
     code, again = api("POST", f"/api/messages/threads/{thread_id}/archive?account_id={aid}")
-    assert code == 200 and again["moved"] == 0
+    assert code == 409
+    assert "already in" in again["detail"]
 
 
 def test_archive_falls_back_to_all_mail(account):
@@ -183,6 +191,215 @@ def test_archive_falls_back_to_all_mail(account):
 
     moves = [x for x in _actions(email) if x["type"] == "move"]
     assert [m for m in moves if m["payload"]["to_folder"] == "[Gmail]/All Mail"]
+
+
+def test_archive_prefers_a_folder_called_archive_over_all_mail(account):
+    """The fallback above is for accounts with nowhere else to file, and this
+    account has somewhere: a folder called Archive whose role was never recorded.
+
+    ``role`` is derived once and stored, so a row written before the server
+    published its SPECIAL-USE flags keeps ``custom`` for good — and the archive
+    then went to \\All, which on Proton is a move the server refuses. Every
+    press queued another one, none of them ever ran, and the app went on showing
+    the mail as filed.
+    """
+    email, aid = account["email"], account["id"]
+    tok = "NAMEDARCH" + uuid.uuid4().hex[:6]
+    ingest_one(email, aid, tok)
+    _seed_folder(email, "Archive", "\\Archive")
+    dbfixture.ingest_raw_message(email, make_message(
+        f"<seed-{uuid.uuid4().hex}@t>", "Seed", "x@y.com", email, "seed", T0),
+        uid=1, folder="All Mail", role_hint="\\All")
+    # What the account actually looked like: the folder is there, the role is not.
+    dbfixture.set_mailbox_role(email, "Archive", "custom")
+
+    _, r = api("GET", f"/api/search?q={tok}&account_id={aid}")
+    code, body = api("POST", f"/api/messages/threads/{r['rows'][0]['thread_id']}"
+                             f"/archive?account_id={aid}")
+
+    assert code == 200, body
+    moves = [x for x in _actions(email) if x["type"] == "move"]
+    assert [m["payload"]["to_folder"] for m in moves] == ["Archive"]
+
+
+def test_archive_refuses_when_all_mail_is_the_only_target_and_the_server_said_no(account):
+    """Once the agent has been told no, the app stops queueing the same move.
+
+    \\All is a destination on Gmail and not one on Proton, and only the agent
+    ever finds that out — the app picks the folder and has no connection to try
+    it with. So the refusal is written down (Mailbox.writes_refused_at) and read
+    here: the keypress fails, at the keypress, saying what the account is
+    missing. Before this it succeeded, and the failure arrived fifteen minutes
+    later in a log nobody was reading.
+    """
+    email, aid = account["email"], account["id"]
+    tok = "NOARCH" + uuid.uuid4().hex[:6]
+    ingest_one(email, aid, tok)
+    dbfixture.ingest_raw_message(email, make_message(
+        f"<seed-{uuid.uuid4().hex}@t>", "Seed", "x@y.com", email, "seed", T0),
+        uid=1, folder="All Mail", role_hint="\\All")
+    dbfixture.refuse_writes(email, "All Mail")
+
+    _, r = api("GET", f"/api/search?q={tok}&account_id={aid}")
+    code, body = api("POST", f"/api/messages/threads/{r['rows'][0]['thread_id']}"
+                             f"/archive?account_id={aid}")
+
+    assert code == 400
+    assert "Archive folder" in body["detail"]
+    assert not [x for x in _actions(email) if x["type"] == "move"]
+
+
+def test_a_move_the_server_keeps_refusing_stops_holding_the_local_view(account):
+    """Who is believed while a queued move is not getting through.
+
+    The source placement goes the moment the key is pressed, so until the server
+    catches up the app is showing something only it knows — and the sweep that
+    would repair a placement the server still lists is told to leave it alone
+    while the move is in flight. Since nothing ever retires a failing action,
+    "in flight" used to have no end: a move the server refused every fifteen
+    minutes kept the app's version alive for good, which is precisely how a
+    message showed as archived here and sat in the inbox there.
+    """
+    email, aid = account["email"], account["id"]
+    tok = "STUCKMOVE" + uuid.uuid4().hex[:6]
+    _, rfc_id = ingest_one(email, aid, tok)
+    _seed_folder(email, "Archive", "\\Archive")
+    _, r = api("GET", f"/api/search?q={tok}&account_id={aid}")
+    assert api("POST", f"/api/messages/threads/{r['rows'][0]['thread_id']}"
+                       f"/archive?account_id={aid}")[0] == 200
+
+    # Queued and failing: a Bridge restart looks exactly like this, so the move
+    # is still believed and the inbox placement stays gone.
+    assert dbfixture.fail_actions(email, attempts=1) == 1
+    assert dbfixture.move_in_flight(email, rfc_id) is True
+
+    # A quarter of an hour of the same refusal is not a server catching up.
+    assert dbfixture.fail_actions(email, attempts=STUCK_AFTER) == 1
+    assert dbfixture.move_in_flight(email, rfc_id) is False
+
+
+def test_a_change_that_will_not_go_through_reaches_the_status_panel(account):
+    """The queue's failures have to be visible somewhere in the app.
+
+    A queued move has no folder of its own and no row in any list — the message
+    is already showing the change — so a write-back that stops working was
+    reported nowhere at all: the log said it, fifteen minutes later, to nobody.
+    ``dropped_kind`` rides along because the two ways a change is dropped need
+    opposite advice, and the panel picks its sentence from it.
+    """
+    email, aid = account["email"], account["id"]
+    tok = "PANEL" + uuid.uuid4().hex[:6]
+    ingest_one(email, aid, tok)
+    _seed_folder(email, "Archive", "\\Archive")
+    _, r = api("GET", f"/api/search?q={tok}&account_id={aid}")
+    assert api("POST", f"/api/messages/threads/{r['rows'][0]['thread_id']}"
+                       f"/archive?account_id={aid}")[0] == 200
+
+    # Failing, and long enough that a passing outage no longer explains it.
+    dbfixture.fail_actions(email, attempts=STUCK_AFTER, error="move failed: nope")
+    _, status = api("GET", "/api/sync/status")
+    assert status["actions"]["stuck"] == 1
+    assert status["actions"]["error"] == "move failed: nope"
+    assert status["actions"]["dropped"] == 0
+
+    # Dropped: out of the queue, and named by the reason it was dropped for.
+    dbfixture.drop_actions(email, "stale", "the folder was rebuilt")
+    _, status = api("GET", "/api/sync/status")
+    assert status["actions"]["stuck"] == 0
+    assert status["actions"]["dropped"] == 1
+    assert status["actions"]["dropped_kind"] == "stale"
+    assert status["actions"]["dropped_error"] == "the folder was rebuilt"
+
+
+def _status_actions():
+    _, status = api("GET", "/api/sync/status")
+    return status["actions"]
+
+
+def test_a_dropped_notice_can_be_dismissed_and_a_later_failure_brings_it_back(account):
+    """The notice reports something that has finished happening, so nothing it
+    counts will ever stop being true on its own — it stood for a full day
+    whatever the reader did about it, including fixing the cause. Dismissing is
+    the only state left to change, and it must not be a way of going deaf: a
+    failure after the press is stamped later than it and comes back by itself."""
+    email, aid = account["email"], account["id"]
+    _seed_folder(email, "Archive", "\\Archive")
+    for n in range(2):
+        tok = f"DISMISS{n}" + uuid.uuid4().hex[:6]
+        ingest_one(email, aid, tok)
+        _, r = api("GET", f"/api/search?q={tok}&account_id={aid}")
+        assert api("POST", f"/api/messages/threads/{r['rows'][0]['thread_id']}"
+                           f"/archive?account_id={aid}")[0] == 200
+        if n == 0:
+            dbfixture.drop_actions(email, "stale", "the folder was rebuilt")
+            assert _status_actions()["dropped"] == 1
+            assert api("POST", "/api/sync/actions/dismiss")[0] == 200
+            assert _status_actions()["dropped"] == 0, "dismissing clears what it covered"
+
+    # The second archive fails *after* the dismissal, so it is news again.
+    dbfixture.drop_actions(email, "stale", "the folder was rebuilt again")
+    assert _status_actions()["dropped"] == 1
+
+
+def _role_ids(email):
+    _, boxes = api("GET", "/api/mailboxes")
+    return {m["role"]: m["id"] for a in boxes["accounts"] if a["email"] == email
+            for m in a["mailboxes"]}
+
+
+def _refused_into_all_mail(email, aid, tok):
+    """A move the server answered "operation not allowed" to, aimed at \\All.
+
+    Queued as a plain move rather than through Archive, because whether archiving
+    even *picks* \\All is the thing under test — the refusal has to be able to
+    arrive on an account that archives somewhere sensible, which is how it
+    reached a real mailbox (an undo's reverse move)."""
+    mid, _ = ingest_one(email, aid, tok)
+    ids = _role_ids(email)
+    assert api("POST", f"/api/messages/{mid}/move?mailbox_id={ids['all']}"
+                       f"&source_mailbox_id={ids['inbox']}")[0] == 200
+    dbfixture.drop_actions(email, "refused", "move failed: operation not allowed")
+    # What the agent writes down the first time a folder says no, and what stops
+    # the app offering \All as an archive target ever again.
+    dbfixture.refuse_writes(email, "All Mail")
+
+
+def test_the_dropped_notice_offers_the_archive_folder_only_where_one_is_missing(account):
+    """The advice these refusals carry — go and make an Archive folder — is only
+    true for an account that has not got one, and it was printed at accounts that
+    had. So the button is offered per account, and only when the answer is no."""
+    email, aid = account["email"], account["id"]
+    _seed_folder(email, "All Mail", "\\All")
+    _refused_into_all_mail(email, aid, "FIXBTN" + uuid.uuid4().hex[:6])
+
+    fix = _status_actions()["dropped_fix"]
+    assert fix and fix["kind"] == "create_archive"
+    assert fix["account_id"] == aid and fix["name"] == "Archive"
+
+    # Pressing it queues the folder for the agent, and nothing is written here:
+    # prune_mailboxes would delete an optimistic row on the confirming pass.
+    assert api("POST", f"/api/sync/actions/create-archive?account_id={aid}")[0] == 200
+    creates = [a for a in dbfixture.pending_actions(email, "create_folder")]
+    assert [a["payload"]["name"] for a in creates] == ["Archive"]
+    # Idempotent: a second press before the agent's pass must not queue a second.
+    assert api("POST", f"/api/sync/actions/create-archive?account_id={aid}")[0] == 200
+    assert len(dbfixture.pending_actions(email, "create_folder")) == 1
+
+
+def test_no_archive_folder_is_offered_to_an_account_that_has_one(account):
+    """The case that made the old advice wrong: the refusal aimed at \\All came
+    from somewhere other than archiving, and telling this user to build a folder
+    they already have sends them off to fix nothing."""
+    email, aid = account["email"], account["id"]
+    _seed_folder(email, "All Mail", "\\All")
+    _seed_folder(email, "Archive", "\\Archive")
+    _refused_into_all_mail(email, aid, "HASARCH" + uuid.uuid4().hex[:6])
+
+    assert _status_actions()["dropped"] == 1
+    assert _status_actions()["dropped_fix"] is None
+    code, body = api("POST", f"/api/sync/actions/create-archive?account_id={aid}")
+    assert code == 409
+    assert "already archives into" in body["detail"]
 
 
 def test_bulk_trash_clears_every_selected_row(account):
@@ -260,27 +477,157 @@ def test_bulk_trash_all_empties_the_selected_mailbox(account):
     assert mailbox_total(email) == 0
 
 
-def test_emptying_the_trash_is_the_one_route_to_a_permanent_delete(account):
-    """Deleting for good is still reachable — it just has to be asked for.
+def _trash_id(email):
+    _, boxes = api("GET", "/api/mailboxes")
+    return next(m["id"] for a_ in boxes["accounts"] for m in a_["mailboxes"]
+                if a_["email"] == email and m["role"] == "trash")
 
-    Selecting everything in Trash and pressing delete means empty it, and there
-    is nowhere left to move those messages to. That is the only place a `delete`
-    action is queued now; every other route carries a target folder.
-    """
+
+def test_emptying_the_trash_is_the_one_route_to_a_permanent_delete(account):
+    """Deleting for good is still reachable — it just has to be asked for, by
+    name, and confirmed. It is the only place a `delete` action is queued;
+    every other route carries a target folder to move the message to."""
     email = account["email"]
     _seed_trash(email)
     tok = "EMPTYTOK" + uuid.uuid4().hex[:6]
     dbfixture.ingest_raw_message(email, make_message(
         f"<e-{uuid.uuid4().hex}@t>", f"Doomed {tok}", "x@y.com", email, f"{tok} body", T0),
         uid=2, folder="Trash", role_hint="\\Trash")
+    trash_id = _trash_id(email)
 
-    _, boxes = api("GET", "/api/mailboxes")
-    trash_id = next(m["id"] for a_ in boxes["accounts"] for m in a_["mailboxes"]
-                    if a_["email"] == email and m["role"] == "trash")
-    code, body = api("POST", "/api/messages/bulk/trash-all", {"mailbox_id": trash_id})
+    # Unconfirmed is refused outright: a client that forgets the flag gets an
+    # error, never a deletion.
+    code, body = api("POST", "/api/messages/bulk/empty-trash", {"mailbox_id": trash_id})
+    assert code == 400, body
+    assert not any(a["type"] == "delete" for a in _actions(email))
+
+    code, body = api("POST", "/api/messages/bulk/empty-trash",
+                     {"mailbox_id": trash_id, "confirm": True})
+    assert code == 200, body
+    assert body["deleted"] >= 1 and body["done"] is True
+    assert any(a["type"] == "delete" for a in _actions(email))
+
+
+def test_mail_deleted_for_good_stops_being_readable_at_once(account):
+    """"Permanently deleted" has to mean it, in every read path and immediately.
+
+    The placement goes the moment Empty Trash is confirmed; the content row goes
+    when the agent's next completed pass collects it, which can be hours. In
+    between, the message was listed nowhere and still answered to its own id, its
+    own source URL and its own attachments — and came back first hit in a search
+    for its subject, because a search has no folder in it to filter by.
+    """
+    email, aid = account["email"], account["id"]
+    _seed_trash(email)
+    tok = "GONETOK" + uuid.uuid4().hex[:6]
+    dbfixture.ingest_raw_message(email, make_message(
+        f"<g-{uuid.uuid4().hex}@t>", f"Doomed {tok}", "x@y.com", email, f"{tok} body", T0),
+        uid=4, folder="Trash", role_hint="\\Trash")
+    message_id = _search_id(aid, tok)
+    assert api("GET", f"/api/messages/{message_id}")[0] == 200
+
+    code, _ = api("POST", "/api/messages/bulk/empty-trash",
+                  {"mailbox_id": _trash_id(email), "confirm": True})
+    assert code == 200
+
+    # Every way in, not just the list: an id, its source, the parts of it a
+    # `cid:` names, a reply that would quote it back, and a task that would carry
+    # it out to another service entirely.
+    assert api("GET", f"/api/messages/{message_id}")[0] == 404
+    assert api("GET", f"/api/messages/{message_id}/source")[0] == 404
+    assert api("GET", f"/api/messages/{message_id}/cid/anything")[0] == 404
+    assert api("GET", f"/api/compose/reply-context/{message_id}?mode=forward")[0] == 404
+    assert api("POST", "/api/tasks", {"message_id": message_id})[0] in (404, 409)
+    assert api("GET", f"/api/search?q={tok}&account_id={aid}")[1]["rows"] == []
+
+
+def test_bulk_delete_never_infers_a_permanent_delete_from_where_a_message_sits(account):
+    """The one that could empty someone's Trash without ever saying "delete".
+
+    `Delete all Flagged` selects flagged messages from *every* folder, and a
+    placement that was already in Trash used to be re-read as "the user means
+    destroy this" — because that is what the Trash-folder version of the same
+    button meant. So a flagged message the user had trashed weeks ago was
+    permanently deleted by a button that named neither Trash nor permanence.
+
+    Now Trash is where this puts mail and the one place it will not touch.
+    """
+    email, aid = account["email"], account["id"]
+    _seed_trash(email)
+    tok = "FLAGGEDTOK" + uuid.uuid4().hex[:6]
+    dbfixture.ingest_raw_message(email, make_message(
+        f"<f-{uuid.uuid4().hex}@t>", f"Kept {tok}", "x@y.com", email, f"{tok} body", T0),
+        uid=7, folder="Trash", role_hint="\\Trash", flags={"flagged": True})
+    # And one flagged message still in the inbox, so the batch has real work to
+    # do: an endpoint that did nothing at all would pass this test by accident.
+    mid, _ = ingest_one(email, aid, tok + "INBOX", uid=8)
+    api("POST", f"/api/messages/{mid}/flag?flagged=1")
+
+    code, body = api("POST", "/api/messages/bulk/trash-all", {"scope": "flagged"})
 
     assert code == 200, body
-    assert any(a["type"] == "delete" for a in _actions(email))
+    assert body["done"] is True
+    assert not any(a["type"] == "delete" for a in _actions(email))
+    # The one in Trash is still there, and still in Trash.
+    _, rows = api("GET", f"/api/messages?mailbox_id={_trash_id(email)}&limit=50")
+    assert [r for r in rows["rows"] if f"Kept {tok}" in r["subject"]]
+
+
+def test_bulk_delete_inside_trash_points_at_the_operation_that_means_it(account):
+    """Escalating a folder-wide delete inside Trash is not a permanent delete by
+    another name; it is refused, with the name of the thing that is."""
+    email = account["email"]
+    _seed_trash(email)
+
+    code, body = api("POST", "/api/messages/bulk/trash-all", {"mailbox_id": _trash_id(email)})
+
+    assert code == 400
+    assert "already in Trash" in body["detail"]
+    assert not any(a["type"] == "delete" for a in _actions(email))
+
+
+def test_deleting_something_already_in_trash_says_so(account):
+    """Delete is offered on every message the reader shows, including the ones
+    it is showing from Trash. Moving a message to the folder it is already in
+    changes nothing, and answering "ok" to it made Delete look broken: the row
+    left the list and the next refresh put it straight back."""
+    email = account["email"]
+    _seed_trash(email)
+    tok = "INTRASHTOK" + uuid.uuid4().hex[:6]
+    dbfixture.ingest_raw_message(email, make_message(
+        f"<t-{uuid.uuid4().hex}@t>", f"Already {tok}", "x@y.com", email, f"{tok} body", T0),
+        uid=3, folder="Trash", role_hint="\\Trash")
+    trash_id = _trash_id(email)
+    _, rows = api("GET", f"/api/messages?mailbox_id={trash_id}&limit=50")
+    mid = next(r["id"] for r in rows["rows"] if f"Already {tok}" in r["subject"])
+
+    code, body = api("POST", f"/api/messages/{mid}/trash?source_mailbox_id={trash_id}")
+
+    assert code == 409
+    assert "already in" in body["detail"] and "Empty" in body["detail"]
+    assert not any(a["type"] == "delete" for a in _actions(email))
+
+
+def test_every_queued_action_carries_the_uid_epoch_it_was_written_in(account):
+    """A UID means nothing without the UIDVALIDITY it was issued under: after a
+    reset the same number names a different message, and a queued delete would
+    find it. Every action the UI writes therefore records the epoch, and the
+    agent checks it against the folder it has just opened."""
+    email, aid = account["email"], account["id"]
+    _seed_trash(email)
+    tok = "EPOCHTOK" + uuid.uuid4().hex[:6]
+    mid, _ = ingest_one(email, aid, tok)
+
+    api("POST", f"/api/messages/{mid}/flag?flagged=1")
+    _, boxes = api("GET", "/api/mailboxes")
+    inbox_id = next(m["id"] for a_ in boxes["accounts"] for m in a_["mailboxes"]
+                    if a_["email"] == email and m["role"] == "inbox")
+    api("POST", f"/api/messages/{mid}/trash?source_mailbox_id={inbox_id}")
+
+    queued = [a for a in _actions(email) if a["type"] in ("setflags", "move")]
+    assert queued
+    for action in queued:
+        assert action["payload"]["uidvalidity"] == 1      # what dbfixture ingested under
 
 
 def mailbox_total(email):
@@ -463,6 +810,66 @@ def test_trashing_a_labelled_message_queues_one_move_not_one_per_label(account):
     assert moves[0]["payload"]["to_folder"] == "Trash"
 
 
+def test_a_bulk_delete_of_a_labelled_message_queues_one_move_not_one_per_label(account):
+    """The same message under three labels is one message, and one move.
+
+    The thread and selection routes have collapsed labels since the second
+    command was found addressing a UID the first move had just retired
+    ("Message does not exist", retried forever, achieving nothing) — and giving
+    the destructive half of a hand-rolled move a second run at a message already
+    sitting in Trash, which is how mail got deleted outright. This route walked
+    the placement rows straight out of the selector and had the bug back.
+    """
+    email, aid = account["email"], account["id"]
+    tok = "BULKLABELTOK" + uuid.uuid4().hex[:6]
+    _, rfc_id = ingest_one(email, aid, tok)
+    _seed_trash(email)
+    assert dbfixture.record_placement(email, rfc_id, uid=98, folder="All Mail",
+                                      role_hint="\\All")
+    api("POST", f"/api/messages/{_search_id(aid, tok)}/flag?flagged=1")
+
+    code, body = api("POST", "/api/messages/bulk/trash-all", {"scope": "flagged"})
+
+    assert code == 200, body
+    assert body["moved"] == 2                     # both placements left, locally
+    moves = [m for m in _actions(email) if m["type"] in ("move", "delete")]
+    assert len(moves) == 1, moves
+    # From a real folder, not \All: a move out of \All is an added label and
+    # nothing else, which would leave the message in the inbox it just left.
+    assert moves[0]["payload"]["from_folder"] == "INBOX"
+
+
+def test_refiling_a_message_an_agent_is_already_moving_says_to_wait(account):
+    """A queued move can be re-aimed right up until an agent takes it, and not
+    after: the row is claimed and being applied, and rewriting the destination
+    over the top of it would send the old one to the server and record the new
+    one here — a disagreement neither side ever revisits.
+    """
+    email, aid = account["email"], account["id"]
+    tok = "LEASEDMOVE" + uuid.uuid4().hex[:6]
+    ingest_one(email, aid, tok)
+    _seed_trash(email)
+    _seed_folder(email, "Archive", "\\Archive")
+    thread = api("GET", f"/api/search?q={tok}&account_id={aid}")[1]["rows"][0]["thread_id"]
+    assert api("POST", f"/api/messages/threads/{thread}/trash?account_id={aid}")[0] == 200
+    assert dbfixture.lease_actions(email) >= 1        # the agent has it now
+
+    code, body = api("POST", f"/api/messages/threads/{thread}/archive?account_id={aid}")
+
+    assert code == 409
+    assert "still being moved" in body["detail"]
+    # The agent's move is exactly as it left it: one action, still to Trash.
+    with_target = [a for a in dbfixture.pending_actions(email, status="leased")
+                   if a["type"] == "move"]
+    assert len(with_target) == 1
+    assert with_target[0]["payload"]["to_folder"] == "Trash"
+
+
+def _search_id(account_id: int, token: str) -> int:
+    _, r = api("GET", f"/api/search?q={token}&account_id={account_id}")
+    return r["rows"][0]["id"]
+
+
 def _archive_then_settle(email, aid, tok, minutes_ago):
     """Archive a message and retire the queued move, `minutes_ago` in the past.
 
@@ -514,3 +921,94 @@ def test_filing_a_message_whose_move_landed_long_ago_still_works(account):
     assert mid in [x["id"] for x in rows["rows"]]
     # Nothing was queued: there is no UID here any server has heard of.
     assert not [a for a in _actions(email) if a["type"] in ("move", "delete")]
+
+
+# --- What a deleted placement stops counting for ------------------------------
+#
+# A message can sit in more than one folder at once — that is what a label-based
+# server gives you, and what `locations` in the message detail is for.
+#
+# IMAP deletes in two steps: a client sets \\Deleted on a message and an EXPUNGE
+# later actually removes it, which can be a long time later or never. The agent
+# syncs that flag onto the placement (core/mail/store.py::_apply_flags), so a
+# placement marked deleted is an ordinary thing to find in the database — with
+# whatever `seen` and `flagged` it had when it was marked.
+#
+# So anything rolling flags up across a message's placements has to leave those
+# out, or the copy still sitting in the inbox inherits the state of the copy
+# somebody threw away in another client.
+
+
+def _read_and_deleted_in_trash(email, tok, uid=40):
+    """One message filed in INBOX *and* Trash: unread in the inbox, and read,
+    starred and \\Deleted in the trash — an ordinary IMAP delete, not yet
+    expunged."""
+    mid = f"<both-{uuid.uuid4().hex}@t>"
+    raw = make_message(mid, f"Doubled {tok}", "x@y.com", email, f"{tok} body", T0)
+    dbfixture.ingest_raw_message(email, raw, uid=uid, folder="INBOX")
+    dbfixture.ingest_raw_message(email, raw, uid=uid + 1, folder="Trash",
+                                 role_hint="\\Trash",
+                                 flags={"seen": True, "flagged": True, "deleted": True})
+    return mid
+
+
+def test_a_deleted_placement_stops_deciding_whether_a_message_is_read(account):
+    """The inbox copy is unread. The trash copy was read, starred and marked for
+    deletion in some other client. The message reads as unread, because the only
+    placement that still counts is the unread one."""
+    email, aid = account["email"], account["id"]
+    _seed_trash(email)
+    tok = "TWOPLACES" + uuid.uuid4().hex[:6]
+    _read_and_deleted_in_trash(email, tok)
+    message_id = _search_id(aid, tok)
+
+    _, detail = api("GET", f"/api/messages/{message_id}")
+    assert [l["role"] for l in detail["locations"]] == ["inbox"]
+    assert detail["seen"] is False
+    assert detail["flagged"] is False
+
+
+def test_search_reads_the_same_flags_the_message_does(account):
+    """Search rolled its own flags up, and rolled them up over every placement —
+    so the row it drew for a message could contradict the message it opened."""
+    email, aid = account["email"], account["id"]
+    _seed_trash(email)
+    tok = "SEARCHFLAG" + uuid.uuid4().hex[:6]
+    _read_and_deleted_in_trash(email, tok, uid=50)
+
+    _, results = api("GET", f"/api/search?q={tok}&account_id={aid}")
+    assert len(results["rows"]) == 1
+    row = results["rows"][0]
+    _, detail = api("GET", f"/api/messages/{row['id']}")
+    assert (row["seen"], row["flagged"]) == (detail["seen"], detail["flagged"])
+    assert row["seen"] is False and row["flagged"] is False
+
+
+def test_search_counts_a_thread_by_what_opening_it_would_show(account):
+    """"3 messages" on a row that opens on one is the search result disagreeing
+    with the thread view about a conversation half of which was deleted.
+
+    Emptying the Trash takes the placements away at once and leaves the message
+    rows behind until the agent's next completed pass collects them — so this is
+    the ordinary state of things for however long that takes, not a rare one.
+    """
+    email, aid = account["email"], account["id"]
+    _seed_trash(email)
+    tok = "THREADCOUNT" + uuid.uuid4().hex[:6]
+    root = f"<tc-root-{uuid.uuid4().hex}@t>"
+    dbfixture.ingest_raw_message(email, make_message(
+        root, f"Thread {tok}", "x@y.com", email, f"{tok} first", T0), uid=60)
+    for n in (1, 2):
+        dbfixture.ingest_raw_message(email, make_message(
+            f"<tc-{n}-{uuid.uuid4().hex}@t>", f"Re: Thread {tok}", "x@y.com", email,
+            f"{tok} reply {n}", T0 + timedelta(minutes=n), in_reply_to=root, refs=[root]),
+            uid=60 + n, folder="Trash", role_hint="\\Trash")
+
+    _, before = api("GET", f"/api/search?q={tok}&account_id={aid}")
+    assert before["rows"][0]["thread_count"] == 3
+
+    api("POST", "/api/messages/bulk/empty-trash",
+        {"mailbox_id": _trash_id(email), "confirm": True})
+
+    _, after = api("GET", f"/api/search?q={tok}&account_id={aid}")
+    assert after["rows"][0]["thread_count"] == 1

@@ -46,8 +46,21 @@ def _merge_threads(db: Session, keep: str, drop: str, account_id: int) -> None:
     )
 
 
-def assign_thread(db: Session, account_id: int, parsed: ParsedEmail) -> str:
-    """Return the thread_id for a message about to be inserted (content is new)."""
+def assign_thread(db: Session, account_id: int, parsed: ParsedEmail,
+                  shared_id: bool = False) -> str:
+    """Return the thread_id for a message about to be inserted (content is new).
+
+    ``shared_id`` says this message's Message-ID is already worn by a different
+    message in this account — the collision case core/mail/store.py files under
+    the bytes instead. The id is then not a threading key at all: it cannot start
+    a conversation, because the other message has already started one under that
+    exact name and a thread action would move both, and it cannot be used to
+    collect replies, because a reply naming it could be answering either.
+
+    So this message threads on everything else it has — the parents it names, the
+    subject window — and failing those it starts a conversation of its own, keyed
+    by its content, which is the one name it does not share.
+    """
     from ..models import Message
 
     related_ids = set(parsed.references)
@@ -57,9 +70,18 @@ def assign_thread(db: Session, account_id: int, parsed: ParsedEmail) -> str:
     found_threads: set[str] = set()
 
     # (1a) Parents/ancestors we reference.
+    #
+    # Per id, not in one heap, because an id that resolves to more than one
+    # conversation resolves to nothing. Two different messages can wear one
+    # Message-ID; a reply naming it is answering one of them, and taking both
+    # would not just guess — every thread_id found here is *merged* below, so a
+    # single reply would join the collision's conversation to the unrelated one
+    # it collided with, and one archive keypress would then file both. An
+    # ambiguous parent is therefore no parent: the reply threads on whatever
+    # else it names, or starts a conversation of its own.
     if related_ids:
         rows = db.execute(
-            select(Message.thread_id)
+            select(Message.message_id, Message.thread_id)
             .where(
                 Message.account_id == account_id,
                 Message.message_id.in_(related_ids),
@@ -67,10 +89,18 @@ def assign_thread(db: Session, account_id: int, parsed: ParsedEmail) -> str:
             )
             .distinct()
         ).all()
-        found_threads.update(r[0] for r in rows if r[0])
+        by_id: dict[str, set[str]] = {}
+        for parent_id, thread_id in rows:
+            if thread_id:
+                by_id.setdefault(parent_id, set()).add(thread_id)
+        for threads in by_id.values():
+            if len(threads) == 1:
+                found_threads.update(threads)
 
-    # (1b) Children already stored that reference this message.
-    if parsed.message_id:
+    # (1b) Children already stored that reference this message. Skipped when the
+    # id is shared: a reply naming it is answering one of the two messages
+    # wearing it, and nothing here says which.
+    if parsed.message_id and not shared_id:
         mid = parsed.message_id
         rows = db.execute(
             select(Message.thread_id)
@@ -127,5 +157,6 @@ def assign_thread(db: Session, account_id: int, parsed: ParsedEmail) -> str:
         if row and row[0]:
             return row[0]
 
-    # (3) New thread.
-    return _new_thread_id(parsed.message_id)
+    # (3) New thread — under this message's own name, which for a shared
+    # Message-ID is its content rather than the id two messages are using.
+    return _new_thread_id(parsed.content_key if shared_id else parsed.message_id)

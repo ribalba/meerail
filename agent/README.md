@@ -304,14 +304,18 @@ Because step 2 only ever looks *above* the cursor, a message lost or damaged
 below it stays that way however often you refresh. **Recheck all mail**, in the
 agent-status modal, is the repair: it rewinds every folder's cursor so the next
 pass re-walks the mailbox from the start, and reconciles flags whether or not
-reconcile was due. Re-ingesting is idempotent — messages dedupe on
-`(account, dedup_key)` and content already stored only gains a placement row — so
-it fills gaps without duplicating anything that survived.
+reconcile was due. Re-ingesting is idempotent — a message the account already
+holds is recognised (by Message-ID, and then by sender, subject and send time,
+because an id alone is a header the sender wrote) and only gains a placement row
+— so it fills gaps without duplicating anything that survived.
 
 It is also how you widen a content window after the fact: `content_window_months`
 decides what gets fetched as the agent walks past a UID, so mail already stored
 as headers only is filled in the next time the pass re-walks it — which is what
-a recheck makes it do.
+a recheck makes it do. The two rules meet here, and the order matters: whether
+the body is wanted is decided *before* the "we already hold this" shortcut, or
+the re-walk recognises every headers-only message and downloads none of them,
+which is the one thing the recheck was asked for.
 
 Unlike the refresh command this is a **column** on `accounts`
 (`recheck_requested`), not a notification. It is the button you reach for when

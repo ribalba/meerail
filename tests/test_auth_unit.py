@@ -6,20 +6,42 @@ as arguments, so neither FastAPI nor a database is needed. The HTTP wiring
 one is configured with a password, which the throwaway test stack is not.
 """
 
-from app.sessions import LoginRateLimiter, constant_time_eq, issue_token, verify_token
+from app.sessions import (
+    LoginRateLimiter, constant_time_eq, issue_token, new_session_id, verify_token,
+)
 
 SECRET = "unit-secret"
 PASSWORD = "unit-password"
 NOW = 1_780_000_000  # fixed clock — expiry math must not depend on wall time
 DAY = 86_400
+SESSION = "test-session-id"
 
 
-def token(max_age=30 * DAY, secret=SECRET, password=PASSWORD, now=NOW):
-    return issue_token(secret, password, max_age, now=now)
+def token(max_age=30 * DAY, secret=SECRET, password=PASSWORD, now=NOW, session=SESSION):
+    return issue_token(secret, password, max_age, session, now=now)
 
 
 def test_roundtrip():
-    assert verify_token(token(), SECRET, PASSWORD, now=NOW)
+    # A token verifies to the session it names — which is what the server then
+    # looks up, and what logging out deletes.
+    assert verify_token(token(), SECRET, PASSWORD, now=NOW) == SESSION
+
+
+def test_each_login_gets_its_own_name():
+    """Two browsers signed in with one password are two sessions, so that
+    logging out on the laptop does not sign out the phone."""
+    assert new_session_id() != new_session_id()
+    first, second = token(session="a"), token(session="b")
+    assert verify_token(first, SECRET, PASSWORD, now=NOW) == "a"
+    assert verify_token(second, SECRET, PASSWORD, now=NOW) == "b"
+
+
+def test_a_session_id_cannot_be_swapped_for_another():
+    """The id is inside the signed message, so a cookie cannot be edited to name
+    somebody else's session."""
+    version, _sid, expires, signature = token().split(".")
+    forged = f"{version}.someone-elses.{expires}.{signature}"
+    assert verify_token(forged, SECRET, PASSWORD, now=NOW) is None
 
 
 def test_expires_after_max_age():
@@ -35,8 +57,8 @@ def test_tampered_signature_rejected():
 
 
 def test_extending_expiry_breaks_signature():
-    version, expires, sig = token().split(".")
-    forged = f"{version}.{int(expires) + 365 * DAY}.{sig}"
+    version, sid, expires, sig = token().split(".")
+    forged = f"{version}.{sid}.{int(expires) + 365 * DAY}.{sig}"
     assert not verify_token(forged, SECRET, PASSWORD, now=NOW)
 
 
@@ -49,7 +71,7 @@ def test_secret_change_invalidates_sessions():
 
 
 def test_malformed_tokens_rejected():
-    for bad in ("", "v1", "v1.notanumber.abc", "v2." + token().split(".", 1)[1], None):
+    for bad in ("", "v2", "v2.sid.notanumber.abc", "v1." + token().split(".", 1)[1], None):
         assert not verify_token(bad, SECRET, PASSWORD, now=NOW)
 
 

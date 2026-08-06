@@ -47,13 +47,76 @@ url = "postgresql+psycopg://meerail:meerail@127.0.0.1:5432/meerail"
 secret_key = "dev-insecure-secret-change-me"
 
 # Password gating the web UI / REST API. Empty = open, which is right for a
-# localhost install; set it (with TLS in front) before exposing the server to
-# the internet. The browser asks once, then holds a signed session cookie.
+# localhost install; set it before exposing the server to the internet. The
+# browser asks once, then holds a signed session cookie.
+#
+# Setting this also turns on the HTTPS requirement: with a password configured,
+# nothing at all is served over a plaintext connection. Not just the login
+# route — the UI itself, because a browser that gets the page gets the password
+# form, and by the time the form is submitted the password has crossed the
+# network whatever the server then says about it. A plain http:// GET is
+# redirected to https://; anything else is refused.
+#
+# Loopback is exempt (nothing leaves the machine), and a deployment whose TLS is
+# terminated by a proxy needs `trusted_proxies` below so that the app can see
+# the connection was encrypted — without it every request looks like plaintext
+# and the whole install answers with the message saying so.
 password = ""
 
+# Credential for scripted clients: `Authorization: Bearer <token>`. Empty means
+# the API can only be reached with a browser session. Deliberately not the UI
+# password: that one is typed into a browser, and accepting it here as well made
+# it a permanent key to the whole mailbox that could only be taken back by
+# changing the password and signing every browser out.
+# Generate: python -c "import secrets;print(secrets.token_urlsafe(32))"
+api_token = ""
+
 # How long a browser login lasts before the password is asked again. Changing
-# `password` or `secret_key` logs every browser out immediately.
+# `password` or `secret_key` logs every browser out immediately; Log out ends
+# the one session that asked, wherever its cookie has got to.
 session_max_age_days = 30
+
+# Reverse proxies this server may believe about where a request came from, as a
+# comma-separated list of IPs or CIDR blocks. Empty trusts nothing, which is
+# right when the browser talks to this server directly.
+#
+# Set it whenever TLS is terminated in front — a Traefik, a Caddy, an nginx.
+# Without it every request looks like plain HTTP from the proxy's own address,
+# so the session cookie goes out without Secure, and the login rate limiter
+# counts one attacker's failures against every user behind the proxy and locks
+# them all out. With it, X-Forwarded-For and X-Forwarded-Proto are read — but
+# only from these addresses, because anything that can reach the port can set
+# those headers.
+trusted_proxies = ""
+
+# How long a browser remembers to reach this install over HTTPS only — the
+# Strict-Transport-Security max-age, in days. 0 sends no such header.
+#
+# It is what removes the *first* plaintext request rather than turning it away:
+# a browser that has been here once will not speak http:// to this hostname
+# again for this long, and will not offer a way past a bad certificate either.
+# That is a promise with a duration, so set it to 0 while you are still moving
+# the install between hostnames, and leave it at a year once it has settled.
+# Only ever sent over HTTPS, so a localhost install never sees it.
+hsts_max_age_days = 365
+
+# Largest ordinary request body the server will read, in bytes; 0 is no limit.
+# Not the attachment cap below — uploads get that one. This bounds JSON: a
+# composed message's text, a list of ids. It is checked before the body is read
+# and before the request is authenticated, which is the point of it: FastAPI
+# parses a body before it runs the dependency that would have said 401, so
+# without a ceiling a stranger decides what an unauthenticated POST costs.
+#
+# A reverse proxy in front should have its own limit as well — it can refuse
+# the connection without waking Python at all. See COOLIFY.md.
+max_request_bytes = 8388608   # 8 MB
+
+# Let "Add Task" point at a Meerato on a private address (10.x, 192.168.x, a
+# container name, localhost). Off by default: the URL is typed into Settings and
+# then fetched by the *server*, so without a restriction it is a way to aim this
+# machine at whatever else is on its network. Turn it on when Meerato really is
+# a peer service on your own network.
+meerato_allow_private_hosts = false
 
 # Default search window in years (0 = search everything). The UI can override
 # it per query.
@@ -113,6 +176,15 @@ batch_size         = 200   # UIDs per fetch/ingest batch; an account may overrid
 # Applies to mail synced from then on: rows already stored keep their copy, and
 # switching back on does not go back and fill in the gap.
 store_raw_mime = true
+
+# Largest incoming message the agent will hold in memory to store, in bytes; 0
+# is no limit. A fetch reads the whole message before it is parsed, so one mail
+# carrying somebody's backup is that many bytes resident at once — and the pass
+# dies on the same UID every time it retries. Past the cap the message is stored
+# as headers alone, exactly as mail outside the content window is: listed,
+# threaded and searchable, with no body to open. Raising it and running a
+# recheck brings the body in.
+max_message_bytes = 104857600  # 100 MB
 
 # Only keep the *content* of mail sent within this many months; 0 keeps
 # everything. Older mail is fetched as headers alone — it still lists, threads,

@@ -601,3 +601,49 @@ def test_a_failing_send_says_why_without_leaving_the_queue(account):
     _, body = api("GET", "/api/sync/status")
     assert body["outbox"]["queued"] >= 1
     assert "timed out" in body["outbox"]["error"]
+
+
+# --- What the upload route does with a body it cannot parse -------------------
+#
+# This route reads the multipart itself rather than declaring `UploadFile`,
+# because a declared body is parsed *before* dependencies run — so the ordinary
+# signature spooled a stranger's upload to disk and only then checked whether
+# they were allowed to make the request at all. Parsing it here also means
+# owning the errors FastAPI used to turn into responses on the way in.
+
+
+def _post_raw(body: bytes, content_type: str):
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    from helpers import SERVER
+
+    req = urllib.request.Request(SERVER + "/api/compose/attachments", data=body,
+                                 method="POST", headers={"Content-Type": content_type})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.status, _json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode(errors="replace")
+
+
+def test_a_body_that_is_not_the_multipart_it_claims_is_a_400(account):
+    """Not a 500. The request is wrong, and saying which is the difference
+    between a client bug someone can fix and a server that looks broken."""
+    code, _ = _post_raw(b"this is not multipart at all",
+                        "multipart/form-data; boundary=----nope")
+
+    assert code == 400
+
+
+def test_a_multipart_with_no_file_in_it_says_so(account):
+    """A well-formed body carrying only fields. There is nothing to stage, and
+    the caller needs to know that rather than getting an id for nothing."""
+    boundary = "----meerailempty"
+    body = (f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="note"\r\n\r\nhello\r\n'
+            f"--{boundary}--\r\n").encode()
+    code, _ = _post_raw(body, f"multipart/form-data; boundary={boundary}")
+
+    assert code in (400, 422)

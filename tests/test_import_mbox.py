@@ -121,6 +121,43 @@ def test_reimport_is_idempotent_and_resumes(tmp_path, email):
         assert inbox.total_count == 3
 
 
+def test_two_messages_in_one_mbox_sharing_a_message_id_both_land(tmp_path, email):
+    """An archive is exactly where a Message-ID collision turns up: years of
+    mail, and somewhere in it a mailer with a broken generator or a list that
+    re-sent under the old id.
+
+    The importer asked "do I already hold this Message-ID in this folder?" before
+    handing anything to the store, so the second message was skipped — counted as
+    "already here", never stored, and never mentioned again. The question is what
+    it is now: do I already hold *this message*.
+    """
+    mid = f"clash-{uuid.uuid4().hex}@t"
+    box = write_mbox(tmp_path / "clash.mbox", [
+        make_message(f"<{mid}>", "Invoice for March", "billing@vendor.example", email,
+                     "Amount due: 100", T0),
+        make_message(f"<{mid}>", "Invoice for April", "billing@vendor.example", email,
+                     "Amount due: 999999", T0 + timedelta(days=30)),
+    ])
+
+    assert import_mbox.main([str(box), "--account", email, "--no-index"]) == 0
+
+    with SessionLocal() as db:
+        account = account_row(db, email)
+        subjects = set(db.execute(
+            select(Message.subject).where(Message.account_id == account.id)
+        ).scalars().all())
+        assert subjects == {"Invoice for March", "Invoice for April"}
+
+    # And running it again still imports nothing: both are held now, and both
+    # are recognised — the second by the key a collision is filed under.
+    assert import_mbox.main([str(box), "--account", email, "--no-index"]) == 0
+    with SessionLocal() as db:
+        account = account_row(db, email)
+        assert db.scalar(
+            select(func.count()).select_from(Message).where(Message.account_id == account.id)
+        ) == 2
+
+
 def test_keep_unread_honours_mbox_status_flags(tmp_path, email):
     ids = [f"{p}-{uuid.uuid4().hex}@t" for p in ("read", "unread", "flagged")]
     box = write_mbox(

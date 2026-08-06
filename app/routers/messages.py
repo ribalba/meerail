@@ -16,7 +16,7 @@ from .. import searchquery
 from ..deps import require_ui_auth
 from ..mail.render import sanitize_html
 from core.models import (
-    Account, Attachment, Mailbox, Message, MessageLocation, Recipient, Setting,
+    Account, Attachment, Mailbox, Message, MessageLocation, Recipient, Reminder, Setting,
 )
 
 router = APIRouter(prefix="/api", tags=["messages"], dependencies=[Depends(require_ui_auth)])
@@ -33,13 +33,36 @@ def _resolve_mailbox_ids(db: DBSession, mailbox_id: int | None, scope: str | Non
 def _not_deleted():
     """A message still filed somewhere the user hasn't deleted it from.
 
-    The list only ever joins non-deleted locations, so the thread view has to
-    apply the same rule or a trashed message reappears inside the conversation.
+    Every read path applies this, and they have to apply the same one. The list
+    only ever joins non-deleted locations, so the thread view, the single-message
+    endpoints and search all need it too — otherwise a message the user emptied
+    out of Trash is still there to be opened by id and still comes back in search
+    results, which is not what "deleted permanently" means to anyone who pressed
+    it. The row survives that keypress by minutes or hours (the placement goes
+    at once, the row when the agent's next completed pass collects it — see
+    core.ingest.delete_orphan_messages), and this is what makes that interval
+    invisible instead of merely unlisted.
     """
     return select(MessageLocation.id).where(
         MessageLocation.message_pk == Message.id,
         MessageLocation.deleted.is_(False),
     ).exists()
+
+
+def _readable(db: DBSession, message_id: int) -> Message:
+    """The message behind an id, if the user has not deleted it. 404 otherwise —
+    the same answer as for one that was never here, because for someone who
+    emptied their Trash those are the same thing."""
+    msg = db.get(Message, message_id)
+    if msg is None:
+        raise HTTPException(status_code=404, detail="Message not found")
+    placed = db.scalar(
+        select(MessageLocation.id).where(MessageLocation.message_pk == message_id,
+                                         MessageLocation.deleted.is_(False)).limit(1)
+    )
+    if placed is None:
+        raise HTTPException(status_code=404, detail="Message not found")
+    return msg
 
 
 def _thread_counts(db: DBSession, keys: set[tuple[int, str]]) -> dict[tuple[int, str], int]:
@@ -60,8 +83,12 @@ def list_messages(
     mailbox_id: int | None = None,
     scope: str | None = Query(None, description="unified_inbox | flagged"),
     unread_only: bool = False,
-    limit: int = Query(60, le=1000),
-    offset: int = 0,
+    # Bounded at both ends. A ceiling alone leaves the floor open, and a negative
+    # limit is not a smaller page: SQLite reads it as "no limit at all" and
+    # Postgres refuses the query outright, so the same URL is an uncapped read on
+    # one and a 500 on the other. Neither is an answer to a request for -1 rows.
+    limit: int = Query(60, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
 ):
     """A date-descending list of *conversations* in a folder/scope.
 
@@ -92,6 +119,22 @@ def list_messages(
 
     if scope == "flagged":
         j = j.where(MessageLocation.flagged.is_(True))
+    elif scope == "reminders":
+        # Mail put off until later. Not a folder — the messages are sitting in
+        # Archive, which is where a reminder parks them (app/reminders.py) — so
+        # this selects them by the promise rather than by where they are.
+        #
+        # By conversation where there is one, because that is what a reminder
+        # acts on: matching only the message it was set on would show an older
+        # reply as the row for a thread whose newest mail is parked beside it.
+        j = j.where(or_(
+            Message.thread_id.in_(
+                select(Reminder.thread_id)
+                .where(Reminder.state == "pending", Reminder.thread_id.is_not(None))),
+            Message.id.in_(
+                select(Reminder.message_pk)
+                .where(Reminder.state == "pending", Reminder.thread_id.is_(None))),
+        ))
     else:
         ids = _resolve_mailbox_ids(db, mailbox_id, scope)
         if not ids:
@@ -132,6 +175,7 @@ def list_messages(
     # messages live. Counting only this folder made the badge say "2" and the
     # reader then render every message of a 900-strong thread.
     counts = _thread_counts(db, {(a, k) for a, k in keys if not k.startswith("msg:")})
+    remind = _remind_times(db, rows)
 
     return {
         "total": int(total or 0),
@@ -150,10 +194,42 @@ def list_messages(
                 "account_id": r.account_id, "account_color": r.color,
                 "mailbox_id": r.mailbox_id, "mailbox_role": r.role,
                 "thread_count": counts.get((r.account_id, r.thread_key), 1),
+                # When this conversation is due back, for the one that is waiting
+                # on a reminder. Null for everything else, which is nearly every
+                # row — the list draws a small clock on the ones that have it.
+                "remind_at": remind.get((r.account_id, r.thread_key)),
             }
             for r in rows
         ],
     }
+
+
+def _remind_times(db: DBSession, rows) -> dict[tuple[int, str], str]:
+    """When each conversation on this page comes back, for the ones put off.
+
+    Two queries for the whole page rather than one per row, and skipped entirely
+    when nothing is waiting on a reminder — which is the ordinary state of a
+    mailbox, and this must not cost it anything.
+
+    Imported here rather than at the top of the file: app/reminders.py reaches
+    into app/routers/actions.py for the move it queues, and that module imports
+    this one. A module-level import would close the ring while actions.py is
+    still executing its own.
+    """
+    from .. import reminders as reminders_core
+
+    threaded = {(r.account_id, r.thread_key) for r in rows if not r.thread_key.startswith("msg:")}
+    loose = {r.id for r in rows if r.thread_key.startswith("msg:")}
+    out: dict[tuple[int, str], str] = {}
+    for key, when in reminders_core.pending_by_thread(db, threaded).items():
+        out[key] = when.isoformat()
+    if loose:
+        by_message = reminders_core.pending_by_message(db, loose)
+        for r in rows:
+            when = by_message.get(r.id)
+            if when is not None:
+                out[(r.account_id, r.thread_key)] = when.isoformat()
+    return out
 
 
 def _recipients(db: DBSession, message_pk: int) -> dict[str, list[dict]]:
@@ -201,9 +277,16 @@ def _message_detail(db: DBSession, msg: Message, load_remote: bool,
         .where(Attachment.message_pk == msg.id, Attachment.is_inline.is_(False))
         .order_by(Attachment.id)
     ).all()
-    # Any location's flags (a message may be in several folders; report the union).
+    # Any *live* location's flags (a message may be in several folders; report
+    # the union). Deleted placements are excluded for the same reason the list
+    # excludes them: they keep the flags they had when the user deleted them, so
+    # a mail read in Trash and emptied out of it would otherwise go on marking
+    # the copy still sitting in the inbox as read — and one flagged there would
+    # keep a star on a conversation nothing is flagging any more. The row
+    # outlives the keypress by an agent pass (see _not_deleted).
     locs = db.execute(
-        select(MessageLocation).where(MessageLocation.message_pk == msg.id)
+        select(MessageLocation).where(MessageLocation.message_pk == msg.id,
+                                      MessageLocation.deleted.is_(False))
     ).scalars().all()
     # Whether "view source" has anything to show. Asked as a predicate rather
     # than by touching msg.raw_mime, which is deferred precisely so a thread
@@ -242,7 +325,7 @@ def _message_detail(db: DBSession, msg: Message, load_remote: bool,
         "answered": any(l.answered for l in locs),
         "locations": [
             {"mailbox_id": l.mailbox_id, "role": db.get(Mailbox, l.mailbox_id).role}
-            for l in locs if not l.deleted
+            for l in locs
         ],
         "attachments": [
             {"id": a.id, "filename": a.filename, "content_type": a.content_type,
@@ -255,10 +338,7 @@ def _message_detail(db: DBSession, msg: Message, load_remote: bool,
 
 @router.get("/messages/{message_id}")
 def get_message(message_id: int, images: bool = False, db: DBSession = Depends(get_db)):
-    msg = db.get(Message, message_id)
-    if msg is None:
-        raise HTTPException(status_code=404, detail="Message not found")
-    return _message_detail(db, msg, load_remote=images)
+    return _message_detail(db, _readable(db, message_id), load_remote=images)
 
 
 @router.get("/messages/{message_id}/source")
@@ -275,6 +355,7 @@ def message_source(message_id: int, db: DBSession = Depends(get_db)):
     error worth a different code than "there is nothing here to show" — the
     reader already draws the button that leads here disabled in both cases.
     """
+    _readable(db, message_id)      # deleted mail has no source to show either
     row = db.execute(
         select(Message.id, Message.raw_mime).where(Message.id == message_id)
     ).first()
@@ -420,10 +501,18 @@ def get_thread(
             # A pattern Postgres rejects costs the attachment highlights, not
             # the thread — the reader still opens.
             db.rollback()
+    from .. import reminders as reminders_core   # see _remind_times for the why
+
+    reminder = reminders_core.pending_for(db, msgs[-1])
     return {
         "thread_id": thread_id,
         "subject": msgs[-1].subject or "(no subject)",
         "messages": details,
+        # Set when this conversation is waiting on a reminder, so the reader can
+        # say when it is coming back and offer to take that back — the button
+        # that put it there is not on screen any more, because the conversation
+        # left the folder it was pressed in.
+        "reminder": reminders_core.describe(reminder) if reminder else None,
     }
 
 
@@ -448,6 +537,7 @@ def download_attachment(
     att = db.get(Attachment, attachment_id)
     if att is None or att.content is None:
         raise HTTPException(status_code=404, detail="Attachment not found")
+    _readable(db, att.message_pk)   # nor do its files outlive the message
     filename = (att.filename or "attachment").replace('"', "")
     dispo = "inline" if inline and _inline_safe(att.content_type) else "attachment"
     return Response(
@@ -468,6 +558,7 @@ def attachment_thumb(attachment_id: int, db: DBSession = Depends(get_db)):
     att = db.get(Attachment, attachment_id)
     if att is None or att.thumb is None:
         raise HTTPException(status_code=404, detail="No preview")
+    _readable(db, att.message_pk)
     return Response(
         content=att.thumb,
         media_type="image/webp",
@@ -481,6 +572,19 @@ def attachment_thumb(attachment_id: int, db: DBSession = Depends(get_db)):
 
 @router.get("/messages/{message_id}/cid/{content_id}")
 def inline_cid(message_id: int, content_id: str, db: DBSession = Depends(get_db)):
+    """One inline part of a message, for a `cid:` the sanitizer rewrote.
+
+    Gated like every other way of reading a message, because it is one: a
+    `cid:` is a handle on the bytes of a mail, and mail the user has deleted has
+    no bytes to hand out (see _readable).
+
+    Served under the same headers as a downloaded attachment, for the same
+    reason: these are the sender's bytes with the sender's Content-Type on them,
+    and a browser that sniffed its way to text/html here would be running a
+    stranger's markup on our own origin — inside the reader's iframe, where the
+    sanitizer's work would then be beside the point.
+    """
+    _readable(db, message_id)
     att = db.execute(
         select(Attachment).where(
             Attachment.message_pk == message_id, Attachment.content_id == content_id
@@ -488,5 +592,11 @@ def inline_cid(message_id: int, content_id: str, db: DBSession = Depends(get_db)
     ).scalars().first()
     if att is None or att.content is None:
         raise HTTPException(status_code=404, detail="Inline image not found")
-    return Response(content=att.content,
-                    media_type=att.content_type or "application/octet-stream")
+    return Response(
+        content=att.content,
+        media_type=att.content_type or "application/octet-stream",
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "sandbox; default-src 'none'",
+        },
+    )

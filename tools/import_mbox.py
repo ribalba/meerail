@@ -134,7 +134,7 @@ def import_messages(db, account, folder: str, box, *, keep_unread: bool,
 
     from core import ingest
     from core.mail.parse import parse_email
-    from core.mail.store import ingest_raw
+    from core.mail.store import ingest_raw, same_message
     from core.models import Message, MessageLocation
 
     mailbox_row = ingest.register_folder(db, account, folder)
@@ -164,17 +164,24 @@ def import_messages(db, account, folder: str, box, *, keep_unread: bool,
         # means decoding every attachment twice.
         parsed = parse_email(raw)
 
-        already = db.execute(
-            select(MessageLocation.id)
-            .join(Message, Message.id == MessageLocation.message_pk)
+        # "Is this message already in this folder?", and not "is its Message-ID".
+        # A Message-ID is what the store files mail *under*, not proof of what a
+        # message is: two different mails can carry the same one, and matching on
+        # the key alone dropped the second of them here — permanently, and with
+        # no mention in the count, because the importer had already decided it
+        # was a message it held. Both keys are looked up (the id, and the bytes,
+        # which is where a collision is filed) and the candidates are then asked
+        # whether they are actually this message.
+        candidates = db.execute(
+            select(Message)
+            .join(MessageLocation, MessageLocation.message_pk == Message.id)
             .where(
                 Message.account_id == account.id,
-                Message.dedup_key == parsed.dedup_key,
+                Message.dedup_key.in_((parsed.dedup_key, parsed.content_key)),
                 MessageLocation.mailbox_id == mailbox_row.id,
             )
-            .limit(1)
-        ).scalar()
-        if already:
+        ).scalars().all()
+        if any(same_message(m, parsed) for m in candidates):
             skipped += 1
         else:
             flags = mbox_flags(raw)

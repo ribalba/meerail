@@ -246,7 +246,12 @@ _SECTION_KEYS: dict[str, dict[str, str]] = {
     "server": {
         "secret_key": "secret_key",
         "password": "server_password",
+        "api_token": "api_token",
         "session_max_age_days": "session_max_age_days",
+        "trusted_proxies": "trusted_proxies",
+        "hsts_max_age_days": "hsts_max_age_days",
+        "max_request_bytes": "max_request_bytes",
+        "meerato_allow_private_hosts": "meerato_allow_private_hosts",
         "default_search_years": "default_search_years",
         "contacts_scan_years": "contacts_scan_years",
         "data_dir": "data_dir",
@@ -260,6 +265,7 @@ _SECTION_KEYS: dict[str, dict[str, str]] = {
         "reconcile_interval": "reconcile_interval",
         "batch_size": "batch_size",
         "store_raw_mime": "store_raw_mime",
+        "max_message_bytes": "max_message_bytes",
         "content_window_months": "content_window_months",
         "account": "accounts",
     },
@@ -352,6 +358,13 @@ class _MeerailTomlSource(PydanticBaseSettingsSource):
         return self._data
 
 
+def trusted_proxy_hosts(raw: str | None) -> list[str]:
+    """``trusted_proxies`` as the proxy middleware wants it: one entry per IP or
+    CIDR block, empty for "believe nothing". Written to survive an environment
+    variable, which arrives as one string with whatever spacing was typed."""
+    return [item.strip() for item in (raw or "").split(",") if item.strip()]
+
+
 class Settings(BaseSettings):
     """Every setting either process reads. See the module docstring for sources."""
 
@@ -378,8 +391,82 @@ class Settings(BaseSettings):
     # cookie for session_max_age_days.
     server_password: str = ""
 
+    # Credential for scripted clients: `Authorization: Bearer <token>`. Empty —
+    # the default — means the API can only be reached with a browser session.
+    #
+    # Deliberately not the UI password, which used to be accepted here as well.
+    # That made the thing a person types into a browser into a permanent API key
+    # for the whole mailbox: anything that had ever seen it kept full access, and
+    # taking that access back meant changing the password and signing every
+    # browser out. A token is a separate object with a separate life — issue one
+    # for the script that needs it, change it when that script should stop.
+    #
+    # Generate: python -c "import secrets;print(secrets.token_urlsafe(32))"
+    api_token: str = ""
+
     # How long a browser login lasts before the password is asked again.
     session_max_age_days: int = 30
+
+    # Reverse proxies whose X-Forwarded-For / X-Forwarded-Proto this server may
+    # believe, as a comma-separated list of IPs or CIDR blocks (``*`` trusts
+    # whatever is in front, which is only safe when nothing else can reach the
+    # port). Empty — the default — trusts nothing, which is right for a laptop
+    # install where the browser connects to the server directly.
+    #
+    # It has to be set for a deployment that terminates TLS somewhere else,
+    # because without it the app sees the proxy instead of the request:
+    #
+    #   * every connection looks like plain HTTP, so the session cookie is
+    #     issued without Secure and a browser will send it over a plain
+    #     connection given the chance; and
+    #   * every connection looks like it comes from the proxy's address, so the
+    #     login rate limiter counts one attacker's five wrong passwords against
+    #     everyone behind it and locks the whole install out.
+    #
+    # Trusting a header is trusting whoever can set it, which is why this is a
+    # list and not a boolean: anything not named here is still read as the
+    # client itself, so a container that is reachable directly cannot be talked
+    # into believing a forged address. See app/main.py.
+    trusted_proxies: str = ""
+
+    # How long a browser should remember to reach this install over HTTPS only
+    # — the `Strict-Transport-Security` max-age, in days. Sent only on responses
+    # the app already knows to be encrypted, which is the only transport a
+    # browser will honour it on, so a localhost install never sees it.
+    #
+    # It is a promise with a duration: for this long, a browser that has been
+    # here will refuse to talk to this hostname in plaintext at all, and will
+    # not offer the user a way past a bad certificate. That is exactly what is
+    # wanted for a mailbox on a public hostname, and it is why there is a number
+    # here rather than a boolean — set it to 0 while you are still moving the
+    # install around, and to a year once it has settled.
+    #
+    # `includeSubDomains` is deliberately not sent; see app/main.py.
+    hsts_max_age_days: int = 365
+
+    # Largest ordinary request body the server will read, in bytes; 0 is no
+    # limit. Not the attachment cap — uploads to /api/compose/attachments get
+    # max_attachment_bytes instead. This one bounds JSON: a composed message's
+    # text, a list of ids, a settings value. 8 MB is far more than any of those
+    # and far less than a disk.
+    #
+    # It is enforced before the request is parsed *and before it is
+    # authenticated*, which is the point of it: FastAPI reads a body in full
+    # before it runs the dependency that would have said 401, so without a
+    # ceiling here a stranger decides how much memory an unauthenticated POST
+    # costs this server. See app/limits.py.
+    max_request_bytes: int = 8 * 1024 * 1024
+
+    # Let "Add Task" point at a Meerato on a private address (10.x, 192.168.x,
+    # a container name, localhost). Off by default, because the URL is stored
+    # from a text field in the UI and then fetched *by the server*: anyone who
+    # can reach Settings can otherwise use this install as a probe for whatever
+    # else is on its network, including the addresses only it can reach — a
+    # database admin panel on the compose network, a cloud provider's metadata
+    # service. Turn it on when Meerato genuinely is a peer service on your own
+    # network, which is the deployment it was written for; leave it off on
+    # anything internet-facing. See app/meerato.py.
+    meerato_allow_private_hosts: bool = False
 
     # Default search window in years (0 = everything). The UI can override per query.
     default_search_years: int = 0
@@ -433,6 +520,20 @@ class Settings(BaseSettings):
     # Only affects messages ingested from then on: rows already stored keep
     # their bytes, and turning it back on does not backfill the gap.
     store_raw_mime: bool = True
+
+    # Largest incoming message the agent will hold in memory to store, in bytes;
+    # 0 is no limit, which is what every version before this did.
+    #
+    # A fetch reads the whole message before anything is parsed, so one mail
+    # carrying a backup somebody sent themselves is that many bytes resident in
+    # an agent whose container limit is measured in gigabytes — and the pass dies
+    # on the same UID every time it retries. Past the cap the message is stored
+    # the way mail outside the content window is: every header, no body, still
+    # listed and threaded and searchable by subject and sender. Raising the cap
+    # and running a recheck brings the body in, exactly as widening the window
+    # does. 100 MB is comfortably above what mail servers accept (Gmail 25 MB,
+    # Proton 25 MB) once base64 has added its third.
+    max_message_bytes: int = 100 * 1024 * 1024
 
     # Only keep the *content* of mail sent within this many months; 0 keeps
     # everything. Older messages are stored as headers alone — they still list,

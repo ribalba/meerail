@@ -55,14 +55,30 @@ App.bulk = (function () {
         `Select all ${App.shell.listTotal()}</button>`
       : "";
 
+    // In Trash the button is a different action and says so. Everywhere else
+    // Delete files mail in Trash, where it can be got back from; in Trash there
+    // is nowhere further to file it, and the only thing left to mean is destroy
+    // it on the server. That is worth a different word, not a quiet change of
+    // meaning behind the same one — which is exactly what the old shared
+    // endpoint did, including to flagged mail nobody had gone to Trash to
+    // delete. See app/routers/actions.py::bulk_empty_trash.
+    //
+    // "Empty Trash" rather than "Delete forever", because the operation behind
+    // it is the whole folder whatever happens to be ticked, and the button has
+    // to be the first thing that says so — not the confirmation dialog.
+    const verb = inTrash() ? "Empty Trash" : "Delete";
+
     el.innerHTML = `
       <span class="bulk-count">${label}</span>
       ${escalate}
       <span class="bulk-spacer"></span>
       <button class="bulk-btn danger" type="button" data-act="trash" ${busy ? "disabled" : ""}>
-        ${App.icon("trash", 14)} ${busy ? "Deleting…" : "Delete"}</button>
+        ${App.icon("trash", 14)} ${busy ? "Deleting…" : verb}</button>
       <button class="bulk-btn" type="button" data-act="clear" ${busy ? "disabled" : ""}>Clear</button>`;
   }
+
+  // Is the folder on screen the one Delete would otherwise be moving mail into?
+  function inTrash() { return App.shell.currentRole() === "trash"; }
 
   // Called by App.list whenever the ticked set changes or the list re-renders.
   function sync() {
@@ -84,6 +100,23 @@ App.bulk = (function () {
   function escalate() {
     folderMode = true;
     render();
+  }
+
+  // Trash, emptied from the folder itself. Chunked like trashFolder(), for the
+  // same reason, and always confirmed however few rows are ticked: this is the
+  // one action in meerail that mail does not come back from.
+  async function emptyTrash() {
+    const mailboxId = App.shell.currentMailboxId();
+    if (!mailboxId) return 0;
+    let done = false;
+    let deleted = 0;
+    while (!done) {
+      const res = await App.api.emptyTrash(mailboxId);
+      deleted += res.deleted || 0;
+      done = res.done;
+      if (res.deleted === 0) break;   // nothing shifted — stop rather than spin
+    }
+    return deleted;
   }
 
   async function trashSelected() {
@@ -116,17 +149,26 @@ App.bulk = (function () {
     if (busy) return;
     const n = scope();
     if (!n) return;
-    // Only the folder-wide version asks. A ticked handful is visible on screen
-    // and undoable by hand; "everything in this folder, including the pages you
-    // never looked at" is neither.
-    if (folderMode && !confirm(
+    // Emptying the Trash always asks, and asks in the words of what it does:
+    // this is a deletion from the mail server that nothing can undo, so the
+    // question can never be the same one as "file these away".
+    if (inTrash()) {
+      if (!confirm(
+        `Permanently delete everything in ${App.shell.currentTitle()}?` +
+        `\n\nThis empties the whole folder on the mail server, including messages ` +
+        `not currently on screen. It cannot be undone.`)) return;
+    } else if (folderMode && !confirm(
+      // Only the folder-wide version asks. A ticked handful is visible on screen
+      // and undoable by hand; "everything in this folder, including the pages you
+      // never looked at" is neither.
       `Delete all ${plural(n, "conversation", "conversations")} in ${App.shell.currentTitle()}?` +
       `\n\nThis includes messages not currently on screen.`)) return;
 
     busy = true;
     render();
     try {
-      if (folderMode) await trashFolder();
+      if (inTrash()) await emptyTrash();
+      else if (folderMode) await trashFolder();
       else await trashSelected();
       folderMode = false;
       App.list.clearSelection();

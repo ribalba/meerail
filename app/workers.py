@@ -1,17 +1,21 @@
 """Background workers started on server startup.
 
-Mail ingest and attachment text extraction belong to the agent now, so the only
-thing left here is the contacts rollup — pure derived data, rebuilt from rows the
-agent has already written.
+Mail ingest and attachment text extraction belong to the agent now, so what is
+left here is what the app owes on its own account: the contacts rollup — pure
+derived data, rebuilt from rows the agent has already written — and the reminder
+tick, which is the only thing in meerail that has to happen at a particular
+moment rather than in response to a request.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 
 from core.config import get_settings
 from core.database import SessionLocal
 
+from . import reminders
 from .contacts import rebuild_contact_pairs, rebuild_contacts
 
 settings = get_settings()
@@ -54,3 +58,50 @@ async def contacts_loop() -> None:
         # on that result would leave autocomplete dead for the rest of the day;
         # poll quickly until there is actually something to build from.
         await asyncio.sleep(6 * 3600 if count else 60)
+
+
+# How often the due reminders are looked for. A minute is as late as a reminder
+# can be, which is well inside the resolution anyone sets one at — the presets
+# are whole hours — and the query behind it is one index scan over rows that are
+# still pending, so running it every minute forever costs nothing worth saving.
+#
+# Overridable only so the test stack can watch a reminder come back without
+# sitting out a minute of wall clock (docker-compose.test.yml). Nothing in the
+# UI or the config file exposes it: a shorter tick buys an install nothing, and
+# a longer one is just a later reminder.
+REMINDER_TICK = max(1, int(os.environ.get("MEERAIL_REMINDER_TICK") or 60))
+
+
+def _fire_due_reminders() -> int:
+    db = SessionLocal()
+    try:
+        return reminders.run_due(db)
+    finally:
+        db.close()
+
+
+async def reminders_loop() -> None:
+    """Bring back the mail whose time has come.
+
+    Runs on the server rather than in the agent because a reminder is this app's
+    own promise: the agent applies moves it is handed and sleeps when nothing has
+    changed, and a promise about a moment cannot be kept by a process that is not
+    watching the clock.
+
+    The first tick happens at startup, before the sleep, and that is not an
+    optimisation — it is what a server that was off overnight does with the nine
+    o'clock reminders it missed. They fire late, which is the whole reason each
+    one carries an absolute deadline rather than a countdown.
+    """
+    while True:
+        try:
+            woken = await asyncio.to_thread(_fire_due_reminders)
+            if woken:
+                print(f"reminders: brought back {woken} message(s)", flush=True)
+        except Exception as e:  # noqa: BLE001
+            # Never let one bad tick end the loop — a reminder that cannot fire
+            # keeps its place in the queue (see app/reminders.py::_note_failure)
+            # and the next tick tries again. But say so: silence here looks
+            # exactly like "reminders don't work".
+            print(f"reminder tick failed: {e!r}", flush=True)
+        await asyncio.sleep(REMINDER_TICK)

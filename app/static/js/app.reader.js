@@ -130,6 +130,9 @@ App.reader = (function () {
     { act: "archive", icon: "archive", title: "Archive" },
     { act: "trash", icon: "trash", title: "Delete" },
     { act: "move", icon: "move", title: "Move to folder" },
+    // Beside the filing verbs because it is one: "remind me" files the
+    // conversation away too, and differs only in coming back by itself.
+    { act: "remind", icon: "bell", title: "Remind me later" },
     { act: "flag", icon: "flag", title: "Flag" },
     // Only drawn once a Meerato URL is configured — see App.tasks. An install
     // with no task tracker should not carry a button that can only fail.
@@ -173,6 +176,7 @@ App.reader = (function () {
         >${App.icon("code", 16)}</button>
       <button class="tb-btn ${m.flagged ? "on" : ""}" data-act="flag" title="Flag">${App.icon("flag", 16, m.flagged)}</button>
       <button class="tb-btn" data-act="move" title="Move to folder">${App.icon("move", 16)}</button>
+      <button class="tb-btn" data-act="remind" title="Remind me later">${App.icon("bell", 16)}</button>
       <button class="tb-btn" data-act="archive" title="Archive">${App.icon("archive", 16)}</button>
       <button class="tb-btn" data-act="trash" title="Delete">${App.icon("trash", 16)}</button>
       <button class="tb-btn" data-act="unread" title="Mark as unread">${App.icon("markunread", 16)}</button>
@@ -335,6 +339,45 @@ App.reader = (function () {
     })());
   }
 
+  // --- "Remind me" --------------------------------------------------------
+  // One call for the conversation, like archive: the server files every message
+  // of the thread and every folder each of them sits in, so a reply that landed
+  // after this pane was drawn goes with it rather than holding the row in the
+  // list. The pane and the row move on before the server answers, for the same
+  // reason they do on an archive — see finishRemove.
+  function remindThread(when) {
+    const msgs = currentThread ? currentThread.messages : [];
+    if (!msgs.length) return;
+    // The newest message: any one of the thread would do (the server resolves
+    // the conversation from it), and this is the one the toolbar acts on.
+    const target = msgs[msgs.length - 1];
+    finishRemove(msgs.slice(), App.api.remind(target.id, when));
+  }
+
+  // Taking a reminder back, from the strip over a parked conversation.
+  // Deliberately not optimistic, unlike everything above it: whether the row
+  // should leave the list depends on which list is on screen — it goes from the
+  // Reminders view either way, and stays put in Archive when the mail is left
+  // filed — and that is a judgement the server's own answer settles for free.
+  async function unremindThread(restore) {
+    const msgs = currentThread ? currentThread.messages : [];
+    if (!msgs.length) return;
+    const target = msgs[msgs.length - 1];
+    const threadId = currentThread.thread_id;
+    const accountId = msgs[0].account_id;
+    try {
+      await App.api.unremind(target.id, restore);
+    } catch (e) {
+      return alert(e.message || "Could not change the reminder");
+    }
+    // Re-read rather than patched in place: bringing a conversation back moves
+    // it and marks it unread, and the strip is not the only thing on screen
+    // that changes.
+    if (threadId) await openThread(threadId, accountId, target.id);
+    else { currentThread.reminder = null; rerender(); }
+    if (App.shell) App.shell.reloadList();
+  }
+
   // --- "Send & Archive" ---------------------------------------------------
   // The composer asks for a ticket when it opens and hands it back when the
   // mail goes out, which can be a long time later: the reader moves on while a
@@ -391,6 +434,7 @@ App.reader = (function () {
       if (act === "new") return App.compose.openNew();
       if (!m) return;
       if (act === "move") return anchor && openMoveMenu(m, anchor);
+      if (act === "remind") return anchor && App.reminders.open(m, anchor);
       if (act === "task") return App.tasks.open(m);
       if (act === "reply") return App.compose.openReply(m.id, "reply");
       if (act === "replyall") return App.compose.openReply(m.id, "replyall");
@@ -708,8 +752,9 @@ App.reader = (function () {
   // scroll position. Only an opening thread wants this — a toggle or a flag
   // redraws under you and must leave the view where you left it.
   function rerender(pinLast) {
-    // The menu is anchored to a toolbar button that is about to be replaced.
+    // Both menus are anchored to a toolbar button that is about to be replaced.
     closeMoveMenu();
+    if (App.reminders) App.reminders.close();
     pin = pinLast ? {} : null;
     renderBar();
     const host = document.getElementById("reader-content");
@@ -717,6 +762,11 @@ App.reader = (function () {
     if (!currentThread) { host.hidden = true; empty.hidden = false; renderEmpty(); return; }
     empty.hidden = true; host.hidden = false;
     host.innerHTML = "";
+    // Above the conversation, and only for one that is waiting on a reminder:
+    // it left the folder it was filed from, so this strip is the only place the
+    // promise can be read or taken back.
+    const strip = App.reminders && App.reminders.strip(currentThread);
+    if (strip) host.appendChild(strip);
     for (const m of currentThread.messages) host.appendChild(renderMsg(m));
     // Right away for text-only mail; the iframes redo it as they measure up.
     if (pinLast) landOn();
@@ -819,5 +869,12 @@ App.reader = (function () {
     // request runs behind them and reports its own failure, which is right for
     // the composer too, since the mail is already sent by then and a failed
     // archive must not read as a failed send.
+    // Reminders: App.reminders owns the menu and the strip, and calls these to
+    // act on the conversation the pane is holding.
+    // currentReminder is what makes the bell menu know it is being opened on a
+    // conversation that is already waiting on one, so it can offer to clear it
+    // rather than only to set another.
+    remindThread, unremindThread,
+    currentReminder: () => (currentThread ? currentThread.reminder || null : null),
     archiveTicket, archiveTicketed };
 })();

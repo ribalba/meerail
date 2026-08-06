@@ -54,10 +54,14 @@ In the resource's **Environment Variables** tab:
 | Variable | |
 | --- | --- |
 | `POSTGRES_PASSWORD` | **Required.** Generate a long random one. Coolify refuses the deploy while it is empty — the compose file marks it `:?` because the shipped laptop default (`meerail`) is public knowledge. |
-| `SERVER_PASSWORD` | **Required.** This is the password the web UI asks for. Also marked `:?`: an empty one means no auth at all, which is correct for localhost and wrong for a public hostname. |
+| `SERVER_PASSWORD` | **Required.** This is the password the web UI asks for. Also marked `:?`: an empty one means no auth at all, which is correct for localhost and wrong for a public hostname. Setting it also turns on the HTTPS requirement — with a password configured, meerail serves *nothing* over a plaintext connection, not just the login route. On this stack that means Traefik plus `TRUSTED_PROXIES` below; without them the app cannot tell an encrypted request from a plaintext one and answers every request with a 421 saying so. |
+| `API_TOKEN` | Optional, empty by default. Set it only if something other than a browser needs the API (`Authorization: Bearer <token>`); the UI password is not accepted for that. |
 | `SERVICE_PASSWORD_64_MEERAIL` | Leave it alone — Coolify generates it once and reuses it forever. It signs session cookies, so changing it logs every browser out. |
 | `POSTGRES_USER`, `POSTGRES_DB` | Optional, default `meerail`. |
 | `SESSION_MAX_AGE_DAYS` | Optional, default 30. |
+| `TRUSTED_PROXIES` | Optional, and already set to the private ranges Docker hands out — which is where Coolify's Traefik reaches this container from. It is what makes the app see the *browser* rather than the proxy: without it the session cookie is issued without `Secure` (TLS ends at Traefik, so every request looks like plain HTTP) and the login rate limiter counts one attacker's five wrong passwords against everyone behind the proxy. Narrow it to your project network's own CIDR if you would rather be exact; never widen it to `*` where anything untrusted shares the network. |
+| `HSTS_MAX_AGE_DAYS` | Optional, default 365. How long a browser remembers to reach this hostname over HTTPS only, which is what removes the *first* plaintext request rather than turning it away. It is a promise with a duration — a browser that has been here will refuse plain HTTP to this name, and refuse to let you click past a bad certificate, for this long. Set it to 0 while you are still moving the install between hostnames. |
+| `MAX_REQUEST_BYTES` | Optional, default 8 MB. Ceiling on ordinary (JSON) request bodies, applied before the body is read and before it is authenticated. Uploads to the composer get `max_attachment_bytes` instead. Leave it unless something legitimate is being refused with a 413. |
 | `DEFAULT_SEARCH_YEARS`, `CONTACTS_SCAN_YEARS` | Optional; see [README § Configuration](README.md#configuration). |
 
 ## 3. Give the server a domain
@@ -75,6 +79,29 @@ Do **not** add `ports:` to any service. `db`, `tika` and `bridge` have no
 authentication worth the name between them — Postgres has whatever password you
 set, Tika extracts whatever anyone POSTs it, and Bridge hands your mail to anyone
 who reaches port 143.
+
+### Cap request bodies at Traefik too
+
+meerail enforces its own ceiling (`MAX_REQUEST_BYTES`, and
+`max_attachment_bytes` for the composer's uploads), and it does so before the
+body is read or authenticated. Traefik should have one as well: it can refuse
+the connection without waking Python at all, which is the only thing that helps
+a server already busy with the previous request.
+
+Add a buffering middleware to the `server` service's labels — the ceiling wants
+to sit just above the largest attachment you intend to send, not at it, because
+MIME and the multipart envelope add to what the browser puts on the wire:
+
+```yaml
+    labels:
+      - traefik.http.middlewares.meerail-body.buffering.maxRequestBodyBytes=110000000
+      - traefik.http.middlewares.meerail-body.buffering.memRequestBodyBytes=1048576
+```
+
+then name `meerail-body` in the router's `middlewares` list. Coolify writes the
+router labels itself, so add the middleware to the list it generates rather than
+replacing it. Lower `maxRequestBodyBytes` to a few megabytes if this install
+never sends large attachments — nothing else here posts a large body.
 
 ## 4. First deploy
 

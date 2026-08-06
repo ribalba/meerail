@@ -100,6 +100,17 @@ def _row(row, action: PendingAction | None, account: Account | None) -> dict:
         # it until someone presses Send now. Distinct from `queued` below, which
         # is also false for the mail an old agent retired.
         "held": row.state == "held",
+        # An agent has this row and is inside the SMTP conversation for it right
+        # now (agent/actions.py::_lease). The UI greys out Cancel and Send now
+        # while it is true, because by this point neither is honest any more —
+        # and the endpoints below refuse them regardless of what the screen says.
+        "sending": bool(action is not None and action.status == "leased"),
+        # This one went out and the server never acknowledged it, so nobody can
+        # say whether it arrived (agent/actions.py::_settle_unknown). It is
+        # parked in the same state as a cancelled send and means the opposite of
+        # one, which is why the UI has to be able to tell them apart.
+        "delivery_unknown": bool(action is not None
+                                 and (action.payload or {}).get("delivery_unknown")),
         # False means the queue row is gone: either an older agent retired it
         # (state "error") or something removed it. The message is still here and
         # "Try now" puts it back.
@@ -200,6 +211,49 @@ def get_outbound(outbound_id: int, db: DBSession = Depends(get_db)) -> dict:
     return detail
 
 
+def _claim(db: DBSession, row: Outbound, verb: str) -> PendingAction | None:
+    """The queue row for this message, held for the rest of this request — or a
+    409 if the agent is sending it as we speak, or has just finished.
+
+    The three verbs below all rewrite a send that the agent may be in the middle
+    of. Until the lease existed they did it on a row they had only read: the
+    agent picked up a "pending" send, spent a minute inside SMTP, and wrote its
+    result at the end, so for that whole minute the row still said "pending" and
+    the Outbox was happy to cancel it, re-queue it, or delete it. Cancel then
+    reported success for a message that had already been delivered — the one
+    outcome the undo window exists to prevent — and Send now re-queued mail that
+    was mid-flight, which is how one message arrives twice.
+
+    Three things close that. The lock makes this request queue up behind the
+    agent's own claim rather than reading around it, so what comes back is the
+    row's settled state and not a guess. "leased" is a state this refuses
+    outright. And the *finished* state is refused too, which is the half a lock
+    alone could not fix: the Outbound row these verbs are reached through was
+    read before the lock was taken, so a send that succeeded in between leaves a
+    request holding a row that says "queued" for a message that has gone. Without
+    this it would find no live queue row, read that as "never queued", and put
+    the send back — delivering it a second time.
+
+    So both the row and its queue are re-read here, inside the lock, and anything
+    that has moved on is an error rather than an action. There is no window left
+    in which "cancelled" can mean "already sent".
+    """
+    actions = outbox_core.send_actions_for(db, row.id, lock=True)
+    if any(a.status == "leased" for a in actions):
+        raise HTTPException(
+            status_code=409,
+            detail=f"This message is being sent right now — it is too late to {verb} it.")
+    live = [a for a in actions if a.status != "done"]
+    # Re-read rather than trusting `row`: it was loaded before the lock, and this
+    # is the same question asked at the only moment it can be answered.
+    state = db.scalar(select(Outbound.state).where(Outbound.id == row.id))
+    if not live and (actions or state not in outbox_core.UNSENT_STATES):
+        raise HTTPException(
+            status_code=409,
+            detail=f"This message has already been sent — it is too late to {verb} it.")
+    return live[0] if live else None
+
+
 def _load(db: DBSession, outbound_id: int) -> Outbound:
     """The row for the two verbs below, without its raw MIME.
 
@@ -233,7 +287,7 @@ def retry(outbound_id: int, db: DBSession = Depends(get_db)) -> dict:
     means here.
     """
     row = _load(db, outbound_id)
-    action = outbox_core.send_actions(db, [row.id]).get(row.id)
+    action = _claim(db, row, "re-queue")
 
     if action is None:
         # No queue row: this is mail an older agent retired (state "error"), or
@@ -289,9 +343,12 @@ def cancel(outbound_id: int, db: DBSession = Depends(get_db)) -> dict:
     Cancelling a send that has already failed a few times is allowed and means
     the same thing: stop trying until I say so. The attempt count survives, so
     the history of what went wrong is not lost by pausing it.
+
+    Cancelling one an agent has already picked up is not allowed, because by
+    then it is not true — see _claim.
     """
     row = _load(db, outbound_id)
-    action = outbox_core.send_actions(db, [row.id]).get(row.id)
+    action = _claim(db, row, "cancel")
     if row.state == "held":
         # Already cancelled — from another window, or a double-click. Nothing to
         # do and nothing wrong: report the state rather than erroring at someone
@@ -323,7 +380,7 @@ def discard(outbound_id: int, db: DBSession = Depends(get_db)):
     # message that no longer exists. Only the live ones are looked at: a
     # finished send is history, and every one this install has ever made is
     # still in that table.
-    action = outbox_core.send_actions(db, [row.id]).get(row.id)
+    action = _claim(db, row, "discard")
     if action is not None:
         db.delete(action)
     db.delete(row)

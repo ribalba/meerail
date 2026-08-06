@@ -27,6 +27,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session as DBSession
 
 from core.database import get_db
+from .messages import _not_deleted
 from .. import searchquery
 from ..deps import require_ui_auth
 from core.models import Account, Message, MessageLocation, Recipient, utcnow
@@ -55,9 +56,13 @@ def search(
     mode: str = Query("keyword", pattern="^(keyword|regex)$"),
     mailbox_id: int | None = None,
     account_id: int | None = None,
-    years: int = 0,
-    limit: int = Query(60, le=200),
-    offset: int = 0,
+    # A window in years, and one no wider than the mail can be: `years` is turned
+    # into a date, and a big enough number overflows the arithmetic long before
+    # it means anything — a 500 for a query that only asked for everything, which
+    # is what 0 already says. See list_messages for the bounds on the other two.
+    years: int = Query(0, ge=0, le=200),
+    limit: int = Query(60, ge=1, le=200),
+    offset: int = Query(0, ge=0),
 ):
     q = q.strip()
     if not q:
@@ -129,7 +134,11 @@ def search(
             Message.has_attachments, Message.account_id, Account.color, thread_key,
         )
         .join(Account, Account.id == Message.account_id)
-        .where(match)
+        # Only mail that is still filed somewhere. A search across the whole
+        # account is the one read path with no folder in it, so without this it
+        # was the way a message the user had emptied out of Trash went on
+        # turning up — listed nowhere, and first hit for its own subject.
+        .where(match, _not_deleted())
     )
     if years > 0:
         base = base.where(Message.date_sent >= utcnow() - timedelta(days=365 * years))
@@ -172,7 +181,11 @@ def search(
         for pk, seen_all, flagged_any in db.execute(
             select(MessageLocation.message_pk, func.bool_and(MessageLocation.seen),
                    func.bool_or(MessageLocation.flagged))
-            .where(MessageLocation.message_pk.in_(ids))
+            # Live placements only. A deleted one keeps the flags it had when it
+            # was deleted, so a result read in Trash and emptied out of it would
+            # otherwise come back marked read while the copy the search actually
+            # found sits unread in the inbox.
+            .where(MessageLocation.message_pk.in_(ids), MessageLocation.deleted.is_(False))
             .group_by(MessageLocation.message_pk)
         ).all():
             flags[pk] = (bool(seen_all), bool(flagged_any))
@@ -183,7 +196,11 @@ def search(
         account_threads = {(r.account_id, r.thread_id) for r in rows if r.thread_id}
         for aid, tid, n in db.execute(
             select(Message.account_id, Message.thread_id, func.count())
-            .where(tuple_(Message.account_id, Message.thread_id).in_(account_threads))
+            # Counts what opening the result will actually show. The thread view
+            # applies _not_deleted too, so without it here a conversation whose
+            # older half was deleted advertises "8 messages" and opens on 3.
+            .where(tuple_(Message.account_id, Message.thread_id).in_(account_threads),
+                   _not_deleted())
             .group_by(Message.account_id, Message.thread_id)
         ).all():
             sizes[(aid, tid)] = n

@@ -43,6 +43,12 @@
            Hidden between passes — the modal keeps the last-pass tallies. Sits
            above the cheat sheet and collapses the same way. -->
       <div class="sync-strip" id="sync-strip" hidden></div>
+      <!-- What the last few keypresses did to the mail, with an Undo on each.
+           Rendered by app.undo.js. `hidden` only until that first render — an
+           empty box says what will appear in it, but an *unstyled* one must not
+           flash before the script runs. Above the cheat sheet: the shortcuts are
+           reference, this is state. -->
+      <div class="recent-box" id="recent-box" hidden></div>
       <!-- Keyboard cheat sheet — rendered by app.keys.js from its binding table -->
       <div class="shortcut-box" id="shortcut-box"></div>
     </aside>
@@ -223,6 +229,11 @@
             button appears on the reading pane and on every message: the subject
             becomes the task title, the body its text, and any attachments you
             tick are uploaded with it. Leave the field empty to remove it.
+          </p>
+          <p class="muted small">
+            A saved token is shown as <code>••••••••</code> and never leaves the
+            server. Edit the address around it and the token is kept; to change
+            the token itself, paste the whole URL again.
           </p>
         </div>
 
@@ -482,6 +493,8 @@
   <script src="/static/js/app.markdown.js"></script>
   <script src="/static/js/app.highlight.js"></script>
   <script src="/static/js/app.autocomplete.js"></script>
+  <!-- Ahead of the reader and the list: both call into it while rendering. -->
+  <script src="/static/js/app.reminders.js"></script>
   <script src="/static/js/app.reader.js"></script>
   <script src="/static/js/app.swipe.js"></script>
   <script src="/static/js/app.list.js"></script>
@@ -493,6 +506,7 @@
   <script src="/static/js/app.status.js"></script>
   <script src="/static/js/app.update.js"></script>
   <script src="/static/js/app.stats.js"></script>
+  <script src="/static/js/app.undo.js"></script>
   <script src="/static/js/app.keys.js"></script>
   <script src="/static/js/app.split.js"></script>
   <script src="/static/js/app.mobile.js"></script>

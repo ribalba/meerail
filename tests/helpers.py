@@ -135,7 +135,10 @@ def build_png(width: int = 800, height: int = 600) -> bytes:
 def make_message(mid, subject, frm, to, body, when, in_reply_to=None, refs=None,
                  text_attachment=None, pdf_text=None, png=False, cc=None) -> bytes:
     m = EmailMessage()
-    m["Message-ID"] = mid
+    # None writes no header at all: a Message-ID is optional in RFC 5322 and mail
+    # without one really does arrive, so it has to be expressible here.
+    if mid is not None:
+        m["Message-ID"] = mid
     m["Subject"] = subject
     m["From"] = frm
     m["To"] = to
