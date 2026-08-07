@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Import an mbox file into meerail. Pass the file, plus anything import_mbox.py
-# takes:
+# Import a mailbox into meerail: an mbox file, or a .mbox directory (Apple Mail's
+# own, or the folder Mail.app's Export Mailbox writes). Pass it, plus anything
+# import_mbox.py takes:
 #
 #   tools/import-mbox.sh ~/Downloads/archive.mbox
 #   tools/import-mbox.sh archive.mbox --account old@example.com --folder Archive
+#   tools/import-mbox.sh ~/Library/Mail/V10/*/Lists.mbox --folder Lists
 #   tools/import-mbox.sh --help
 #
 # This runs on the host and talks to Postgres and Tika over the ports compose

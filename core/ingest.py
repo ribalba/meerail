@@ -366,30 +366,56 @@ def advance_cursor(db, mailbox: Mailbox, last_uid: int) -> None:
 
 
 def update_flags(db, mailbox: Mailbox, items: list[dict]) -> int:
-    """Apply flag state for already-synced UIDs. items: [{uid, flags}]."""
-    updated = 0
+    """Apply flag state for already-synced UIDs. items: [{uid, flags}].
+
+    Returns how many placements actually changed — not how many the folder held
+    a row for, which is what it used to count and what made a quiet mailbox
+    expensive. The reconcile sweep calls this for every UID in the folder every
+    time it runs, so on a mailbox nobody has touched since the last sweep the
+    honest answer is zero for every chunk; counting matches instead published a
+    "flags" event per chunk with nothing behind it, and each of those costs
+    every connected client a full reload. A 35k-message folder did that ~1400
+    times a sweep.
+
+    Both writes below hang off the same count. With nothing changed there is
+    nothing to recount either, and recompute_counts is two aggregates over the
+    whole folder — the sweep's largest per-chunk cost once the event is gone.
+
+    Keywords compare as a set: servers are free to list them in any order, and
+    treating a reordering as a change would put the storm straight back.
+    """
+    if not items:
+        return 0
+    locs = db.execute(
+        select(MessageLocation).where(
+            MessageLocation.mailbox_id == mailbox.id,
+            MessageLocation.imap_uid.in_([item["uid"] for item in items]),
+        )
+    ).scalars().all()
+    by_uid = {loc.imap_uid: loc for loc in locs}
+
+    changed = 0
     for item in items:
-        loc = db.execute(
-            select(MessageLocation).where(
-                MessageLocation.mailbox_id == mailbox.id,
-                MessageLocation.imap_uid == item["uid"],
-            )
-        ).scalar_one_or_none()
+        loc = by_uid.get(item["uid"])
         if loc is None:
             continue
         f = item["flags"]
-        loc.seen = bool(f.get("seen"))
-        loc.flagged = bool(f.get("flagged"))
-        loc.answered = bool(f.get("answered"))
-        loc.draft = bool(f.get("draft"))
-        loc.deleted = bool(f.get("deleted"))
-        loc.keywords = f.get("keywords") or []
-        updated += 1
+        keywords = f.get("keywords") or []
+        after = (bool(f.get("seen")), bool(f.get("flagged")), bool(f.get("answered")),
+                 bool(f.get("draft")), bool(f.get("deleted")))
+        before = (loc.seen, loc.flagged, loc.answered, loc.draft, loc.deleted)
+        if before == after and sorted(loc.keywords or []) == sorted(keywords):
+            continue
+        (loc.seen, loc.flagged, loc.answered, loc.draft, loc.deleted) = after
+        loc.keywords = keywords
+        changed += 1
+
+    if not changed:
+        return 0
     recompute_counts(db, mailbox)
-    if updated:
-        events.publish({"type": "flags", "folder": mailbox.imap_name,
-                        "updated": updated, "unread": mailbox.unread_count})
-    return updated
+    events.publish({"type": "flags", "folder": mailbox.imap_name,
+                    "updated": changed, "unread": mailbox.unread_count})
+    return changed
 
 
 # --- content that is stored, but short ---------------------------------------

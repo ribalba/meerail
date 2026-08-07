@@ -76,6 +76,37 @@ def test_ingest_threads_dedups_flags_and_prunes(account):
     assert dbfixture.message_count(email) == 2
 
 
+def test_re_applying_the_same_flags_reports_nothing_changed(account):
+    """The reconcile sweep pushes every UID's flags every time it runs, so on a
+    mailbox nobody has touched the answer must be "nothing happened".
+
+    It used to count the rows it *matched*, which on a quiet folder is all of
+    them — one "flags" event per chunk with nothing behind it, and every one of
+    those costs each connected client a full reload. A 35k-message folder did it
+    ~1400 times a sweep. The count is the published/not-published decision, so
+    asserting on it is asserting on the event.
+    """
+    email = account["email"]
+    raw = make_message(f"<{uuid.uuid4().hex}@t>", "Flags", "x@y.com", email, "b", T0)
+    dbfixture.ingest_raw_message(email, raw, uid=1)
+
+    flags = {"uid": 1, "flags": {"seen": True, "keywords": ["$label1", "\\Junk"]}}
+    assert dbfixture.set_flags(email, "INBOX", [flags]) == 1     # a real change
+    assert dbfixture.set_flags(email, "INBOX", [flags]) == 0     # ...and then nothing
+    assert _mb(email, "INBOX")["unread"] == 0
+
+    # Keyword order is the server's business, not a change.
+    reordered = {"uid": 1, "flags": {"seen": True, "keywords": ["\\Junk", "$label1"]}}
+    assert dbfixture.set_flags(email, "INBOX", [reordered]) == 0
+
+    # A UID the folder holds no row for is skipped, not counted.
+    assert dbfixture.set_flags(email, "INBOX", [{"uid": 999, "flags": {"seen": True}}]) == 0
+
+    # ...but a genuine change still lands, and still moves the unread count.
+    assert dbfixture.set_flags(email, "INBOX", [{"uid": 1, "flags": {"seen": False}}]) == 1
+    assert _mb(email, "INBOX")["unread"] == 1
+
+
 def test_two_different_messages_sharing_a_message_id_stay_two_messages(account):
     """A Message-ID is a header the sender writes, not a fact about the message.
 

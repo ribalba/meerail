@@ -162,11 +162,22 @@ App.outbox = (function () {
   }
 
   function startTicker() {
+    // A countdown nobody is looking at does not need retiming every second;
+    // stateLabel is recomputed from send_at on the next render anyway, so the
+    // labels are right again the moment the app comes back.
+    if (App.power && App.power.isSuspended()) return;
     if (ticker === null && counting()) ticker = setInterval(tick, 1000);
   }
 
   function stopTicker() {
     if (ticker !== null) { clearInterval(ticker); ticker = null; }
+  }
+
+  // Registered at load rather than from an init(): this module has no init, and
+  // the hooks are safe to hold whether or not the outbox is ever opened.
+  if (App.power) {
+    App.power.whenSuspended(stopTicker);
+    App.power.whenResumed(startTicker);
   }
 
   async function load() {

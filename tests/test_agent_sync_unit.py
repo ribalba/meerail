@@ -466,6 +466,7 @@ def test_a_long_flag_sweep_says_it_is_alive_before_it_ends(monkeypatch):
     is the one reported offline. The stamp has to come from inside the loop.
     """
     monkeypatch.setattr(agent_sync, "_HEARTBEAT_INTERVAL", 0)   # every chunk is due
+    monkeypatch.setattr(agent_sync, "_FLAG_SWEEP_BATCH", 2)     # ...and every chunk is 2
     spy = _liveness_spy(monkeypatch)
 
     db, account = CountingDB(), object()
@@ -483,6 +484,7 @@ def test_the_heartbeat_is_rate_limited_rather_than_per_chunk(monkeypatch):
     commit apiece would be write amplification for a column the UI reads once a
     poll. Until the interval is up the sweep must be left exactly as it was."""
     monkeypatch.setattr(agent_sync, "_HEARTBEAT_INTERVAL", 3600)
+    monkeypatch.setattr(agent_sync, "_FLAG_SWEEP_BATCH", 2)
     spy = _liveness_spy(monkeypatch)
 
     db, account = CountingDB(), object()
@@ -491,6 +493,25 @@ def test_the_heartbeat_is_rate_limited_rather_than_per_chunk(monkeypatch):
 
     assert spy.touched == []
     assert db.commits == 1                # the sweep's own commit, and no other
+
+
+def test_the_flag_sweep_does_not_inherit_a_small_batch_size(monkeypatch):
+    """batch_size is sized for fetches that carry bodies. This sweep carries
+    flags, and on the servers where it hurts the cost is per command rather than
+    per message — Gmail answers a 25-UID FETCH and a 500-UID one in the same
+    ~0.4s. An account turned down to 25 to be gentle with body fetches was
+    paying twenty times over for a limit that was never about this loop."""
+    spy = _liveness_spy(monkeypatch)
+    asked = []
+    bridge = FlagBridge(1000)
+    bridge.fetch_flags = lambda uids: (
+        asked.append(len(uids))
+        or {u: {"flags": {"seen": True}, "size": 0} for u in uids})
+
+    agent_sync._reconcile(CountingDB(), bridge, object(), Mailbox(), 25)
+
+    assert asked == [500, 500]      # two commands, not the forty batch_size implies
+    assert spy.touched == []
 
 
 def test_ingesting_a_chunk_also_stamps_liveness(monkeypatch):

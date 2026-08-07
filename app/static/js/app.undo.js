@@ -23,7 +23,7 @@ App.undo = (function () {
 
   // Long enough to be worth reading back, short enough that the sidebar box
   // stays a box. The server's own default is the same number.
-  const LIMIT = 12;
+  const LIMIT = 5;
 
   let items = [];
   let busy = null;        // op_id currently being undone, so it can't be double-pressed
@@ -248,7 +248,10 @@ App.undo = (function () {
       undoable: true,
       reason: null,
       pending: true,
-    }, ...items.filter((item) => item.op_id !== body.op_id)];
+      // Trimmed here as well as by the server: this row goes up before the
+      // refresh that would have bounded the list, and without the slice a run
+      // of actions grows the panel one line at a time until that lands.
+    }, ...items.filter((item) => item.op_id !== body.op_id)].slice(0, LIMIT);
     render();
     refresh();
   }

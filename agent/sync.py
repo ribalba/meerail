@@ -463,6 +463,22 @@ def _restore_unplaced(db, bridge: Bridge, account, mailbox, uids: list[int], bat
     return restored
 
 
+# The flag sweep's chunk size, deliberately not the configured batch_size.
+#
+# batch_size is sized for the fetches that carry message bodies, where a big
+# chunk means a lot of memory in flight and an account against a delicate server
+# is often turned down to be gentle. This sweep carries FLAGS and RFC822.SIZE —
+# a few dozen bytes a message — so the only thing its chunk size decides is how
+# many round trips the folder costs. And on the servers where that hurts, the
+# cost is per command rather than per message: Gmail answers a 25-UID FETCH and
+# a 500-UID FETCH in the same ~0.4s, so an account turned down to 25 was paying
+# twenty times over for a limit that was never about this loop.
+#
+# Bounded rather than unbounded because the response is still parsed in one
+# piece, and a non-contiguous UID set has to fit on one command line.
+_FLAG_SWEEP_BATCH = 500
+
+
 def _reconcile(db, bridge: Bridge, account, mailbox, batch: int,
                beat: "Heartbeat | None" = None, email: str | None = None,
                cutoff=None, max_bytes: int = 0) -> None:
@@ -475,9 +491,12 @@ def _reconcile(db, bridge: Bridge, account, mailbox, batch: int,
     thousands against a server that answers a command a second, that is hours of
     silence from a thread that is working the whole time — hence the heartbeat,
     which is the only thing here the UI can see until the sweep ends.
+
+    The sweep gets its own chunk size (see _FLAG_SWEEP_BATCH); the repair below
+    it keeps the configured one, because that one does fetch bodies.
     """
     uids = bridge.all_uids()
-    for chunk in _chunks(uids, batch):
+    for chunk in _chunks(uids, max(batch, _FLAG_SWEEP_BATCH)):
         rows = bridge.fetch_flags(chunk)
         ingest.update_flags(db, mailbox,
                             [{"uid": u, "flags": r["flags"]} for u, r in rows.items()])

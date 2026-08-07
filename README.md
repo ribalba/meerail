@@ -711,25 +711,44 @@ full-recheck path, and start-at-boot setups for all three platforms.
 ### Importing an mbox
 
 Old mail that is not on a server any more — a Thunderbird folder, a Gmail Takeout export,
-an archive from a mail host you have left — goes in through `tools/import-mbox.sh`:
+an Apple Mail mailbox, an archive from a mail host you have left — goes in through
+`tools/import-mbox.sh`:
 
 ```bash
 tools/import-mbox.sh ~/Downloads/archive.mbox
 tools/import-mbox.sh archive.mbox --account old@example.com --folder Archive
 ```
 
-It creates an account of its own for the file (`<filename>@imported.local` unless you name
-one), stores every message as a placement in one folder, and then runs the same indexing
-pass the agent's indexer thread runs: Tika over the attachments, previews, `search_text`.
+It creates an account of its own for the mailbox (`<filename>@imported.local` unless you
+name one), stores every message as a placement in one folder, and then runs the same
+indexing pass the agent's indexer thread runs: Tika over the attachments, previews,
+`search_text`.
 What lands is ordinary mail — threaded, searchable down to the text inside a PDF, with
 attachments you can open. It runs on the host and talks to Postgres and Tika over the
 loopback ports compose publishes, so the stack has to be up; it reuses `agent/.venv`.
+
+**Apple Mail** is the exception to "an mbox is a file". A mailbox in
+`~/Library/Mail/V10/<account-id>/<Folder>.mbox` is a *directory*, and there is no mbox
+anywhere inside it: every message is a separate `.emlx` file under `<UUID>/Data/`, with the
+attachments parked next to the messages rather than in them. Point the tool at the
+directory and it reads that layout — flags, attachments and all:
+
+```bash
+tools/import-mbox.sh ~/Library/Mail/V10/*/Immobilien-Verteiler.mbox --folder Verteiler
+```
+
+Two things to know. `~/Library/Mail` is behind **Full Disk Access**, so grant it to your
+terminal in System Settings > Privacy & Security first, or every read comes back as
+"Operation not permitted". And a mailbox that has sub-mailboxes keeps them *inside* itself
+as further `.mbox` directories; each is its own import, with its own `--folder`, and the
+tool names them rather than sweeping them into the parent. Mail.app's **Mailbox > Export
+Mailbox** works too and needs neither: it writes a `.mbox` folder with a real mbox inside.
 
 | Flag | |
 | --- | --- |
 | `--account EMAIL` | Import into this account, creating it if it does not exist. Default: derived from the filename. |
 | `--folder NAME` | Which folder the mail lands in (default `INBOX`). A name like `Sent` or `Archive` takes that folder's role in the sidebar. |
-| `--keep-unread` | Take read/unread from the mbox `Status` headers. Most exports carry none, so this marks the whole import unread; by default everything is imported as read. |
+| `--keep-unread` | Take read/unread from the mailbox itself — mbox `Status` headers, or Apple Mail's per-message flags. Most mbox exports carry none, so this marks the whole import unread; by default everything is imported as read. |
 | `--no-index` | Import only, leaving attachment text and previews queued for a running agent. |
 | `--config PATH` | Use a config file other than the repository's `meerail.toml`. |
 

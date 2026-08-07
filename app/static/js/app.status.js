@@ -403,6 +403,10 @@ App.status = (function () {
 
   function schedule() {
     clearTimeout(timer);
+    // Nothing behind a background window is worth a poll, and this loop is the
+    // one that never stops on its own — refresh() re-schedules unconditionally,
+    // including after a failure. App.power tells us when to start again.
+    if (App.power && App.power.isSuspended()) return;
     timer = setTimeout(refresh, interval());
   }
 
@@ -716,6 +720,12 @@ App.status = (function () {
       const dismiss = e.target.closest("[data-dismiss-dropped]");
       if (dismiss) return dismissDropped(dismiss);
     });
+    // Stopping is just dropping the pending timeout: schedule() checks the flag
+    // itself, so an in-flight refresh that lands after this will not re-arm.
+    if (App.power) {
+      App.power.whenSuspended(() => clearTimeout(timer));
+      App.power.whenResumed(refresh);
+    }
     refresh();   // schedules the first poll itself
   }
 

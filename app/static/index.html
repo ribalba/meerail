@@ -488,7 +488,27 @@
     <span>Connection to the server lost — retrying…</span>
   </div>
 
+  <!-- Background power save — raised by app.power.js. Covers the app because
+       what is behind it has stopped being maintained: the stream is closed and
+       the polls are off, so the mail under here is as old as the pause. -->
+  <div class="power-save" id="power-save" role="status" hidden>
+    <div class="ps-card">
+      <svg class="ps-icon" viewBox="0 0 24 24" width="34" height="34" fill="none"
+           stroke="currentColor" stroke-width="1.6" stroke-linecap="round"
+           stroke-linejoin="round" aria-hidden="true">
+        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+      </svg>
+      <h2>Paused in the background</h2>
+      <p>meerail has stopped polling, streaming and animating to save power.
+         Nothing is being missed — the agent goes on collecting mail.</p>
+      <p class="ps-hint">Click here or bring the window to the front to carry on.</p>
+    </div>
+  </div>
+
   <script src="/static/js/app.core.js"></script>
+  <!-- Before every module that registers with it, and before any of them can
+       start a timer. -->
+  <script src="/static/js/app.power.js"></script>
   <script src="/static/js/app.conn.js"></script>
   <script src="/static/js/app.markdown.js"></script>
   <script src="/static/js/app.highlight.js"></script>

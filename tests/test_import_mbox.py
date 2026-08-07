@@ -9,6 +9,7 @@ case that needs it skips when it is not.
 from __future__ import annotations
 
 import mailbox
+import plistlib
 import uuid
 from datetime import datetime, timedelta, timezone
 from email import message_from_bytes
@@ -37,6 +38,45 @@ def write_mbox(path: Path, messages: list[bytes], flags: list[str] | None = None
     box.flush()
     box.close()
     return path
+
+
+def write_emlx(path: Path, raw: bytes, flags: int = 0) -> Path:
+    """One Apple Mail message file: byte count, message, plist of Mail's state."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    trailer = plistlib.dumps({"flags": flags, "date-sent": 0})
+    path.write_bytes(f"{len(raw)}\n".encode() + raw + trailer)
+    return path
+
+
+def apple_mailbox(root: Path, messages: list[bytes], flags: list[int] | None = None,
+                  name: str = "Verteiler.mbox") -> Path:
+    """Apple Mail's on-disk layout: <Folder>.mbox/<UUID>/Data/<n>/Messages/*.emlx."""
+    box = root / name
+    data = box / "5B1F0C22-0000-4000-8000-000000000001" / "Data" / "3"
+    for n, raw in enumerate(messages):
+        write_emlx(data / "Messages" / f"{n + 1}.emlx", raw,
+                   flags[n] if flags else 0)
+    return box
+
+
+def split_attachments(raw: bytes, emlx: Path) -> None:
+    """Write a message the way Mail stores one that has attachments.
+
+    Every attachment part is emptied and marked X-Apple-Content-Length, its
+    bytes going to Attachments/<n>/<part>/<filename> beside the Messages dir —
+    which is what makes the file .partial.emlx.
+    """
+    msg = message_from_bytes(raw)
+    attachments = [p for p in msg.walk() if p.get_filename()]
+    for n, part in enumerate(attachments, start=2):
+        blob = part.get_payload(decode=True)
+        target = (emlx.parent.parent / "Attachments" / emlx.name.split(".")[0]
+                  / str(n) / part.get_filename())
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(blob)
+        part.set_payload("")
+        part["X-Apple-Content-Length"] = str(len(blob))
+    write_emlx(emlx, msg.as_bytes())
 
 
 def account_row(db, email: str) -> Account:
@@ -250,6 +290,175 @@ def test_default_account_is_derived_from_the_filename(tmp_path):
     assert import_mbox.default_email(Path("/tmp/Work Archive 2019.mbox")) \
         == "work-archive-2019@imported.local"
     assert import_mbox.default_email(Path("/tmp/.mbox")) == "mbox@imported.local"
+
+
+def test_apple_mail_directory_imports_its_emlx_files(tmp_path, email):
+    """~/Library/Mail/V10/<account>/<Folder>.mbox is a directory, and there is no
+    mbox file anywhere inside it — every message is its own .emlx. Pointing the
+    tool at one used to reach mailbox.mbox() and die on IsADirectoryError."""
+    a, b = (f"{p}-{uuid.uuid4().hex}@t" for p in ("a", "b"))
+    box = apple_mailbox(tmp_path, [
+        make_message(f"<{a}>", "Subject GAMMA", "x@y.com", email, "the body", T0),
+        make_message(f"<{b}>", "Re: Subject GAMMA", "z@y.com", email, "a reply",
+                     T0 + timedelta(hours=1), in_reply_to=f"<{a}>", refs=[f"<{a}>"]),
+    ])
+
+    assert import_mbox.main([str(box), "--account", email, "--folder", "Verteiler",
+                             "--no-index"]) == 0
+
+    with SessionLocal() as db:
+        account = account_row(db, email)
+        folder = folder_row(db, account, "Verteiler")
+        assert folder.total_count == 2
+        msgs = db.execute(
+            select(Message).where(Message.account_id == account.id)
+        ).scalars().all()
+        assert {m.message_id for m in msgs} == {a, b}
+        assert len({m.thread_id for m in msgs}) == 1
+        assert all(m.content_status == "full" for m in msgs)
+
+    # And again: the same directory imports nothing twice.
+    assert import_mbox.main([str(box), "--account", email, "--folder", "Verteiler",
+                             "--no-index"]) == 0
+    with SessionLocal() as db:
+        account = account_row(db, email)
+        assert folder_row(db, account, "Verteiler").total_count == 2
+
+
+def test_keep_unread_honours_the_emlx_plist_flags(tmp_path, email):
+    ids = [f"{p}-{uuid.uuid4().hex}@t" for p in ("read", "unread", "flagged")]
+    box = apple_mailbox(
+        tmp_path,
+        [make_message(f"<{mid}>", f"Subject {mid[:4]}", "x@y.com", email, "body", T0)
+         for mid in ids],
+        flags=[0b1, 0, 0b10001],       # read; nothing; read + flagged
+    )
+
+    assert import_mbox.main([str(box), "--account", email, "--keep-unread",
+                             "--no-index"]) == 0
+
+    with SessionLocal() as db:
+        account = account_row(db, email)
+        inbox = folder_row(db, account, "INBOX")
+        rows = db.execute(
+            select(Message.message_id, MessageLocation.seen, MessageLocation.flagged)
+            .join(MessageLocation, MessageLocation.message_pk == Message.id)
+            .where(MessageLocation.mailbox_id == inbox.id)
+        ).all()
+        state = {mid: (seen, flagged) for mid, seen, flagged in rows}
+        assert state[ids[0]] == (True, False)
+        assert state[ids[1]] == (False, False)
+        assert state[ids[2]] == (True, True)
+        assert inbox.unread_count == 1
+
+
+def test_partial_emlx_gets_its_attachment_back(tmp_path, email):
+    """Mail keeps attachments beside the message, not in it. Without splicing
+    them back an imported archive is a table of contents: right subjects, right
+    threads, and every PDF in it zero bytes long."""
+    mid = f"p-{uuid.uuid4().hex}@t"
+    token = f"ZEPHYR{uuid.uuid4().hex[:6].upper()}"
+    raw = make_message(f"<{mid}>", "Has a PDF", "x@y.com", email, "see attached", T0,
+                       pdf_text=token)
+    pdf = message_from_bytes(raw).get_payload(1).get_payload(decode=True)
+
+    box = tmp_path / "WithPDF.mbox"
+    split_attachments(raw, box / "UUID" / "Data" / "1" / "Messages" / "9.partial.emlx")
+
+    assert import_mbox.main([str(box), "--account", email, "--no-index"]) == 0
+
+    with SessionLocal() as db:
+        account = account_row(db, email)
+        msg = db.execute(
+            select(Message).where(Message.account_id == account.id)
+        ).scalars().one()
+        att = db.execute(
+            select(Attachment).where(Attachment.message_pk == msg.id)
+        ).scalars().one()
+        assert att.filename == "report.pdf"
+        assert att.size_bytes == len(pdf)
+
+
+def test_sub_mailboxes_are_left_for_their_own_import(tmp_path, email):
+    """A mailbox with children keeps them inside itself. Sweeping up every .emlx
+    under the directory would file the children's mail into the parent's folder,
+    where nothing would ever separate it again."""
+    parent, child = (f"{p}-{uuid.uuid4().hex}@t" for p in ("parent", "child"))
+    box = apple_mailbox(tmp_path, [
+        make_message(f"<{parent}>", "Parent mail", "x@y.com", email, "body", T0),
+    ], name="Lists.mbox")
+    apple_mailbox(box, [
+        make_message(f"<{child}>", "Child mail", "x@y.com", email, "body", T0),
+    ], name="Announce.mbox")
+
+    assert import_mbox.main([str(box), "--account", email, "--folder", "Lists",
+                             "--no-index"]) == 0
+
+    with SessionLocal() as db:
+        account = account_row(db, email)
+        assert db.execute(
+            select(Message.message_id).where(Message.account_id == account.id)
+        ).scalars().all() == [parent]
+
+    # The child is a mailbox of its own, and imports as one.
+    assert import_mbox.main([str(box / "Announce.mbox"), "--account", email,
+                             "--folder", "Lists/Announce", "--no-index"]) == 0
+    with SessionLocal() as db:
+        account = account_row(db, email)
+        assert folder_row(db, account, "Lists/Announce").total_count == 1
+
+
+def test_exported_mailbox_folder_reads_the_mbox_inside(tmp_path, email):
+    """Mail.app's Mailbox > Export Mailbox writes a .mbox *folder* with the real
+    mbox in it under the name "mbox"."""
+    mid = f"e-{uuid.uuid4().hex}@t"
+    box = tmp_path / "Exported.mbox"
+    box.mkdir()
+    (box / "table_of_contents").write_bytes(b"\x00\x01")
+    write_mbox(box / "mbox", [
+        make_message(f"<{mid}>", "Exported one", "x@y.com", email, "body", T0),
+    ])
+
+    assert import_mbox.main([str(box), "--account", email, "--no-index"]) == 0
+
+    with SessionLocal() as db:
+        account = account_row(db, email)
+        assert folder_row(db, account, "INBOX").total_count == 1
+
+
+def test_an_account_directory_names_the_mailboxes_it_holds(tmp_path, capsys):
+    """~/Library/Mail/V10/<account-id> is one directory up from anything
+    importable, and is what someone lands on first."""
+    account_dir = tmp_path / "F34D123C-84B6-44E7-B833-2F2A7CBFE702"
+    apple_mailbox(account_dir, [
+        make_message(f"<{uuid.uuid4().hex}@t>", "s", "x@y.com", "a@b.c", "b", T0),
+    ], name="Verteiler.mbox")
+
+    with pytest.raises(SystemExit) as exc:
+        import_mbox.main([str(account_dir), "--no-index"])
+    assert "Verteiler.mbox" in str(exc.value)
+
+    empty = tmp_path / "nothing-here"
+    empty.mkdir()
+    with pytest.raises(SystemExit) as exc:
+        import_mbox.main([str(empty), "--no-index"])
+    assert "no .emlx messages" in str(exc.value)
+
+
+def test_emlx_without_a_length_header_is_read_as_a_plain_message(tmp_path):
+    raw = make_message("<x@t>", "Subject", "x@y.com", "a@b.c", "body", T0)
+    path = tmp_path / "1.emlx"
+    path.write_bytes(raw)
+    assert import_mbox.read_emlx(path) == (raw, {})
+
+
+def test_emlx_flags_come_from_the_plist_bitfield():
+    assert import_mbox.emlx_flags({"flags": 0b10111}) == {
+        "seen": True, "deleted": True, "answered": True, "flagged": True,
+    }
+    assert import_mbox.emlx_flags({}) == {
+        "seen": False, "deleted": False, "answered": False, "flagged": False,
+    }
 
 
 def test_mbox_flags_are_read_from_both_status_headers():

@@ -1171,6 +1171,45 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
 .login-error { margin: 0; font-size: .82rem; color: var(--danger); }
 .login-error[hidden] { display: none; }
 
+/* Background power save — see app.power.js.
+
+   Below the login gate and above everything else. It covers the app rather than
+   sitting in a corner because what is behind it has stopped being maintained:
+   the event stream is closed and the polls are off, so those rows are as old as
+   the pause is long. A corner badge would leave stale mail looking live. */
+.power-save {
+  position: fixed; inset: 0; z-index: 550;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg-elev); cursor: pointer;
+}
+.power-save[hidden] { display: none; }
+.ps-card {
+  width: min(380px, 84vw); padding: 2rem 1.8rem; text-align: center;
+  color: var(--text-muted);
+}
+.ps-icon { color: var(--text-muted); opacity: .65; margin-bottom: .5rem; }
+.ps-card h2 { margin: 0 0 .5rem; font-size: 1.05rem; font-weight: 600; color: var(--text); }
+.ps-card p { margin: 0 0 .5rem; font-size: .85rem; line-height: 1.5; }
+.ps-hint { font-size: .78rem !important; opacity: .75; }
+
+/* The other half of standing down, and the half that costs the most on a
+   laptop: every looping animation in the app, off in one rule.
+
+   The sync spinner is the reason this exists. It runs for as long as the agent
+   is mid-pass, which on a large mailbox is most of the time, and a rotating
+   element repaints at the display's refresh rate whether or not anyone can see
+   it. Compositing that behind another window is pure fan noise.
+
+   `* , *::before, *::after` rather than a list of the known offenders: this has
+   to keep working when someone adds the next animation, and a missed one is
+   invisible in testing precisely because it only costs anything off-screen. */
+.is-power-save *,
+.is-power-save *::before,
+.is-power-save *::after {
+  animation-play-state: paused !important;
+  transition: none !important;
+}
+
 .ag-list { list-style: none; margin: 0 0 1rem; padding: 0; }
 .ag-account { padding: .3rem 0 .9rem; border-bottom: 1px solid var(--border); margin-bottom: .9rem; }
 .ag-account:last-child { border-bottom: none; margin-bottom: .4rem; }

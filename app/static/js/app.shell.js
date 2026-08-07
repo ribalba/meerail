@@ -5,6 +5,7 @@ App.shell = (function () {
   let sidebar = null;        // last /api/mailboxes payload
   let selection = null;      // { key, title, showAccount, params }
   let refreshTimer = null;
+  let stream = null;         // the open EventSource, so power save can close it
   let listRequest = 0;
   let listTotal = 0;         // conversations matching the selection, not just the page
 
@@ -406,7 +407,9 @@ App.shell = (function () {
   }
 
   function connectSSE() {
+    if (stream) stream.close();
     const es = new EventSource("/api/stream");
+    stream = es;
     // "outbox" fires when a message is queued to send and when the agent has
     // been round to try: the count in the sidebar is only honest if it moves
     // without waiting out a poll.
@@ -422,7 +425,31 @@ App.shell = (function () {
     // long before the user clicks something. Hand it to the watchdog, which
     // confirms with a probe before showing the bar.
     es.onopen = () => App.conn.ok();
-    es.onerror = () => App.conn.fail();
+    // A stream we closed on purpose is not an outage. Without the guard, going
+    // to the background would raise the red "connection lost" bar and set the
+    // watchdog probing on a loop — the opposite of standing down.
+    es.onerror = () => { if (stream === es) App.conn.fail(); };
+  }
+
+  /* Stand the live half of the shell down while the app is in the background.
+
+     The stream is the expensive part: every event it delivers costs a
+     scheduleRefresh, which is five API calls and a full sidebar and list
+     re-render. Closing it also drops the server's 15-second keepalive.
+
+     Coming back does a full reload rather than trusting what is on screen —
+     while the stream was shut, every change the agent made went unheard, so the
+     list is exactly as stale as the pause was long. */
+  function initPowerSave() {
+    if (!App.power) return;
+    App.power.whenSuspended(() => {
+      clearTimeout(refreshTimer);
+      if (stream) { const es = stream; stream = null; es.close(); }
+    });
+    App.power.whenResumed(() => {
+      connectSSE();
+      scheduleRefresh();
+    });
   }
 
   // --- Settings modal (accounts) ---
@@ -747,6 +774,10 @@ App.shell = (function () {
     // First, so that a server that is already down at page load says so
     // instead of leaving an empty shell with no explanation.
     App.conn.init();
+    // Before the initialisers that register with it, and before anything starts
+    // a timer: a window that is already in the background at load should never
+    // get as far as its first poll.
+    App.power.init();
     try {
       await App.api.ensureSession();
       wire();
@@ -763,6 +794,7 @@ App.shell = (function () {
       // notice is the least urgent thing on the page, and it must not be able
       // to delay or fail the boot of the parts that show mail.
       App.update.init();
+      initPowerSave();
       connectSSE();
       sidebar = await App.api.mailboxes();
       renderSidebar();

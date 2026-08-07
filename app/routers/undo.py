@@ -60,7 +60,7 @@ from .actions import _move_to
 router = APIRouter(prefix="/api/actions", tags=["undo"], dependencies=[Depends(require_ui_auth)])
 
 # How many operations the panel lists.
-DEFAULT_LIMIT = 12
+DEFAULT_LIMIT = 5
 MAX_LIMIT = 100
 
 # How far back down the queue table to look for them.
