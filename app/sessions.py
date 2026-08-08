@@ -211,10 +211,3 @@ def authorize(db, *, secret_key: str, password: str, api_token: str,
         row.last_seen_at = now
         db.commit()
     return True
-
-
-def active(db) -> list:
-    """Logins that have not expired, newest first — what "signed in elsewhere"
-    would be read from."""
-    return list(db.query(UiSession).filter(UiSession.expires_at > utcnow())
-                .order_by(UiSession.created_at.desc()).all())

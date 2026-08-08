@@ -627,7 +627,7 @@ def _latency(db, base, own: set[str], maturity: timedelta) -> dict:
         "answered_by_them": int(ans_out or 0),
         "buckets": [
             {"label": label, "count": int(c or 0)}
-            for (_, label), c in zip(LATENCY_BUCKETS, row[10:])
+            for (_, label), c in zip(LATENCY_BUCKETS, row[10:], strict=True)
         ],
         "window_days": REPLY_WINDOW.days,
     }

@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from app import searchquery  # noqa: E402
+from app import searchquery
 
 
 def test_flags_are_lifted_out_of_the_text():

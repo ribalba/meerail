@@ -21,10 +21,10 @@ import pytest
 from imapclient import IMAPClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agent"))
-import actions as agent_actions  # noqa: E402
-from core.mail.parse import content_key  # noqa: E402
-import log as agent_log  # noqa: E402
-from core.models import utcnow  # noqa: E402
+import actions as agent_actions
+from core.mail.parse import content_key
+import log as agent_log
+from core.models import utcnow
 
 
 # The UID epoch every folder in this file is on. A UID is only unique within

@@ -223,6 +223,36 @@ def queue_move_for(email: str, subject: str) -> int:
         return action.id
 
 
+def queue_move_without_message(email: str, op_id: str) -> int:
+    """Queue a move that names no message, under ``op_id``.
+
+    The shape ``_cancel`` guards against and could not survive: a logged action
+    whose ``message_pk`` is NULL, so the message lookup comes back empty. Nothing
+    writes one today — every move is queued against a message, and the FK
+    cascades the row away if that message is ever deleted — which is exactly why
+    the branch that handles it went untested, and why the call in it was missing
+    an argument and raised TypeError instead of retiring the row.
+    """
+    with session() as db:
+        account = db.query(Account).filter(Account.email == email.lower()).one()
+        action = PendingAction(
+            account_id=account.id, message_pk=None, type="move",
+            payload={"from_folder": "INBOX", "uid": 1, "uidvalidity": 1,
+                     "to_folder": "Archive", "op_id": op_id, "op_kind": "archive",
+                     "undo_from": []},
+        )
+        db.add(action)
+        db.flush()
+        return action.id
+
+
+def action_status(action_id: int) -> tuple[str, bool]:
+    """One queue row's status, and whether it has been marked undone."""
+    with session() as db:
+        action = db.query(PendingAction).filter(PendingAction.id == action_id).one()
+        return action.status, "undone_at" in (action.payload or {})
+
+
 def drop_placements(email: str, folder: str) -> int:
     """Take a folder's placements away without touching the messages — what a
     repointed UID leaves behind (see core.mail.store.upsert_location)."""

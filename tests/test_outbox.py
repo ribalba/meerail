@@ -17,7 +17,7 @@ import dbfixture
 from helpers import api
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agent"))
-import actions as agent_actions  # noqa: E402
+import actions as agent_actions
 
 
 def queue_one(account, subject="Waiting", body="body text", to="dest@example.com") -> int:

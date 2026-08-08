@@ -10,7 +10,7 @@ from core.events import publish_command
 from core.mail.store import STUCK_AFTER
 from ..deps import require_ui_auth
 from ..syncstate import account_state
-from .actions import _archive_mailbox
+from .. import mailops
 
 # What the "Create an Archive folder" button asks the agent for. A bare leaf:
 # where a user folder is allowed to live is the server's business and only the
@@ -261,7 +261,7 @@ def _dropped_fix(db, was_dropped) -> dict | None:
         .distinct()
     ).scalars().all()
     for account_id in account_ids:
-        if _archive_mailbox(db, account_id) is not None:
+        if mailops.archive_mailbox(db, account_id) is not None:
             continue
         account = db.get(Account, account_id)
         if account is None:
@@ -313,7 +313,7 @@ def create_archive_folder(account_id: int, db: DBSession = Depends(get_db)):
     account = db.get(Account, account_id)
     if account is None:
         raise HTTPException(status_code=404, detail="Account not found")
-    existing = _archive_mailbox(db, account_id)
+    existing = mailops.archive_mailbox(db, account_id)
     if existing is not None:
         raise HTTPException(
             status_code=409,
@@ -332,7 +332,7 @@ def create_archive_folder(account_id: int, db: DBSession = Depends(get_db)):
                              type="create_folder",
                              payload={"name": ARCHIVE_FOLDER_NAME}))
         db.commit()
-    publish_command({"type": "refresh", "email": account.email})
+    mailops.wake_agent(db, account.id)
     return {"status": "queued", "name": ARCHIVE_FOLDER_NAME, "account_id": account_id}
 
 

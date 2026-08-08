@@ -20,7 +20,7 @@ import pytest
 
 import dbfixture
 from conftest import status_for
-from helpers import SERVER, api, make_message, port_open
+from helpers import api, make_message, port_open
 
 AGENT_DIR = Path(__file__).resolve().parent.parent / "agent"
 sys.path.insert(0, str(AGENT_DIR))

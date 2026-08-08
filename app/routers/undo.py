@@ -15,7 +15,7 @@ there is no record on either side that anything happened.
 *The agent has it right now, or has just applied it.* There is no answer yet.
 Mid-apply, the row is leased and rewriting it is the race that once left a
 message in Trash on the server and in Archive here, for good
-(actions._retarget_pending). Just-applied, the move has run but the sync has not
+(mailops._retarget_pending). Just-applied, the move has run but the sync has not
 brought the server's copy back, so the message is sitting on an optimistic
 placement whose UID no server has heard of and there is nothing to address a
 reverse move to. Both are refused with the same sentence, because to the person
@@ -23,7 +23,7 @@ pressing the button they are the same situation: wait a moment and press again.
 
 *The move has landed and synced.* Undo is then an ordinary move in the opposite
 direction, queued exactly like the one it reverses — which is why this is short:
-``actions._move_to`` already knows how to name a message to the agent, write the
+``mailops.move_to`` already knows how to name a message to the agent, write the
 optimistic placement, and refuse the two cases above.
 
 One of those reverse moves may have nowhere to go: a message filed *out of*
@@ -45,17 +45,15 @@ prune them — a worse lie than the honest partial restore.
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, distinct, func, or_, select, tuple_
 from sqlalchemy.orm import Session as DBSession
 
-from .. import events
+from .. import events, mailops, reminders
 from core import undo
 from core.database import get_db
-from core.events import publish_command
 from core.mail.store import drop_pending_placement, recompute_counts
-from core.models import Account, Mailbox, Message, PendingAction, utcnow
+from core.models import Mailbox, Message, PendingAction, utcnow
 from ..deps import require_ui_auth
-from .actions import _move_to
 
 router = APIRouter(prefix="/api/actions", tags=["undo"], dependencies=[Depends(require_ui_auth)])
 
@@ -155,6 +153,7 @@ def recent(limit: int = DEFAULT_LIMIT, db: DBSession = Depends(get_db)):
     }
 
     unreversible = _unreversible_counts(db, [r.op_id for r in rows])
+    threads = _thread_titles(db, [r.op_id for r in rows], floor)
 
     items = []
     for row in rows:
@@ -172,6 +171,9 @@ def recent(limit: int = DEFAULT_LIMIT, db: DBSession = Depends(get_db)):
             "at": row.at.isoformat() if row.at else None,
             "count": row.n,
             "subject": subject or "(no subject)",
+            # Set only when the whole operation was one conversation, which is
+            # then what the panel names instead of counting messages.
+            "thread": threads.get(row.op_id),
             "to": _folder_name(db, action.account_id, payload.get("to_folder")),
             "from": _folder_name(db, action.account_id,
                                  payload.get("from_folder") or payload.get("folder")),
@@ -192,7 +194,7 @@ def _unwritable(home: Mailbox | None) -> str | None:
 
     Undo has to ask, because the ordinary move path never reaches this: the
     keypress that files mail picks its own destination through
-    ``_archive_mailbox``, which drops \\All the moment it has been refused once.
+    ``mailops.archive_mailbox``, which drops \\All the moment it has been refused once.
     An undo does not pick anything — it goes back to the folder named on the
     action, and on a label server that folder is very often \\All, because \\All
     is where all the mail is. So undoing an archive queued a move the server had
@@ -204,7 +206,7 @@ def _unwritable(home: Mailbox | None) -> str | None:
     and the server still has it there — so there is no placement to restore and
     the undo would have achieved nothing even if the server had taken it.
 
-    Far fewer moves reach here than used to. ``actions._move_to`` no longer
+    Far fewer moves reach here than used to. ``mailops.move_to`` no longer
     plans a move out of \\All into a folder the message already occupies, which
     was most of them; what is left is the message whose only placement anywhere
     is \\All, and for that one this is still the answer.
@@ -252,6 +254,71 @@ def _unreversible_counts(db: DBSession, op_ids: list[str]) -> dict[str, int]:
     return {op_id: count for op_id, count in rows}
 
 
+def _thread_titles(db: DBSession, op_ids: list[str], floor: int) -> dict[str, str]:
+    """The conversation each operation filed, for the operations that were one.
+
+    "Archived 4 messages" describes the shape of what happened rather than the
+    thing that was done: archiving a conversation is one keypress about one
+    subject, and the four is an implementation detail of how many mails that
+    conversation happens to hold. So an operation whose rows all belong to a
+    single thread is named by that thread, and only a genuinely mixed selection
+    falls back to a count.
+
+    Two conditions, both necessary. Every row must carry a thread, because a
+    message that never got threaded is a conversation of its own and an
+    operation holding one is not the single named thread it would otherwise
+    look like. And the operation must not span accounts — a bulk action can —
+    since thread ids are only unique within one.
+
+    The title is the newest message's subject, ordered exactly as the list and
+    the reader order it (messages.py::list_messages), so the panel says back
+    the same words that were on screen when the key was pressed rather than the
+    original subject of a thread the user has only ever seen as "Re:".
+
+    Bounded by the same ``floor`` window as the query that chose the operations,
+    for the same reason: matching on a JSONB key is a sequential scan of the
+    queue table, and the panel is read on every sidebar refresh.
+    """
+    if not op_ids:
+        return {}
+    op = _op_column()
+    rows = db.execute(
+        select(op.label("op_id"),
+               PendingAction.account_id,
+               func.count(distinct(Message.thread_id)).label("threads"),
+               func.count().filter(Message.thread_id.is_(None)).label("loose"),
+               func.min(Message.thread_id).label("thread_id"))
+        .select_from(PendingAction)
+        .outerjoin(Message, Message.id == PendingAction.message_pk)
+        .where(PendingAction.id > floor - SCAN_ROWS,
+               op.in_(op_ids), PendingAction.type.in_(undo.LOGGED_TYPES))
+        .group_by(op, PendingAction.account_id)
+    ).all()
+
+    single: dict[str, tuple[int, str] | None] = {}
+    for row in rows:
+        key = (row.account_id, row.thread_id) if row.threads == 1 and not row.loose else None
+        # An operation that reached two accounts arrives here as two groups.
+        # Seeing it twice is itself the answer: it is not one conversation.
+        single[row.op_id] = None if row.op_id in single else key
+    keys = {key for key in single.values() if key}
+    if not keys:
+        return {}
+
+    titles = {
+        (account_id, thread_id): subject
+        for account_id, thread_id, subject in db.execute(
+            select(Message.account_id, Message.thread_id, Message.subject)
+            .where(tuple_(Message.account_id, Message.thread_id).in_(keys))
+            .distinct(Message.account_id, Message.thread_id)
+            .order_by(Message.account_id, Message.thread_id,
+                      Message.date_sent.desc().nulls_last(), Message.id.desc())
+        ).all()
+    }
+    return {op_id: titles[key] for op_id, key in single.items()
+            if key and titles.get(key)}
+
+
 def _undoability(row, payload: dict, home: Mailbox | None,
                  unreversible: int) -> tuple[bool, str | None]:
     """Whether the panel should offer Undo on this operation, and why not.
@@ -286,10 +353,7 @@ def _undoability(row, payload: dict, home: Mailbox | None,
 def _folder_name(db: DBSession, account_id: int, imap_name: str | None) -> str | None:
     if not imap_name:
         return None
-    mb = db.execute(
-        select(Mailbox).where(Mailbox.account_id == account_id,
-                              Mailbox.imap_name == imap_name)
-    ).scalars().first()
+    mb = mailops.mailbox_by_name(db, account_id, imap_name)
     return (mb.display_name or mb.imap_name) if mb is not None else imap_name
 
 
@@ -377,9 +441,7 @@ def undo_operation(op_id: str, db: DBSession = Depends(get_db)):
     # to the poll interval the message would be gone from the folder it was
     # undone out of and not yet back in the one it came from.
     for account_id in accounts:
-        account = db.get(Account, account_id)
-        if account is not None:
-            publish_command({"type": "refresh", "email": account.email})
+        mailops.wake_agent(db, account_id)
     events.publish({"type": "present", "moved": restored})
     return {"ok": True, "restored": restored}
 
@@ -396,12 +458,7 @@ def _cancel_reminder(db: DBSession, actions: list[PendingAction]) -> None:
     Silent when there is no pending reminder left: it may have fired in the
     seconds since, or been cancelled from the reminders view, and in both cases
     the placement half of this undo is still exactly what was asked for.
-
-    Imported here rather than at module scope: app.reminders imports the action
-    helpers this module also uses, and hoisting it would make that a cycle.
     """
-    from .. import reminders
-
     seen: set[int] = set()
     for action in actions:
         if action.message_pk is None or action.message_pk in seen:
@@ -432,18 +489,17 @@ def _cancel(db: DBSession, action: PendingAction, touched: set[int]) -> int:
     """
     msg = db.get(Message, action.message_pk) if action.message_pk else None
     if msg is None:
-        _mark_undone(action)
+        # Nothing left to put back, and nothing left to apply either — so the
+        # row is retired the same way a cancelled move is, which is what stops
+        # the agent trying to move a message that is no longer there.
+        _mark_undone(action, cancelled=True)
         return 0
 
     payload = action.payload or {}
-    target = payload.get("to_folder")
-    if target:
-        mailbox_id = db.scalar(
-            select(Mailbox.id).where(Mailbox.account_id == action.account_id,
-                                     Mailbox.imap_name == target))
-        if mailbox_id is not None:
-            drop_pending_placement(db, msg.id, mailbox_id)
-            touched.add(mailbox_id)
+    target = mailops.mailbox_by_name(db, action.account_id, payload.get("to_folder"))
+    if target is not None:
+        drop_pending_placement(db, msg.id, target.id)
+        touched.add(target.id)
 
     try:
         restored = undo.restore(db, msg, payload.get("undo_from") or [], touched)
@@ -461,7 +517,7 @@ def _reverse(db: DBSession, action: PendingAction, touched: set[int], op_id: str
     claiming the old folder would be pruned by the next sync. So this queues the
     opposite move and lets it travel the same path as the one it reverses.
 
-    ``_move_to`` is what raises for the two mid-flight cases: the message is
+    ``mailops.move_to`` is what raises for the two mid-flight cases: the message is
     sitting on an optimistic placement, from the move being undone or from
     another keypress since, and there is no UID on it that names anything to a
     mail server. Its wording is about moving rather than undoing, so it is caught
@@ -473,10 +529,7 @@ def _reverse(db: DBSession, action: PendingAction, touched: set[int], op_id: str
         return 0
 
     home = _home(db, action, payload)
-    current = db.execute(
-        select(Mailbox).where(Mailbox.account_id == action.account_id,
-                              Mailbox.imap_name == payload["to_folder"])
-    ).scalars().first()
+    current = mailops.mailbox_by_name(db, action.account_id, payload["to_folder"])
     if home is None or current is None:
         raise HTTPException(
             status_code=400,
@@ -504,7 +557,7 @@ def _reverse(db: DBSession, action: PendingAction, touched: set[int], op_id: str
         return 0
 
     try:
-        _move_to(db, msg, current.id, home, touched, op_id=op_id, op_kind="undo")
+        mailops.move_to(db, msg, current.id, home, touched, op_id=op_id, op_kind="undo")
     except HTTPException as e:
         if e.status_code == 409:
             raise HTTPException(status_code=409, detail=SYNCING) from e
@@ -521,10 +574,7 @@ def _home(db: DBSession, action: PendingAction, payload: dict) -> Mailbox | None
     three folders for one queued command. The one the agent was told to move
     *out of* is the one it can be told to move back into.
     """
-    return db.execute(
-        select(Mailbox).where(Mailbox.account_id == action.account_id,
-                              Mailbox.imap_name == payload.get("from_folder"))
-    ).scalars().first()
+    return mailops.mailbox_by_name(db, action.account_id, payload.get("from_folder"))
 
 
 def _mark_undone(action: PendingAction, cancelled: bool) -> None:

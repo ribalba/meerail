@@ -59,15 +59,42 @@ App.undo = (function () {
     localStorage.setItem(STORE_KEY, state ? "1" : "0");
   }
 
-  // What one operation did, in the terms the user pressed it in. "Archived 4"
-  // rather than "move", and the destination named the way the sidebar names it.
+  // What one operation did, in the terms the user pressed it in. "Archived
+  // “Roof quote”" rather than "move", and the destination named the way the
+  // sidebar names it.
+  //
+  // A whole conversation is named, not counted. Archiving a thread is one
+  // keypress about one subject, and "Archived 4 messages" describes the shape
+  // of the thing rather than the thing — nobody remembers how many mails were
+  // in the conversation they filed, so a count is the one detail that cannot
+  // identify the row. The server says which operations were a single thread
+  // and what that thread is currently called (app/routers/undo.py::
+  // _thread_titles); a mixed selection has no such title and still counts.
   function line(item) {
     const verb = VERB[item.kind] || "Moved";
-    const what = item.count > 1 ? `${item.count} messages` : (item.subject || "1 message");
+    const title = item.thread || (item.count === 1 ? item.subject : "");
+    const what = title ? `“${title}”`
+               : item.count > 1 ? `${item.count} messages`
+               : "1 message";
     const where = item.kind === "move" && item.to ? ` to ${item.to}`
                 : item.kind === "undo" && item.to ? ` in ${item.to}`
                 : "";
     return `${verb} ${what}${where}`;
+  }
+
+  // The same sentence for the pointer, with the part the row had to drop. The
+  // panel is a sidebar column and a subject is a sentence, so .rc-line ellipses
+  // nearly every one of them; the title is what makes the rest reachable, and
+  // it carries the message count too, which naming the thread takes out of the
+  // line.
+  //
+  // Not the same thing as the ⓘ below, and the distinction is the point: this
+  // is the row's own text, in full, for a row that visibly has more to say. A
+  // reason for a refusal is neither — nothing on screen hints it exists, so it
+  // gets a button and a line of its own.
+  function full(item) {
+    const text = line(item);
+    return item.thread && item.count > 1 ? `${text} — ${item.count} messages` : text;
   }
 
   function render() {
@@ -104,7 +131,7 @@ App.undo = (function () {
             ? `<div class="rc-why">${App.esc(why)}</div>` : "";
           return `<div class="rc-row${failed ? " failed" : ""}">
             <div class="rc-what">
-              <span class="rc-line">${App.esc(line(item))}</span>
+              <span class="rc-line" title="${App.esc(full(item))}">${App.esc(line(item))}</span>
               <span class="rc-when">${App.esc(when)}</span>
             </div>
             ${why ? `<button class="rc-info" type="button" data-info="${App.esc(item.op_id)}"
@@ -244,6 +271,7 @@ App.undo = (function () {
       kind: hit[1],
       count: body.moved || 1,
       subject: "",
+      thread: null,
       at: new Date().toISOString(),
       undoable: true,
       reason: null,

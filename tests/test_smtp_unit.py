@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agent"))
-import smtp as agent_smtp  # noqa: E402
+import smtp as agent_smtp
 
 
 def test_bare_lf_becomes_crlf():

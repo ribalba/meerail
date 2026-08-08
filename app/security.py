@@ -1,28 +1,24 @@
-"""Small crypto/id helpers.
+"""Symmetric encryption for the credentials this app stores itself.
 
-meerail is a single-user local app, so there is no user auth. These helpers
-provide opaque ids/tokens and symmetric encryption for any credential that is
-optionally stored server-side (Bridge creds normally live in the agent config).
+meerail is a single-user local app and there is no user auth, so the only secret
+that ever lands in the database is the one the Tasks integration needs: an API
+token for an external tracker, which the user pastes into Settings and which has
+to be replayed verbatim on every call. Mail credentials are not here at all —
+those live in the agent's own config, on the host, and never reach this process.
+
+Both functions are used from app/routers/tasks.py and nowhere else. Two id
+helpers used to sit beside them (``new_id``, ``new_token``) for a server-side
+credential store that was never built; nothing called either.
 """
 
 import base64
 import hashlib
-import secrets
-import uuid
 
 from cryptography.fernet import Fernet, InvalidToken
 
 from core.config import get_settings
 
 settings = get_settings()
-
-
-def new_id() -> str:
-    return str(uuid.uuid4())
-
-
-def new_token(nbytes: int = 32) -> str:
-    return secrets.token_urlsafe(nbytes)
 
 
 def _fernet() -> Fernet:

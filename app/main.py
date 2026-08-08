@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Request, status
@@ -17,10 +18,58 @@ from .routers import (
     reminders, search, stream, sync, tasks, undo, version,
 )
 from .deps import is_secure_request, require_ui_auth, ui_password
+from .routers.compose import sweep_outbox_staging
 from .workers import contacts_loop, reminders_loop
 
 settings = get_settings()
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+
+# The background loops started below, held so that nothing collects them.
+#
+# asyncio keeps only a *weak* reference to a running task: a task nothing else
+# names may be garbage-collected mid-await, and the only trace is that whatever
+# it was doing silently stops. Two of the three here are loops that must run for
+# the life of the process, and the reminder tick is the one thing in meerail
+# that has to happen at a particular moment rather than in response to a
+# request — a collected task there is a promise quietly not kept, with nothing
+# in the log to say so. The discard callback keeps this from being a leak: a
+# task that ends takes itself back out.
+_TASKS: set[asyncio.Task] = set()
+
+
+def _spawn(coro) -> None:
+    task = asyncio.create_task(coro)
+    _TASKS.add(task)
+    task.add_done_callback(_TASKS.discard)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Everything that has to be running before the first request, and nothing
+    after the last — the replacement for the ``on_event`` hooks, which FastAPI
+    has deprecated.
+
+    Nothing is torn down on the way out. The three tasks below are daemons of
+    the process, not of any request, and the loops they run are all written to
+    be killed at any point (each commits per unit of work); cancelling them here
+    would only add a shutdown path with nothing to do in it.
+    """
+    # Staging for outgoing attachments — the only thing left on disk, and the
+    # server is the only process that writes it (core/config.py says why the
+    # shared loader no longer does).
+    settings.outbox_dir.mkdir(parents=True, exist_ok=True)
+    sweep_outbox_staging()
+    init_db()
+    events.set_loop(asyncio.get_running_loop())
+    # Mail ingest (and its Tika extraction) runs in the agent; the app only
+    # listens for the resulting change notifications.
+    _spawn(events.listener_loop())
+    _spawn(contacts_loop())
+    # The only clock in the app: mail parked on a reminder comes back from here,
+    # including the reminders that fell due while this server was not running.
+    _spawn(reminders_loop())
+    yield
 
 # One version number for the whole project, read from the VERSION file at the
 # repository root (core/version.py) — the same one the images are tagged with.
@@ -32,7 +81,8 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 # this app's Content-Security-Policy permits neither. Pointing any OpenAPI
 # client at /openapi.json is what replaces them.
 app = FastAPI(title="meerail", version=VERSION,
-              docs_url=None, redoc_url=None, openapi_url=None)
+              docs_url=None, redoc_url=None, openapi_url=None,
+              lifespan=lifespan)
 
 
 # A body no larger than the route could possibly want, decided from the headers
@@ -189,23 +239,6 @@ _CSP = "; ".join([
 _PROXIES = trusted_proxy_hosts(settings.trusted_proxies)
 if _PROXIES:
     app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=_PROXIES)
-
-
-@app.on_event("startup")
-async def _startup() -> None:
-    # Staging for outgoing attachments — the only thing left on disk, and the
-    # server is the only process that writes it (core/config.py says why the
-    # shared loader no longer does).
-    settings.outbox_dir.mkdir(parents=True, exist_ok=True)
-    init_db()
-    events.set_loop(asyncio.get_running_loop())
-    # Mail ingest (and its Tika extraction) runs in the agent; the app only
-    # listens for the resulting change notifications.
-    asyncio.create_task(events.listener_loop())
-    asyncio.create_task(contacts_loop())
-    # The only clock in the app: mail parked on a reminder comes back from here,
-    # including the reminders that fell due while this server was not running.
-    asyncio.create_task(reminders_loop())
 
 
 app.include_router(accounts.router)

@@ -12,7 +12,7 @@ per-account round trip through the agent that can fail (or be refused by the
 server) long after the button was pressed, and the mail has to go *somewhere*
 the moment the key is pressed. Archive is a folder every account already has —
 or, on Gmail-style servers, is \\All, which archiving already means there
-(actions._archive_mailbox). The cost is that mail waiting on a reminder looks
+(mailops.archive_mailbox). The cost is that mail waiting on a reminder looks
 like ordinary archived mail in other clients; the reminders view in this one is
 what tells them apart, and firing a reminder is what puts them back.
 
@@ -23,7 +23,7 @@ app/workers.py ticks over the due ones; a server that was down at nine o'clock
 fires them when it comes back, late rather than never.
 
 **Firing goes through the ordinary move queue.** Bringing a conversation back
-writes the same PendingActions the Move button writes (actions._move_to), so it
+writes the same PendingActions the Move button writes (mailops.move_to), so it
 inherits everything that already works there: the placement appears in the inbox
 straight away, an unreachable mail server delays the write-back rather than
 losing it, and a move that is still in flight is refused and retried rather than
@@ -63,12 +63,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session as DBSession, selectinload
 
 from core import undo
-from core.events import publish_command
-from core.models import Account, Mailbox, Message, Reminder, utcnow
+from core.models import Mailbox, Message, Reminder, utcnow
 
 from . import events
-from .routers.actions import (
-    _archive_mailbox, _move_messages, _move_to, _recompute, _role_mailbox, set_seen,
+from .mailops import (
+    archive_mailbox, move_messages, move_to, recompute, role_mailbox, set_seen, wake_agent,
 )
 
 # How far ahead a reminder may be set. Not a judgement about what is a useful
@@ -225,18 +224,18 @@ def set_reminder(db: DBSession, msg: Message, due_at: datetime) -> tuple[Reminde
         # offer an Undo on. Changing a deadline is done from the reminders view.
         return existing, None
 
-    park = _archive_mailbox(db, msg.account_id)
+    park = archive_mailbox(db, msg.account_id)
     if park is None:
         raise HTTPException(
             status_code=400,
             detail="This account has no Archive folder, so there is nowhere to keep a "
                    "reminder's mail until it is due. Create one on the server (or mark "
                    "an existing folder \\Archive) and sync again.")
-    inbox = _role_mailbox(db, msg.account_id, "inbox")
+    inbox = role_mailbox(db, msg.account_id, "inbox")
     msgs = _conversation(db, msg)
 
     # Snapshotted before the move, because afterwards there is nothing left to
-    # read it off: every placement this is about is deleted by _move_messages.
+    # read it off: every placement this is about is deleted by move_messages.
     parked = []
     for m in msgs:
         origins = [loc.mailbox_id for loc in m.locations if loc.mailbox_id != park.id]
@@ -257,8 +256,8 @@ def set_reminder(db: DBSession, msg: Message, due_at: datetime) -> tuple[Reminde
     # leaving it out made "remind me" the one action that happened invisibly.
     # Undoing it takes the promise back too; see app/routers/undo.py.
     op_id = undo.new_op_id()
-    _move_messages(db, msgs, park, touched, op_id, "remind")
-    _recompute(db, touched)
+    move_messages(db, msgs, park, touched, op_id, "remind")
+    recompute(db, touched)
 
     reminder = Reminder(
         account_id=msg.account_id, message_pk=msg.id, thread_id=msg.thread_id,
@@ -290,7 +289,7 @@ def _return_folder(db: DBSession, account_id: int, mailbox_ids: list[int]) -> Ma
     boxes.sort(key=lambda mb: (mb.role != "inbox", mb.role == "all", mb.id))
     best = boxes[0] if boxes else None
     if best is None or best.role == "all":
-        return _role_mailbox(db, account_id, "inbox") or best
+        return role_mailbox(db, account_id, "inbox") or best
     return best
 
 
@@ -324,10 +323,10 @@ def fire(db: DBSession, reminder: Reminder) -> int:
         if target is None or target.id == park.id:
             continue
         set_seen(db, msg, False, touched)
-        _move_to(db, msg, park.id, target, touched)
+        move_to(db, msg, park.id, target, touched)
         restored += 1
 
-    _recompute(db, touched)
+    recompute(db, touched)
     reminder.state = "done"
     reminder.fired_at = utcnow()
     reminder.error = None
@@ -409,11 +408,9 @@ def run_due(db: DBSession, now: datetime | None = None) -> int:
 
     # Told once at the end rather than per reminder: each publish is a pg_notify
     # round trip of its own, and the browsers treat all of these as "something
-    # changed, reload" anyway (see actions._announce).
+    # changed, reload" anyway (see mailops.announce).
     for account_id in accounts:
-        account = db.get(Account, account_id)
-        if account:
-            publish_command({"type": "refresh", "email": account.email})
+        wake_agent(db, account_id)
     if accounts:
         events.publish({"type": "present", "moved": woken})
     return woken

@@ -225,11 +225,39 @@ def test_a_thread_archive_is_one_entry_and_undoes_whole(account):
     items = _recent()
     assert items[0]["kind"] == "archive"
     assert items[0]["count"] == 3, "one keypress is one entry, however many messages"
+    # Named by the conversation rather than counted, and named by its newest
+    # message — the title the list and the reader were showing when the key was
+    # pressed, which here is the reply rather than the original subject.
+    assert items[0]["thread"] == f"Re: Subj {token}"
 
     assert api("POST", f"/api/actions/{items[0]['op_id']}/undo")[0] == 200
     _, rows = api("GET", f"/api/messages?mailbox_id={ids['inbox']}&limit=100")
     assert len([x for x in rows["rows"] if token in x["subject"]]) >= 1
     assert not [a for a in dbfixture.pending_actions(email) if a["type"] == "move"]
+
+
+def test_a_mixed_selection_is_counted_not_named(account):
+    """Two conversations trashed in one keypress have no single title, so the
+    panel falls back to counting. Naming either of them would describe half of
+    what Undo would put back."""
+    email, aid = account["email"], account["id"]
+    _seed_folder(email, "Trash", "\\Trash")
+    token = "UNDOMIXED" + uuid.uuid4().hex[:6]
+    for n, uid in ((1, 301), (2, 302)):
+        dbfixture.ingest_raw_message(email, make_message(
+            f"<mix-{uuid.uuid4().hex}@t>", f"Subj {n} {token}", "s@ex.com", email,
+            f"{token} {n}", T0), uid=uid)
+
+    _, r = api("GET", f"/api/search?q={token}&account_id={aid}")
+    threads = {row["thread_id"] for row in r["rows"]}
+    assert len(threads) == 2, "two unrelated mails are two conversations"
+    code, body = api("POST", "/api/messages/bulk/trash", {
+        "items": [{"account_id": aid, "thread_id": t} for t in threads]})
+    assert code == 200, body
+
+    entry = _recent()[0]
+    assert entry["count"] == 2
+    assert entry["thread"] is None
 
 
 def _seed_archive(email):

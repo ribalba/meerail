@@ -20,7 +20,7 @@ from conftest import status_for
 from helpers import api, api_bytes, make_message
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agent"))
-import sync as agent_sync  # noqa: E402
+import sync as agent_sync
 
 T0 = datetime(2026, 3, 1, 9, 0, tzinfo=timezone.utc)
 

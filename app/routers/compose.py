@@ -7,6 +7,7 @@ from __future__ import annotations
 import mimetypes
 import os
 import re
+import time
 import uuid
 from datetime import timedelta
 from email.message import EmailMessage
@@ -35,8 +36,7 @@ _MALFORMED_MULTIPART = (MultiPartException, MultipartParseError)
 from core import outbox as outbox_core
 from core.config import get_settings
 from core.database import get_db
-from core.events import publish_command
-from .. import events
+from .. import events, mailops
 from ..deps import require_ui_auth
 from .messages import _readable
 from core.models import Account, Attachment, Message, Outbound, PendingAction, Recipient, utcnow
@@ -190,6 +190,58 @@ def _stage_bytes(filename: str, payload: bytes) -> str:
     staging_id = f"{uuid.uuid4().hex}__{_safe(filename or 'file')}"
     (settings.outbox_dir / staging_id).write_bytes(payload)
     return staging_id
+
+
+# How long a staged file may sit unclaimed before it is swept.
+#
+# Staging is meant to be brief: a file is written when it is attached and
+# removed when the message is sent (/send, which unlinks every path it baked in)
+# or when the composer drops it (DELETE /attachments/{id}). Neither happens if
+# the composer never finishes — a closed tab, a crashed browser, a laptop lid —
+# and nothing else ever looked at the directory, so those files stayed for good.
+#
+# Forwarding is what makes that matter rather than merely being untidy.
+# ``reply_context(mode="forward")`` stages every attachment of the message being
+# forwarded *before* the user has decided to send anything, so opening a forward
+# of a mail carrying a video and then closing the composer leaves the video on
+# disk. Doing that a few times a week is a data directory that grows forever
+# with files nothing can reach.
+#
+# A day, because the only thing the age has to clear is a composer someone left
+# open — including one left open overnight. A staged file is written once and
+# then only read at /send, so mtime is a fair reading of "nothing has claimed
+# this".
+STAGING_TTL_SECONDS = 24 * 3600
+
+
+def sweep_outbox_staging(ttl_seconds: int = STAGING_TTL_SECONDS) -> int:
+    """Delete staged attachments nothing came back for. Returns how many.
+
+    Called at startup rather than on a timer. The files are only orphaned by a
+    composer that never finished, so a sweep per process start clears them at
+    the one moment there is demonstrably no composer open against this server —
+    and it costs a directory listing on a directory that is normally empty.
+
+    Best-effort throughout: this runs before the app serves anything, and a
+    permission error or a file that vanishes underneath us is not a reason to
+    refuse to start. Anything it cannot deal with is simply left, and the next
+    start tries again.
+    """
+    cutoff = time.time() - ttl_seconds
+    swept = 0
+    try:
+        entries = list(settings.outbox_dir.iterdir())
+    except OSError:
+        return 0
+    for path in entries:
+        try:
+            if not path.is_file() or path.stat().st_mtime >= cutoff:
+                continue
+            path.unlink()
+            swept += 1
+        except OSError:
+            continue
+    return swept
 
 
 def _forward_attachments(db: DBSession, msg: Message) -> tuple[list[dict], int]:
@@ -358,7 +410,7 @@ def send(req: SendRequest, db: DBSession = Depends(get_db)):
     # after the delay expires instead, so a delayed send lands within one
     # poll_interval of its deadline rather than on it.
     if not hold:
-        publish_command({"type": "refresh", "email": account.email})
+        mailops.wake_agent(db, account.id)
 
     return {"id": outbound.id, "state": outbound.state, "send_at": hold}
 

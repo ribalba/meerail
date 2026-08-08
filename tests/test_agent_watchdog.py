@@ -23,9 +23,9 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agent"))
-import imap as agent_imap  # noqa: E402
-from core.config import AccountConfig  # noqa: E402
-from imap import Bridge, _tune_socket  # noqa: E402
+import imap as agent_imap
+from core.config import AccountConfig
+from imap import Bridge, _tune_socket
 
 
 @contextmanager

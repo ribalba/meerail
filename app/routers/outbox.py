@@ -45,9 +45,8 @@ from sqlalchemy.orm import Session as DBSession, defer
 
 from core import outbox as outbox_core
 from core.database import get_db
-from core.events import publish_command
 from core.models import Account, Outbound, PendingAction, Setting, utcnow
-from .. import events
+from .. import events, mailops
 from ..deps import require_ui_auth
 
 router = APIRouter(prefix="/api/outbox", tags=["outbox"], dependencies=[Depends(require_ui_auth)])
@@ -324,8 +323,7 @@ def retry(outbound_id: int, db: DBSession = Depends(get_db)) -> dict:
     events.publish({"type": "outbox", "retry": 1})
     # And ask the agent to go now rather than at the end of its poll interval —
     # the whole point of this button is not waiting.
-    account = db.get(Account, row.account_id)
-    publish_command({"type": "refresh", "email": account.email if account else None})
+    mailops.wake_agent(db, row.account_id)
     return {"id": row.id, "state": row.state, "attempts": action.attempts}
 
 

@@ -20,9 +20,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session as DBSession
 
 from core.database import get_db
-from core.events import publish_command
-from core.models import Account, Message, Reminder
-from .. import events, reminders as reminders_core
+from core.models import Message, Reminder
+from .. import events, mailops, reminders as reminders_core
 from ..deps import require_ui_auth
 from .messages import _readable
 
@@ -36,18 +35,6 @@ class RemindIn(BaseModel):
     due_at: datetime
 
 
-def _wake_agent(db: DBSession, account_id: int) -> None:
-    """Ask the agent to drain the queue now rather than at its next poll.
-
-    Parking a conversation is a move, and until the agent has applied it the mail
-    is only filed here — which is exactly the gap that made archive look broken
-    before actions._wake_agent existed.
-    """
-    account = db.get(Account, account_id)
-    if account:
-        publish_command({"type": "refresh", "email": account.email})
-
-
 @router.post("/api/messages/{message_id}/remind")
 def set_reminder(message_id: int, body: RemindIn, db: DBSession = Depends(get_db)) -> dict:
     """File this conversation away and bring it back at ``due_at``.
@@ -59,7 +46,7 @@ def set_reminder(message_id: int, body: RemindIn, db: DBSession = Depends(get_db
     due_at = reminders_core.normalize_due(body.due_at)
     reminder, op_id = reminders_core.set_reminder(db, msg, due_at)
     db.commit()
-    _wake_agent(db, msg.account_id)
+    mailops.wake_agent(db, msg.account_id)
     events.publish({"type": "present", "reminder": 1})
     # op_id lets the Recent actions panel show the parking straight away —
     # null when the reminder already existed and only its deadline moved,
@@ -92,7 +79,7 @@ def clear_reminder(
         reminders_core.cancel(db, reminder)
     db.commit()
     if restore:
-        _wake_agent(db, msg.account_id)
+        mailops.wake_agent(db, msg.account_id)
     events.publish({"type": "present", "reminder": 1})
     return reminders_core.describe(reminder)
 

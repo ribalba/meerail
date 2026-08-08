@@ -228,7 +228,7 @@ def main(argv: list[str] | None = None) -> int:
             if account_id is None:
                 continue          # configured but never synced; nothing to repair
             counts = _restore_account(db, acc, account_id, args.apply)
-            totals = [t + c for t, c in zip(totals, counts)]
+            totals = [t + c for t, c in zip(totals, counts, strict=True)]
     finally:
         db.close()
 

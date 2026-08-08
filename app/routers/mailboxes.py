@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session as DBSession
 
 from core import outbox as outbox_core
 from core.database import get_db
-from core.events import publish_command
+from .. import mailops
 from ..deps import require_ui_auth
 from core.models import (
     Account, Mailbox, MessageLocation, Outbound, PendingAction, Reminder, utcnow,
@@ -167,7 +167,7 @@ def create_mailbox(body: CreateMailbox, db: DBSession = Depends(get_db)):
     db.add(PendingAction(account_id=account.id, message_pk=None,
                          type="create_folder", payload={"name": name}))
     db.commit()
-    publish_command({"type": "refresh", "email": account.email})
+    mailops.wake_agent(db, account.id)
     return {"status": "queued", "name": name, "account_id": account.id}
 
 

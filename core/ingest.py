@@ -25,7 +25,6 @@ from .mail import thumbs, tika
 from .mail.parse import canonical_message_id, header_identity, strip_nuls
 from .mail import store
 from .mail.store import (
-    find_message_by_message_id,
     ingest_location_only,
     ingest_raw,
     is_pending,

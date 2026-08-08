@@ -15,7 +15,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from app.searchquery import keyword_terms, like_escape, parse  # noqa: E402
+from app.searchquery import keyword_terms, like_escape, parse
 
 
 def _patterns(q):

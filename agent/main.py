@@ -30,7 +30,8 @@ _REPO_ROOT = str(Path(__file__).resolve().parent.parent)
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-# noqa: E402 throughout — these must follow the sys.path bootstrap above.
+# Everything below imports `core`, so it has to come after that bootstrap rather
+# than at the top of the file — hence the E402 suppressions on each one.
 from core.config import (  # noqa: E402
     DEFAULT_CONFIG_PATH,
     LEGACY_AGENT_CONFIG,

@@ -45,7 +45,7 @@ def _check_regex(pattern: str, where: str) -> str:
     try:
         re.compile(pattern)
     except re.error as e:
-        raise HTTPException(status_code=400, detail=f"Invalid regex in {where}: {e}")
+        raise HTTPException(status_code=400, detail=f"Invalid regex in {where}: {e}") from e
     return pattern
 
 
@@ -171,9 +171,11 @@ def search(
         rows = db.execute(
             select(reps).order_by(reps.c.date_sent.desc().nulls_last()).limit(limit).offset(offset)
         ).all()
-    except DBAPIError:
+    except DBAPIError as e:
         db.rollback()
-        raise HTTPException(status_code=400, detail="Search failed — the engine rejected that pattern.")
+        raise HTTPException(
+            status_code=400,
+            detail="Search failed — the engine rejected that pattern.") from e
 
     ids = [r.id for r in rows]
     flags: dict[int, tuple[bool, bool]] = {}

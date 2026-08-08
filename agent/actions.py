@@ -193,7 +193,7 @@ def _write_into(db, action: PendingAction, to_folder: str, fn, *args) -> None:
     """
     try:
         fn(*args)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         if imap.refused(e) and _is_all_mail(db, action.account_id, to_folder):
             raise Refused(
                 f"{to_folder} is this account's All Mail, and the server will not accept "

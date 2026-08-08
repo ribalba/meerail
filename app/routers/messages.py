@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session as DBSession
 from core import ingest
 from core.database import get_db
 from core.mail.parse import html_to_text
-from .. import searchquery
+from .. import reminders as reminders_core, searchquery
 from ..deps import require_ui_auth
 from ..mail.render import sanitize_html
 from core.models import (
@@ -210,14 +210,7 @@ def _remind_times(db: DBSession, rows) -> dict[tuple[int, str], str]:
     Two queries for the whole page rather than one per row, and skipped entirely
     when nothing is waiting on a reminder — which is the ordinary state of a
     mailbox, and this must not cost it anything.
-
-    Imported here rather than at the top of the file: app/reminders.py reaches
-    into app/routers/actions.py for the move it queues, and that module imports
-    this one. A module-level import would close the ring while actions.py is
-    still executing its own.
     """
-    from .. import reminders as reminders_core
-
     threaded = {(r.account_id, r.thread_key) for r in rows if not r.thread_key.startswith("msg:")}
     loose = {r.id for r in rows if r.thread_key.startswith("msg:")}
     out: dict[tuple[int, str], str] = {}
@@ -501,8 +494,6 @@ def get_thread(
             # A pattern Postgres rejects costs the attachment highlights, not
             # the thread — the reader still opens.
             db.rollback()
-    from .. import reminders as reminders_core   # see _remind_times for the why
-
     reminder = reminders_core.pending_for(db, msgs[-1])
     return {
         "thread_id": thread_id,
