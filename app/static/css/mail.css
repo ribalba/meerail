@@ -1308,15 +1308,36 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
 .an-controls { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap;
   position: sticky; top: 0; z-index: 2; background: var(--bg);
   padding: .2rem 0 .7rem; margin-bottom: .2rem; }
-.an-ranges { display: flex; gap: 2px; margin-left: auto; background: var(--bg-elev);
+/* The window picker and the heatmap's series tabs are one control in two
+   places — same segmented shape, same states — so they share the rules rather
+   than drifting into two near-identical looks. */
+.an-ranges, .an-tabs { display: flex; gap: 2px; background: var(--bg-elev);
   border: 1px solid var(--border); border-radius: 7px; padding: 2px; }
-.an-range { border: none; background: none; color: var(--text-muted); cursor: pointer;
+.an-ranges { margin-left: auto; }
+.an-range, .an-tab { border: none; background: none; color: var(--text-muted); cursor: pointer;
   font: inherit; font-size: .78rem; padding: .25rem .6rem; border-radius: 5px; }
-.an-range:hover { background: var(--hover-tint); color: var(--text); }
-.an-range.on { background: var(--bg); color: var(--text); font-weight: 550;
+.an-range:hover, .an-tab:hover { background: var(--hover-tint); color: var(--text); }
+.an-range.on, .an-tab.on { background: var(--bg); color: var(--text); font-weight: 550;
   box-shadow: 0 1px 2px light-dark(rgba(0,0,0,.08), rgba(0,0,0,.4)); }
 
-.an-reloading { font-size: .76rem; color: var(--text-muted); margin: 0 0 .5rem; }
+/* Switching range or account is a round trip that rebuilds every panel, and on
+   a large mailbox it takes long enough that a still page reads as a dead
+   button. The bar sweeps on the controls' own bottom edge — absolutely
+   positioned, so appearing and vanishing never nudges the panels below — and
+   the stale figures step back for as long as it runs. Same sweep as the sync
+   progress bar (ag-sweep), because it means the same thing: something is
+   running and its length is not knowable in advance. */
+.an-load { position: absolute; left: 0; right: 0; bottom: .25rem; height: 3px;
+  border-radius: 2px; overflow: hidden;
+  background: color-mix(in srgb, var(--text-muted) 16%, transparent); }
+.an-load-fill { display: block; height: 100%; width: 35%; border-radius: 2px;
+  background: var(--accent); animation: ag-sweep 1.1s ease-in-out infinite; }
+/* Inert as well as dim: a tooltip on the volume chart would otherwise read out
+   numbers from the window the user has just navigated away from. */
+.an-panels.stale { opacity: .45; pointer-events: none; }
+@media (prefers-reduced-motion: reduce) {
+  .an-load-fill { animation: none; width: 100%; opacity: .55; }
+}
 .an-error { font-size: .84rem; color: var(--danger); margin: .6rem 0; }
 .an-empty { font-size: .82rem; color: var(--text-muted); margin: .4rem 0 0; }
 .an-note { font-size: .74rem; color: var(--text-muted); margin: .5rem 0 0;
@@ -1337,6 +1358,13 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
 .an-panel { margin-bottom: 1.2rem; min-width: 0; }
 .an-panel h3 { margin: 0 0 .5rem; font-size: .8rem; text-transform: uppercase;
   letter-spacing: .04em; color: var(--text-muted); }
+/* A heading with a control beside it. The tabs sit on the baseline of the
+   heading they switch, and wrap under it rather than squeezing on a narrow
+   modal. */
+.an-panel-head { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap;
+  margin-bottom: .5rem; }
+.an-panel-head h3 { margin: 0; }
+.an-panel-head .an-tabs { margin-left: auto; }
 /* Two panels abreast on a wide modal, stacked once there is no room. */
 .an-two { display: grid; grid-template-columns: 1fr 1fr; gap: 0 1.4rem; }
 @media (max-width: 720px) { .an-two { grid-template-columns: 1fr; } }

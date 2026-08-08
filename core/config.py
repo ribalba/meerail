@@ -259,6 +259,12 @@ _SECTION_KEYS: dict[str, dict[str, str]] = {
         "send_delay_seconds": "send_delay_seconds",
         "update_check": "update_check",
     },
+    "journal": {
+        "url": "journal_url",
+        "passphrase": "journal_passphrase",
+        "instance": "journal_instance",
+        "poll_interval": "journal_poll_interval",
+    },
     "agent": {
         "tika_url": "tika_url",
         "poll_interval": "poll_interval",
@@ -495,6 +501,40 @@ class Settings(BaseSettings):
     # identifier, no mailbox statistics, no version — so the far end learns only
     # that some IP asked for a file. See app/updates.py.
     update_check: bool = True
+
+    # --- [journal] ------------------------------------------------------------
+    # Where several installs of meerail go to agree about the things IMAP has
+    # nowhere to put: which conversations are waiting on a reminder, what an
+    # account is called, what its footer says. Empty — the default — means this
+    # install syncs nothing and behaves exactly as it did before the journal
+    # existed, which is right for the ordinary case of one machine.
+    #
+    # See journal/README.md. The server holds sealed records and cannot read
+    # them; what makes that true is that it never gets the passphrase below.
+    journal_url: str = ""
+
+    # The shared secret, and the only thing that has to be identical across the
+    # machines being kept in step. Both keys are derived from it: one that the
+    # server checks (it holds only a hash) and one that seals the records (it
+    # holds nothing at all). Sixteen characters minimum, enforced in
+    # core/journal.py::derive, because the derivation is public and unsalted per
+    # install — there is nowhere to keep a per-install salt when the passphrase
+    # is all three machines share.
+    #
+    # Generate: python -m journal.keys
+    journal_passphrase: str = ""
+
+    # Which machine this is, as it appears on the records it writes. Never used
+    # to decide anything — ordering is the server's sequence number, not a name —
+    # but a reminder that fired somewhere is much easier to explain when the log
+    # says where. Defaults to the hostname.
+    journal_instance: str = ""
+
+    # Seconds between polls of the log. Sixty matches the reminder tick, which is
+    # the thing most likely to be waiting on a record: a reminder set on the
+    # laptop shows up on the desktop within about a minute, and a machine that is
+    # asleep catches up in one pass when it wakes.
+    journal_poll_interval: int = 60
 
     # --- [agent] --------------------------------------------------------------
     # Apache Tika endpoint for attachment text extraction.

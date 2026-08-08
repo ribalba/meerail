@@ -5,7 +5,7 @@ One endpoint, one round trip: the stats modal draws every panel from a single
 panels share the same window and the same base filter and would otherwise
 re-derive them a dozen times over.
 
-Three facts about the schema shape every query in here:
+Four facts about the schema shape every query in here:
 
   * **There is no "direction" column.** Whether you sent a message is derived —
     see `_sent_pred`. Getting that wrong silently swaps every number on the
@@ -18,6 +18,10 @@ Three facts about the schema shape every query in here:
     missing or unparseable; those rows are excluded rather than bucketed into
     an invented time. Local-time buckets need the caller's offset applied
     explicitly — see `_local`.
+  * **`read_at` is not a second copy of `date_sent`.** It records when a read
+    was *observed*, is NULL for the mailbox's whole history before the column
+    existed, and moves on its own clock — so the read panel windows on it
+    rather than on when the mail was written, and says how far back it goes.
 """
 
 from __future__ import annotations
@@ -126,6 +130,11 @@ def _sent_pred(entity, own: set[str]):
     return or_(entity.from_addr.in_(sorted(own)), in_sent_folder)
 
 
+def _shift(col, tz_offset: int):
+    """A UTC timestamp column shifted into the caller's local time."""
+    return col + literal(timedelta(minutes=tz_offset), Interval)
+
+
 def _local(entity, tz_offset: int):
     """`date_sent` shifted into the caller's local time.
 
@@ -136,7 +145,7 @@ def _local(entity, tz_offset: int):
     an hour of slop at the boundary, which is well inside what these panels
     claim to tell you.
     """
-    return entity.date_sent + literal(timedelta(minutes=tz_offset), Interval)
+    return _shift(entity.date_sent, tz_offset)
 
 
 def _accounts(db: DBSession, account_id: int | None) -> list[Account]:
@@ -201,6 +210,20 @@ def overview(
     if since is not None:
         base.append(Message.date_sent >= since)
 
+    # The read panel is a different window on a different clock: it asks when
+    # reading happened, so it filters on `read_at` rather than on when the mail
+    # was written — a message from 2019 read this morning belongs in today's
+    # grid. Mail we sent is excluded because a server marks it \Seen on the way
+    # out, which is not somebody reading anything.
+    read_base = [
+        Message.account_id.in_([a.id for a in accounts]),
+        Message.read_at.is_not(None),
+        _has_location_in(Message, EXCLUDED_ROLES, outside=True),
+        ~sent,
+    ]
+    if since is not None:
+        read_base.append(Message.read_at >= since)
+
     is_sent = case((sent, 1), else_=0)
     is_recv = case((sent, 0), else_=1)
 
@@ -256,7 +279,8 @@ def overview(
         return payload
 
     payload["volume"] = _volume(db, base, is_sent, is_recv, tz_offset, GRAINS[range])
-    payload["heatmap"] = _heatmap(db, base, is_sent, is_recv, tz_offset)
+    payload["heatmap"] = _heatmap(db, base, read_base, is_sent, is_recv, tz_offset)
+    payload["reads"] = _reads(db, read_base, [a.id for a in accounts])
     payload["correspondents"] = _correspondents(db, base, sent, own, limit)
     payload["domains"] = _domains(db, base, sent, limit)
     payload["threads"] = _threads(db, base)
@@ -285,6 +309,7 @@ def _empty(range: str) -> dict:
             "received_per_day": 0, "sent_per_day": 0, "sent_ratio": None,
         },
         "volume": [], "heatmap": [], "correspondents": [], "domains": [], "largest": [],
+        "reads": {"count": 0, "first_at": None},
         "threads": {"avg": 0, "max": 0, "multi": 0, "longest": []},
         "attachments": {"count": 0, "bytes": 0, "messages": 0},
         "busiest": None,
@@ -309,24 +334,68 @@ def _volume(db, base, is_sent, is_recv, tz_offset, grain) -> list[dict]:
     return [{"bucket": _iso(b), "received": int(r or 0), "sent": int(s or 0)} for b, r, s in rows]
 
 
-def _heatmap(db, base, is_sent, is_recv, tz_offset) -> list[dict]:
-    """Counts per (weekday, hour) in local time.
+def _heatmap(db, base, read_base, is_sent, is_recv, tz_offset) -> list[dict]:
+    """Counts per (weekday, hour) in local time, for all three series.
+
+    Two queries, not one: arrival and sending are both `date_sent`, but reading
+    is `read_at` under its own window (see `read_base`), and no single GROUP BY
+    can bucket a row by two different clocks. They are merged into one grid here
+    so the client holds one shape and switches tab without another round trip.
 
     Postgres `dow` is 0=Sunday; the client re-orders to a Monday-first week
     rather than having the server guess a locale convention.
     """
-    local = _local(Message, tz_offset)
-    dow = func.extract("dow", local)
-    hour = func.extract("hour", local)
-    rows = db.execute(
+    cells: dict[tuple[int, int], dict] = {}
+
+    def cell(d, h) -> dict:
+        return cells.setdefault(
+            (int(d), int(h)),
+            {"dow": int(d), "hour": int(h), "received": 0, "sent": 0, "read": 0},
+        )
+
+    def slots(col):
+        local = _shift(col, tz_offset)
+        return func.extract("dow", local), func.extract("hour", local)
+
+    dow, hour = slots(Message.date_sent)
+    for d, h, r, s in db.execute(
         select(dow.label("d"), hour.label("h"), func.sum(is_recv), func.sum(is_sent))
         .where(*base)
         .group_by(dow, hour)
-    ).all()
-    return [
-        {"dow": int(d), "hour": int(h), "received": int(r or 0), "sent": int(s or 0)}
-        for d, h, r, s in rows
-    ]
+    ).all():
+        c = cell(d, h)
+        c["received"] = int(r or 0)
+        c["sent"] = int(s or 0)
+
+    r_dow, r_hour = slots(Message.read_at)
+    for d, h, n in db.execute(
+        select(r_dow.label("d"), r_hour.label("h"), func.count())
+        .where(*read_base)
+        .group_by(r_dow, r_hour)
+    ).all():
+        cell(d, h)["read"] = int(n or 0)
+
+    return [cells[k] for k in sorted(cells)]
+
+
+def _reads(db, read_base, account_ids: list[int]) -> dict:
+    """How much reading this window holds, and whether any was ever recorded.
+
+    The two are different answers and the panel needs both. `read_at` only
+    starts filling from the first read meerail observes (see
+    models.Message.read_at), so an empty grid means "nothing recorded yet" on a
+    fresh install and "you read no mail that week" on an old one — and telling
+    the reader the wrong one of those makes the panel look broken.
+    """
+    count = db.scalar(select(func.count()).select_from(Message).where(*read_base)) or 0
+    # Deliberately unwindowed: the question is when recording began, not what
+    # falls inside the current range.
+    first = db.scalar(
+        select(func.min(Message.read_at)).where(
+            Message.account_id.in_(account_ids), Message.read_at.is_not(None)
+        )
+    )
+    return {"count": int(count), "first_at": _iso(first)}
 
 
 def _correspondents(db, base, sent, own: set[str], limit: int) -> list[dict]:

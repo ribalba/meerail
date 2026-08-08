@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
-from . import events, transport
+from . import events, journal, transport
 from core.config import get_settings, trusted_proxy_hosts
 from core.database import engine, init_db
 from core.version import VERSION
@@ -19,7 +19,7 @@ from .routers import (
 )
 from .deps import is_secure_request, require_ui_auth, ui_password
 from .routers.compose import sweep_outbox_staging
-from .workers import contacts_loop, reminders_loop
+from .workers import contacts_loop, journal_loop, reminders_loop
 
 settings = get_settings()
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -69,6 +69,13 @@ async def lifespan(_app: FastAPI):
     # The only clock in the app: mail parked on a reminder comes back from here,
     # including the reminders that fell due while this server was not running.
     _spawn(reminders_loop())
+    # Only where one is configured, which is deliberately not the default: an
+    # install that has not been told about a journal makes no outbound request
+    # and runs no extra loop. See app/journal.py.
+    if journal.enabled():
+        print(f"journal: syncing with {settings.journal_url} as "
+              f"{journal.instance_name()!r}", flush=True)
+        _spawn(journal_loop())
     yield
 
 # One version number for the whole project, read from the VERSION file at the

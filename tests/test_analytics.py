@@ -266,6 +266,137 @@ def test_volume_and_heatmap_sum_to_the_totals(mailbox):
     assert sum(h["sent"] for h in d["heatmap"]) == t["sent"]
 
 
+# --- Read times -------------------------------------------------------------
+#
+# The read grid is the one panel not derived from mail itself: IMAP records
+# *whether* a message is read and never *when*, so `messages.read_at` is stamped
+# on an observed transition and is NULL for everything else. Everything that can
+# go wrong here is a false stamp — mail that arrived already read, mail we sent
+# that the server flagged \Seen on the way out, a second read of the same
+# message — each of which would show up as a plausible-looking cell nobody can
+# tell is wrong. So each is pinned below.
+
+
+def _read_account(account, folder="INBOX", flags=None) -> tuple[int, str]:
+    """One recent message in `folder`. Returns (message id, search token)."""
+    email, aid = account["email"], account["id"]
+    token = "READTOK" + uuid.uuid4().hex[:8]
+    raw = make_message(f"<{uuid.uuid4().hex}@t>", f"Read test {token}",
+                       "reader@acme.com", email, f"{token} body", at(hours=2))
+    dbfixture.ingest_raw_message(email, raw, uid=1, folder=folder, flags=flags)
+    _, r = api("GET", f"/api/search?q={token}&account_id={aid}")
+    return r["rows"][0]["id"], token
+
+
+def _reads(account, rng="30d") -> dict:
+    params = f"account_id={account['id']}&range={rng}&tz_offset=0"
+    code, body = api("GET", f"/api/analytics/overview?{params}")
+    assert code == 200, body
+    return {"reads": body["reads"], "total": sum(h["read"] for h in body["heatmap"]),
+            "cells": [h for h in body["heatmap"] if h["read"]]}
+
+
+def _slot(dt: datetime) -> tuple[int, int]:
+    """(dow, hour) as Postgres extract() gives them: Sunday is 0."""
+    return ((dt.weekday() + 1) % 7, dt.hour)
+
+
+def test_nothing_read_yet_reads_as_nothing_recorded(account):
+    """A fresh mailbox must say "no reads recorded", not "you read nothing".
+
+    `first_at` is what tells those apart on screen, so it stays None until a
+    read is actually seen.
+    """
+    _read_account(account)
+    d = _reads(account)
+    assert d["reads"] == {"count": 0, "first_at": None}
+    assert d["total"] == 0
+
+
+def test_marking_read_lands_in_the_local_hour(account):
+    mid, _ = _read_account(account)
+    before = datetime.now(timezone.utc)
+    assert api("POST", f"/api/messages/{mid}/mark?seen=1")[0] == 200
+    after = datetime.now(timezone.utc)
+
+    d = _reads(account)
+    assert d["reads"]["count"] == 1
+    assert d["reads"]["first_at"] is not None
+    assert d["total"] == 1
+    # tz_offset=0, so the cell is the UTC hour the mark happened in. Both ends
+    # of the call are allowed rather than one, so a mark landing either side of
+    # an hour boundary is not a flake.
+    (cell,) = d["cells"]
+    assert (cell["dow"], cell["hour"]) in {_slot(before), _slot(after)}
+
+
+def test_a_second_read_does_not_move_the_first(account):
+    """Read is a moment, not a counter. Re-opening mail must not restamp it."""
+    mid, _ = _read_account(account)
+    api("POST", f"/api/messages/{mid}/mark?seen=1")
+    first = _reads(account)["reads"]["first_at"]
+    api("POST", f"/api/messages/{mid}/mark?seen=0")
+    api("POST", f"/api/messages/{mid}/mark?seen=1")
+    d = _reads(account)
+    assert d["reads"]["first_at"] == first
+    assert d["total"] == 1
+
+
+def test_mail_that_arrived_already_read_is_never_stamped(account):
+    """The backfill case, and the one that would ruin the panel.
+
+    Marking read a message that is already \\Seen everywhere changes nothing, so
+    it is not a read that happened now — it is a read that happened at a time
+    nothing records. Stamping it would fill the grid with the hours the mailbox
+    was first synced.
+    """
+    mid, _ = _read_account(account, flags={"seen": True})
+    api("POST", f"/api/messages/{mid}/mark?seen=1")
+    d = _reads(account)
+    assert d["reads"] == {"count": 0, "first_at": None}
+    assert d["total"] == 0
+
+
+def test_a_read_in_another_app_is_recorded_at_the_next_sync(account):
+    """Read on the phone: the flag sweep sees unread -> read and stamps it."""
+    _read_account(account)
+    assert dbfixture.set_flags(account["email"], "INBOX", [{"uid": 1, "flags": {"seen": True}}]) == 1
+    d = _reads(account)
+    assert d["reads"]["count"] == 1
+    assert d["total"] == 1
+
+
+def test_sent_mail_going_seen_is_not_a_read(account):
+    """Servers mark outgoing mail \\Seen as it lands in Sent. Nobody read it."""
+    _read_account(account, folder="Sent")
+    dbfixture.set_flags(account["email"], "Sent", [{"uid": 1, "flags": {"seen": True}}])
+    assert _reads(account)["total"] == 0
+
+
+def test_read_grid_windows_on_when_reading_happened(account):
+    """Old mail read today belongs in today's grid.
+
+    The rest of the page windows on `date_sent`; this panel cannot, or a message
+    from last year that you got to this morning would be missing from every
+    range short enough to be worth looking at.
+    """
+    email, aid = account["email"], account["id"]
+    # Recent mail as well, left unread: with nothing at all in the window the
+    # whole overview short-circuits to "no mail in this window", which is a
+    # different (and correct) answer than the one under test here.
+    _read_account(account)
+    token = "OLDREAD" + uuid.uuid4().hex[:8]
+    raw = make_message(f"<{uuid.uuid4().hex}@t>", f"Old mail {token}",
+                       "reader@acme.com", email, f"{token} body", at(days=200))
+    dbfixture.ingest_raw_message(email, raw, uid=7, folder="INBOX")
+    _, r = api("GET", f"/api/search?q={token}&account_id={aid}")
+    api("POST", f"/api/messages/{r['rows'][0]['id']}/mark?seen=1")
+
+    # The message itself is outside a 30-day window; the read is inside it.
+    assert _reads(account, "30d")["total"] == 1
+    assert _reads(account, "1y")["total"] == 1
+
+
 # --- Windowing --------------------------------------------------------------
 
 

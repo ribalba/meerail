@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session as DBSession
 
 from core.database import get_db
 from core.models import Message, Reminder
-from .. import events, mailops, reminders as reminders_core
+from .. import events, journal, mailops, reminders as reminders_core
 from ..deps import require_ui_auth
 from .messages import _readable
 
@@ -45,6 +45,12 @@ def set_reminder(message_id: int, body: RemindIn, db: DBSession = Depends(get_db
     msg = _readable(db, message_id)
     due_at = reminders_core.normalize_due(body.due_at)
     reminder, op_id = reminders_core.set_reminder(db, msg, due_at)
+    # Published from here rather than from set_reminder, because set_reminder is
+    # also what applies a record that arrived from another install — publishing
+    # in there would send every record straight back to the server. Queued in
+    # this transaction, so the promise and the telling of it commit together.
+    db.flush()
+    journal.publish_reminder_set(db, reminder, msg)
     db.commit()
     mailops.wake_agent(db, msg.account_id)
     events.publish({"type": "present", "reminder": 1})
@@ -77,6 +83,13 @@ def clear_reminder(
         reminders_core.fire(db, reminder)
     else:
         reminders_core.cancel(db, reminder)
+    # Both ways round retire the promise everywhere, and they are not the same
+    # record: "fired" says the mail is on its way back (the move is already
+    # queued here, and reaches the other installs through the mail server),
+    # while "cancel" says it stays filed. An install that received the wrong one
+    # of those would either move mail nobody asked it to, or go on holding a
+    # deadline for a conversation that has already come back.
+    journal.publish_reminder_op(db, reminder, "fired" if restore else "cancel")
     db.commit()
     if restore:
         mailops.wake_agent(db, msg.account_id)

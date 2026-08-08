@@ -40,7 +40,7 @@ App.stats = (function () {
   let data = null;
   let loading = false;
   let error = "";
-  let state = { account_id: null, range: "30d" };
+  let state = { account_id: null, range: "30d", hm: "received" };
 
   // --- Formatting ---
   const num = (n) => (n == null ? "—" : Number(n).toLocaleString());
@@ -78,6 +78,7 @@ App.stats = (function () {
       const raw = JSON.parse(localStorage.getItem(STATE_KEY) || "{}");
       if (raw && typeof raw === "object") {
         if (RANGES.some(([k]) => k === raw.range)) state.range = raw.range;
+        if (HM_TABS.some(([k]) => k === raw.hm)) state.hm = raw.hm;
         if (raw.account_id === null || Number.isInteger(raw.account_id)) {
           state.account_id = raw.account_id;
         }
@@ -254,19 +255,42 @@ App.stats = (function () {
     return PAD.t + ih - (v / top) * ih;
   }
 
-  /* When mail arrives, by weekday and local hour. Magnitude, so it takes a
-     single-hue sequential ramp rather than the two series colours. */
+  /* When mail arrives / is read / is sent, by weekday and local hour.
+     Magnitude, so it takes a single-hue sequential ramp rather than the two
+     series colours.
+
+     One grid with a tab strip rather than three panels stacked: the three
+     answers are the same shape and are read against each other ("mail lands at
+     nine, I get to it at eleven"), which a switch in place supports and three
+     grids a screen apart do not. Every series is already in the payload, so a
+     tab is a re-render of one section and never another request. */
+  const HM_TABS = [
+    // key, tab label, panel heading, per-cell noun
+    ["received", "Arrives", "When mail arrives", "received"],
+    ["read", "Read", "When you read mail", "read"],
+    ["sent", "Sent", "When you send mail", "sent"],
+  ];
+
   function heatmap(d) {
     const cells = d.heatmap || [];
     if (!cells.length) return "";
+    const [key, , title, noun] = HM_TABS.find(([k]) => k === state.hm) || HM_TABS[0];
+    const tabs = `<div class="an-tabs" role="tablist" aria-label="Heatmap series">
+      ${HM_TABS.map(([k, label]) => `
+        <button type="button" class="an-tab${k === key ? " on" : ""}" role="tab"
+                aria-selected="${k === key}" data-hm="${k}">${App.esc(label)}</button>`).join("")}
+    </div>`;
+
     const grid = {};
-    let max = 0;
+    let max = 0, total = 0;
     for (const c of cells) {
       const row = DOW_FROM_PG[c.dow];
-      const key = `${row}:${c.hour}`;
-      grid[key] = (grid[key] || 0) + c.received;
-      max = Math.max(max, grid[key]);
+      const k = `${row}:${c.hour}`;
+      grid[k] = (grid[k] || 0) + (c[key] || 0);
+      max = Math.max(max, grid[k]);
+      total += c[key] || 0;
     }
+
     const body = DOW.map((name, row) => {
       const tds = [];
       for (let h = 0; h < 24; h++) {
@@ -277,12 +301,14 @@ App.stats = (function () {
         // panel reads as uniformly empty. Step 0 is reserved for "nothing at
         // all", so a zero cell never reads as a low-but-present count.
         const stepIdx = n === 0 ? 0 : Math.max(1, Math.ceil(Math.sqrt(n / max) * 6));
-        tds.push(`<i class="an-cell s${stepIdx}" title="${App.esc(name)} ${h}:00 — ${num(n)} received"></i>`);
+        tds.push(`<i class="an-cell s${stepIdx}" title="${App.esc(name)} ${h}:00 — ${
+          num(n)} ${App.esc(noun)}"></i>`);
       }
       return `<div class="an-hm-row"><span class="an-hm-day">${App.esc(name)}</span>
         <div class="an-hm-cells">${tds.join("")}</div></div>`;
     }).join("");
-    return panel("When mail arrives", `
+
+    const inner = total === 0 ? `<p class="an-empty">${App.esc(hmEmpty(d, key))}</p>` : `
       <div class="an-hm">${body}
         <div class="an-hm-row an-hm-axis"><span class="an-hm-day"></span>
           <div class="an-hm-cells">${
@@ -292,7 +318,36 @@ App.stats = (function () {
       <div class="an-hm-legend">
         <span>Less</span>${[0, 1, 2, 3, 4, 5, 6].map((i) => `<i class="an-cell s${i}"></i>`).join("")}<span>More</span>
         <span class="an-note">Peak ${num(max)} in one hour · your local time</span>
-      </div>`);
+      </div>
+      ${key === "read" ? `<p class="an-note">${App.esc(readSince(d))}</p>` : ""}`;
+
+    return `<section class="an-panel" id="an-hm-panel">
+      <div class="an-panel-head"><h3>${App.esc(title)}</h3>${tabs}</div>
+      ${inner}</section>`;
+  }
+
+  /* An empty grid has two quite different causes on the Read tab, and saying
+     the wrong one makes the panel look broken. `reads.first_at` is when this
+     mailbox first had a read recorded at all — absent means the feature has
+     nothing yet, present means this window simply holds none. */
+  function hmEmpty(d, key) {
+    if (key !== "read") {
+      return key === "sent"
+        ? "You sent no mail in this window."
+        : "No mail arrived in this window.";
+    }
+    if (!(d.reads && d.reads.first_at)) {
+      return "No reads recorded yet. Mail carries whether it has been read, never when — " +
+        "so meerail notes the time as it happens, and this fills in from now on.";
+    }
+    return "You read no mail in this window.";
+  }
+
+  function readSince(d) {
+    const first = d.reads && d.reads.first_at;
+    return first
+      ? `Recorded from ${App.fmtDate(first)}, when meerail first saw mail being read`
+      : "";
   }
 
   /* Who you actually exchange mail with. Two bars per person on a shared scale,
@@ -462,6 +517,13 @@ App.stats = (function () {
           ${App.esc(String(l.window_days ?? 30))} days. Conversation grouping comes
           from mail headers with a subject-matching fallback, so a thread that was
           never linked properly will not show a reply here even if you did answer.</li>
+        <li><b>When you read mail</b> is recorded as it happens. Mail itself
+          carries only whether a message has been read, never when, so this
+          starts from the first read meerail saw — earlier reading is not in it,
+          and nor is a message that was already marked read when it arrived.
+          Reading done in another mail app shows up at the next sync, so it
+          lands at the time meerail noticed rather than the moment you opened
+          it.</li>
         <li><b>Response rate</b> only counts mail at least
           ${App.esc(String(l.maturity_days ?? 7))} days old, so a message you have
           not got to yet is not scored as one you ignored.</li>
@@ -488,6 +550,8 @@ App.stats = (function () {
           `<button type="button" class="an-range${state.range === k ? " on" : ""}"
                    data-range="${k}">${App.esc(label)}</button>`).join("")}
       </div>
+      ${loading ? `<div class="an-load" role="status" aria-label="Updating statistics">
+        <i class="an-load-fill"></i></div>` : ""}
     </div>`;
   }
 
@@ -514,9 +578,14 @@ App.stats = (function () {
       wireControls();
       return;
     }
+    // Every panel is one request, so a new range replaces all of them at once.
+    // Until it lands the old numbers stay up — an empty modal for the length of
+    // a round trip is worse than stale figures — but they are dimmed and made
+    // inert, so the sweeping bar above is not contradicted by a page that looks
+    // like it already answered.
     body.innerHTML =
       head +
-      (loading ? `<div class="an-reloading">Updating…</div>` : "") +
+      `<div class="an-panels${loading ? " stale" : ""}" aria-busy="${!!loading}">` +
       kpis(data) +
       volumeChart(data) +
       heatmap(data) +
@@ -524,10 +593,28 @@ App.stats = (function () {
       `<div class="an-two">${latency(data)}${domains(data)}</div>` +
       threadsPanel(data) +
       largest(data) +
-      footnote(data);
+      footnote(data) +
+      `</div>`;
     wireControls();
     wireVolumeHover(data);
+    wireHeatmapTabs();
     wireLargest();
+  }
+
+  // Only the heatmap section is redrawn on a tab click: all three series came
+  // down together, so there is nothing to fetch, and replacing the whole modal
+  // would move the panel out from under the pointer that just clicked it.
+  function wireHeatmapTabs() {
+    document.querySelectorAll("#an-hm-panel .an-tab").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        state.hm = btn.dataset.hm;
+        saveState();
+        const el = $("#an-hm-panel");
+        if (!el) return;
+        el.outerHTML = heatmap(data);
+        wireHeatmapTabs();
+      });
+    });
   }
 
   // Re-bound after every render, because the markup above is replaced wholesale.

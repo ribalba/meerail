@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session as DBSession
 
 from core.database import get_db
+from .. import journal
 from ..deps import require_ui_auth
 from core.models import Account
 from ..schemas import AccountOut, AccountUpdate
@@ -58,6 +59,12 @@ def update_account(account_id: int, payload: AccountUpdate, db: DBSession = Depe
     # default-footer backfill for good.
     if "footer" in fields:
         account.footer_customized = True
+    # And tell the other installs, on the ones that share a journal. This is the
+    # second thing meerail decides that IMAP has nowhere to keep: a footer typed
+    # on the laptop was previously invisible to the desktop, which went on
+    # signing mail with the old one. Only the fields that were actually sent —
+    # a PATCH of the colour has no business restating the footer.
+    journal.publish_account_prefs(db, account, list(fields))
     db.commit()
     db.refresh(account)
     return account

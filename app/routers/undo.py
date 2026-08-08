@@ -48,7 +48,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import and_, distinct, func, or_, select, tuple_
 from sqlalchemy.orm import Session as DBSession
 
-from .. import events, mailops, reminders
+from .. import events, journal, mailops, reminders
 from core import undo
 from core.database import get_db
 from core.mail.store import drop_pending_placement, recompute_counts
@@ -470,6 +470,13 @@ def _cancel_reminder(db: DBSession, actions: list[PendingAction]) -> None:
         reminder = reminders.pending_for(db, msg)
         if reminder is not None:
             reminders.cancel(db, reminder)
+            # The other installs have to be told, and told *cancel* rather than
+            # fired: undoing the parking is what puts this mail back, and that
+            # move is already queued here. A "fired" record would have every
+            # other machine retire the promise too — which is right — but the
+            # distinction matters for what they do with a conversation that has
+            # since been filed by hand, and the two are not interchangeable.
+            journal.publish_reminder_op(db, reminder, "cancel")
             return          # one per conversation, and they are all one thread
 
 

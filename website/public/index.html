@@ -219,14 +219,23 @@
         <article class="landing-card">
           <div class="landing-card-body">
             <div class="landing-card-icon"><i class="font icon"></i></div>
-            <h3>Markdown that stays plain text</h3>
+            <h3>Markdown, plain or rendered</h3>
             <p>
               Write <code>**bold**</code> or <code>## Heading</code> and the
               composer styles it as you type — without ever hiding the markers,
-              so the field always shows the exact text you are sending. Mail
-              still goes out as <code>text/plain</code>; there is no HTML part
-              and nothing for a recipient's client to render differently.
-              Incoming plain-text mail gets the same treatment on the way in.
+              so the field always shows the exact text you are sending. By
+              default that is exactly what goes out: <code>text/plain</code>,
+              no HTML part, nothing for a recipient's client to render
+              differently. Incoming plain-text mail gets the same treatment on
+              the way in.
+            </p>
+            <p>
+              Press <em>Send as HTML email</em> and the same markdown is
+              rendered instead — headings, lists, quotes, code and links arrive
+              formatted, with the styling written inline so it survives clients
+              that strip stylesheets. It is per message, with the default in
+              Settings, so formatting is a decision you make when it is worth
+              making rather than a mode you live in.
             </p>
             <div class="landing-md">
               <span class="landing-md-mark">##</span>&nbsp;<strong class="landing-md-h">Release notes</strong>
@@ -290,6 +299,107 @@
               <span class="landing-stat"><b>6.02</b>received / day</span>
               <span class="landing-stat"><b>7h 56m</b>median reply</span>
               <span class="landing-stat"><b>25.9%</b>you reply to</span>
+            </div>
+          </div>
+        </article>
+
+        <article class="landing-card">
+          <div class="landing-card-body">
+            <div class="landing-card-icon"><i class="clock outline icon"></i></div>
+            <h3>Not today — remind me</h3>
+            <p>
+              One key files a whole conversation away and writes down when to
+              bring it back. It returns <em>unread</em>, to the folder it came
+              out of, so it reads as something that just arrived rather than
+              something buried under a week of mail. The presets are worked out
+              in your own timezone — “next week” means Monday morning where you
+              are — and a sidebar view lists everything waiting. The server
+              watches the clock, so a machine that was off at nine fires its
+              reminders when it comes back: late rather than never.
+            </p>
+            <div class="landing-chips">
+              <span class="landing-chip">Later today</span>
+              <span class="landing-chip">Tomorrow</span>
+              <span class="landing-chip">This weekend</span>
+              <span class="landing-chip">Next week</span>
+              <span class="landing-chip"><i class="calendar alternate outline icon"></i>Pick a date</span>
+            </div>
+          </div>
+        </article>
+
+        <article class="landing-card">
+          <div class="landing-card-body">
+            <div class="landing-card-icon"><i class="paper plane outline icon"></i></div>
+            <h3>Send now, change your mind for a minute</h3>
+            <p>
+              Set a delay and sent mail waits in the Outbox before it goes
+              anywhere — the window in which you can still call it back. It is a
+              real server-side queue, not a countdown in the browser: close the
+              tab, lose the network, restart the machine, and the message still
+              leaves on schedule and can still be stopped until it does. Every
+              queued message carries <em>Send now</em> and <em>Cancel send</em>
+              whatever the delay says, so the setting decides the default and
+              never whether you can intervene. Set it to zero and mail goes at
+              the first opportunity, as it always did.
+            </p>
+            <div class="landing-rows">
+              <span class="landing-row"><i class="hourglass half icon"></i>Re: quarterly figures — leaves in 47s<span class="landing-row-action">Send</span></span>
+              <span class="landing-row"><i class="ban icon"></i>Held — you cancelled this one<span class="landing-row-action">Send</span></span>
+            </div>
+          </div>
+        </article>
+
+        <article class="landing-card">
+          <div class="landing-card-body">
+            <div class="landing-card-icon"><i class="undo icon"></i></div>
+            <h3>A list of what just moved your mail</h3>
+            <p>
+              Every action that files mail somewhere else — archive, trash,
+              move, the bulk versions of all three, and parking a conversation
+              on a reminder — lands in a Recent actions panel with an Undo
+              beside it. If the agent has not reached the change yet it is
+              deleted out of the queue and the message goes back
+              <em>verbatim</em>: same folder, same UID, same flags, no trace on
+              either side. If it has already landed, Undo is queued as an
+              ordinary move in the opposite direction. And if it is in flight at
+              that exact moment, meerail says so and asks you to press again
+              rather than guessing — which is how a message ends up in Trash on
+              the server and in Archive on your screen.
+            </p>
+            <div class="landing-rows">
+              <span class="landing-row"><i class="archive icon"></i>Archived 12 messages<span class="landing-row-action">Undo</span></span>
+              <span class="landing-row"><i class="clock outline icon"></i>Reminded — back Monday<span class="landing-row-action">Undo</span></span>
+              <span class="landing-row"><i class="trash alternate outline icon"></i>Trashed “Newsletter”<span class="landing-row-action">Undo</span></span>
+            </div>
+          </div>
+        </article>
+
+        <article class="landing-card">
+          <div class="landing-card-body">
+            <div class="landing-card-icon"><i class="sync alternate icon"></i></div>
+            <h3>Several machines, one set of decisions</h3>
+            <p>
+              Mail syncs itself — a laptop, a desktop and a server on the same
+              accounts already see the same folders and the same read flags.
+              What they cannot see is what <em>meerail</em> decided: a
+              conversation you parked until Monday, an account's footer, the
+              name and colour it wears in your sidebar. IMAP has nowhere to put
+              any of it.
+            </p>
+            <p>
+              So point every install at one small journal server and they agree.
+              Records are sealed with a passphrase that server never receives —
+              it holds ciphertext and a sequence number, and cannot read a
+              subject, an address, a folder name or a due date. That ordering is
+              also what stops three machines all bringing the same conversation
+              back at nine on Monday: exactly one of them wins the claim.
+              Leave it unconfigured and meerail makes no outbound request at all.
+            </p>
+            <div class="landing-chips">
+              <span class="landing-chip"><i class="laptop icon"></i>laptop</span>
+              <span class="landing-chip"><i class="desktop icon"></i>desktop</span>
+              <span class="landing-chip"><i class="server icon"></i>server</span>
+              <span class="landing-chip"><i class="lock icon"></i>one sealed journal</span>
             </div>
           </div>
         </article>

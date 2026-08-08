@@ -2,9 +2,12 @@
 
 Mail ingest and attachment text extraction belong to the agent now, so what is
 left here is what the app owes on its own account: the contacts rollup — pure
-derived data, rebuilt from rows the agent has already written — and the reminder
+derived data, rebuilt from rows the agent has already written — the reminder
 tick, which is the only thing in meerail that has to happen at a particular
-moment rather than in response to a request.
+moment rather than in response to a request, and the journal loop, which is what
+keeps several installs of this app agreeing about the things IMAP has nowhere to
+put. The journal loop only exists on an install that has one configured; see
+app/journal.py.
 """
 
 from __future__ import annotations
@@ -15,7 +18,7 @@ import os
 from core.config import get_settings
 from core.database import SessionLocal
 
-from . import reminders
+from . import journal, reminders
 from .contacts import rebuild_contact_pairs, rebuild_contacts
 
 settings = get_settings()
@@ -105,3 +108,65 @@ async def reminders_loop() -> None:
             # exactly like "reminders don't work".
             print(f"reminder tick failed: {e!r}", flush=True)
         await asyncio.sleep(REMINDER_TICK)
+
+
+# How often a snapshot is posted: the record that restates this install's whole
+# shareable state and so lets the server delete what came before it
+# (journal/server.py::_prune). Daily is far more often than pruning needs and
+# far less often than it costs anything — a snapshot is one small record per
+# pending reminder, and a mailbox with a hundred of those is unusual.
+SNAPSHOT_EVERY = 24 * 3600
+
+
+def _journal_once() -> tuple[int, int]:
+    db = SessionLocal()
+    try:
+        return journal.sync_once(db)
+    finally:
+        db.close()
+
+
+def _journal_snapshot() -> int:
+    db = SessionLocal()
+    try:
+        count = journal.snapshot(db)
+        db.commit()
+        return count
+    finally:
+        db.close()
+
+
+async def journal_loop() -> None:
+    """Publish what this install decided, and apply what the others did.
+
+    Started only where a journal is configured — an install without one runs
+    exactly the code it ran before this existed, with no loop, no outbound
+    request, and nothing on the network.
+
+    The failure mode worth stating: a journal server that is unreachable stops
+    nothing. Reminders still fire here, footers still save here, and the records
+    describing all of it queue in ``journal_outbox`` until the server comes back.
+    What is lost while it is down is agreement, not function — which is why this
+    logs and sleeps rather than retrying tightly or escalating.
+    """
+    period = max(5, settings.journal_poll_interval)
+    since_snapshot = 0.0
+    # A snapshot on startup, so a machine that has just joined an existing
+    # journal contributes its state immediately rather than a day later.
+    first = True
+    while True:
+        try:
+            if first or since_snapshot >= SNAPSHOT_EVERY:
+                await asyncio.to_thread(_journal_snapshot)
+                since_snapshot, first = 0.0, False
+            sent, got = await asyncio.to_thread(_journal_once)
+            if sent or got:
+                print(f"journal: sent {sent}, applied {got}", flush=True)
+        except Exception as e:  # noqa: BLE001
+            # Same rule as the other two loops: one bad pass must not end the
+            # loop. Everything this does is retried from durable rows on the
+            # next one — the outbox keeps what has not been sent, and the cursor
+            # keeps what has not been read.
+            print(f"journal pass failed: {e!r}", flush=True)
+        await asyncio.sleep(period)
+        since_snapshot += period

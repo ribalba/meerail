@@ -1,0 +1,15 @@
+# meerail-journal — the sync server. Deliberately not meerail's requirements.txt:
+# this service holds no mail, parses nothing, and talks to no IMAP server, so it
+# has none of those dependencies and should keep having none of them. It does not
+# import `core` either (see journal/server.py) — the only shared thing is the
+# wire format, and the server does not read the wire.
+fastapi==0.116.1
+starlette==0.47.3
+uvicorn[standard]==0.34.0
+sqlalchemy==2.0.51
+pydantic==2.13.4
+
+# Only needed if JOURNAL_DATABASE_URL points at Postgres. SQLite (the default)
+# needs nothing: one file, one volume, which is the right size for a log that a
+# household of three machines appends to a few times a day.
+psycopg[binary]==3.3.4

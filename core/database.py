@@ -229,6 +229,22 @@ def init_db() -> None:
             # filter over every address row of a message.
             "CREATE INDEX IF NOT EXISTS ix_recipients_message_kind "
             "ON recipients (message_pk, kind)",
+            # When a message was first observed to become read — see
+            # models.Message.read_at. NULL for everything already in the volume,
+            # and for everything that was read before this column existed.
+            "ALTER TABLE messages ADD COLUMN IF NOT EXISTS read_at TIMESTAMP",
+            # Partial, because read_at is NULL for the great majority of rows on
+            # any mailbox with history: the "when mail is read" panel scans only
+            # the ones that are set, and the index is a fraction of the size a
+            # full one would be.
+            "CREATE INDEX IF NOT EXISTS ix_messages_account_read "
+            "ON messages (account_id, read_at) WHERE read_at IS NOT NULL",
+            # Which install is bringing a reminder back, on the installs that
+            # share a journal. NULL everywhere on an existing volume, which is
+            # exactly the state an install with no journal stays in.
+            "ALTER TABLE reminders ADD COLUMN IF NOT EXISTS claim_seq BIGINT",
+            "ALTER TABLE reminders ADD COLUMN IF NOT EXISTS claim_by VARCHAR(64)",
+            "ALTER TABLE reminders ADD COLUMN IF NOT EXISTS claim_at TIMESTAMP",
             # Attachment payloads and WebP previews are already-compressed
             # formats (PDF/JPEG/PNG/zip/WebP). EXTERNAL stores them TOASTed
             # but uncompressed, so ingest stops burning CPU on compression

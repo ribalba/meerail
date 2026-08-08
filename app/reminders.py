@@ -48,6 +48,16 @@ nine on Monday is not an action to offer an Undo on, and the conversation
 arriving in the inbox is its own notification. The strip over it is where "park
 it again" lives.
 
+**Several installs share reminders through the journal, not through IMAP.** A
+reminder is the clearest case of something this app decided that a mail server
+has nowhere to put, so on an install with a journal configured every set, cancel
+and firing is published to it and read back by the others (app/journal.py). Two
+consequences show up in this file. Setting one publishes a record — from the
+*routes*, not from ``set_reminder``, which is also what the apply path calls.
+And firing is claimed before it happens: all three machines watch the same clock,
+so without a claim all three would move the same conversation back at nine on
+Monday. See ``run_due``.
+
 What a reminder does *not* do is remember which messages it did not park —
 see set_reminder, where a conversation already sitting in Archive is recorded as
 coming back to the inbox, because "remind me about this" said over filed mail
@@ -65,7 +75,7 @@ from sqlalchemy.orm import Session as DBSession, selectinload
 from core import undo
 from core.models import Mailbox, Message, Reminder, utcnow
 
-from . import events
+from . import events, journal
 from .mailops import (
     archive_mailbox, move_messages, move_to, recompute, role_mailbox, set_seen, wake_agent,
 )
@@ -382,6 +392,20 @@ def run_due(db: DBSession, now: datetime | None = None) -> int:
     accounts: set[int] = set()
     for row in due(db, now):
         reminder_id, account_id = row.id, row.account_id
+
+        # On an install that shares a journal, decide *first* whether this
+        # machine is the one that brings this conversation back — all three hold
+        # the reminder and all three reach nine o'clock. Deliberately outside
+        # the locked transaction below: claiming commits (it has to, so the
+        # claim is visible to the other machines before we act on it), and a
+        # commit inside that block would drop the row lock it depends on.
+        if journal.enabled():
+            claimant = db.get(Reminder, reminder_id)
+            if claimant is None or claimant.state != "pending":
+                continue              # fired elsewhere while we were deciding
+            if not journal.claim(db, claimant):
+                continue              # another install has it
+
         try:
             # Claimed inside its own transaction, and re-checked while claimed.
             # The list above was read without a lock and one commit ago, so by
@@ -399,6 +423,9 @@ def run_due(db: DBSession, now: datetime | None = None) -> int:
                 db.rollback()
                 continue
             restored = fire(db, reminder)
+            # In the same transaction as the firing, so the log can never be
+            # told a conversation came back that a rollback then un-fired.
+            journal.publish_reminder_op(db, reminder, "fired")
             db.commit()
         except Exception as exc:  # noqa: BLE001
             _note_failure(db, reminder_id, exc)

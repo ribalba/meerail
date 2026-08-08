@@ -155,6 +155,47 @@ update_check = true
 # data_dir = "./data"
 
 
+# --- journal ------------------------------------------------------------------
+# Where several installs of meerail go to agree about the things IMAP has nowhere
+# to put. Leave the whole section out — the default — and this install syncs
+# nothing, makes no outbound request, and behaves exactly as it did before the
+# journal existed. That is right for the ordinary case of one machine.
+#
+# It is for the other case: the same accounts open on a laptop, a desktop and a
+# server. Mail syncs itself, so all three see the same folders and the same read
+# flags; what they cannot see is what *this app* decided. A conversation parked
+# until Monday is archived on all three, and only the machine you pressed the key
+# on knows it is coming back. Same for an account's footer and its name in the
+# sidebar.
+#
+# The server holds sealed records and cannot read them: the passphrase below never
+# leaves this machine, and what the server is configured with is a hash. See
+# journal/README.md for standing one up — it is one container and a volume.
+#
+# [journal]
+# url = "https://journal.example.com"
+#
+# The shared secret, and the only thing that has to be identical on every machine
+# being kept in step. At least 16 characters, refused otherwise: the key
+# derivation is public and has no per-install salt (there is nowhere to keep one
+# when the passphrase is all these machines share), so this carries the whole
+# weight. Generate it — along with the line the server needs — with:
+#
+#   python -m journal.keys
+#
+# passphrase = "..."
+#
+# What this machine calls itself in the records it writes. Only ever displayed —
+# ordering comes from the server's sequence numbers, never from this — but a
+# reminder that fired somewhere is much easier to explain when the log says
+# where. Defaults to the hostname.
+# instance = "thinkpad"
+#
+# Seconds between polls. Sixty matches the reminder tick, so a reminder set on
+# one machine shows up on the others inside about a minute.
+# poll_interval = 60
+
+
 # --- agent --------------------------------------------------------------------
 # The agent runs on the machine where Proton Bridge is installed. It reads your
 # Bridge IMAP/SMTP credentials (shown in the Bridge app — NOT your Proton

@@ -46,7 +46,7 @@ from core import undo
 from core.events import publish_command
 from core.ingest import derive_role
 from core.mail.store import is_pending, move_in_flight, place_pending, recompute_counts
-from core.models import Account, Mailbox, Message, MessageLocation, PendingAction
+from core.models import Account, Mailbox, Message, MessageLocation, PendingAction, utcnow
 
 from . import events
 
@@ -299,6 +299,12 @@ def set_seen(db: DBSession, msg: Message, seen: bool,
     of these can recount once at the end.
     """
     touched = set() if touched is None else touched
+    # Only a real unread -> read transition is a read at a knowable time. A
+    # message that was already seen everywhere is one the user read at some
+    # unrecorded point — often years ago, during backfill — and stamping "now"
+    # for it would fill the read heatmap with the times the mailbox was opened
+    # rather than the times mail was read. See models.Message.read_at.
+    became_seen = seen and msg.read_at is None and any(not l.seen for l in msg.locations)
     for loc in msg.locations:
         if loc.seen == seen:
             continue
@@ -314,6 +320,8 @@ def set_seen(db: DBSession, msg: Message, seen: bool,
         enqueue(db, msg.account_id, msg.id, "setflags", {
             **uid_ref(mb, loc),
             "add": ["\\Seen"] if seen else [], "remove": [] if seen else ["\\Seen"]})
+    if became_seen:
+        msg.read_at = utcnow()
     return touched
 
 

@@ -1,0 +1,42 @@
+# The sync server, on its own.
+#
+#   JOURNAL_SPACES=<hash> docker compose -f docker-compose.journal.yml up -d
+#
+# Deliberately a separate file from docker-compose.yml: this is the one part of
+# meerail that runs somewhere else — a VPS, a NAS, whatever is on all the time —
+# and it shares nothing with the mail stack. No Postgres, no Tika, no agent, and
+# no access to any of them.
+#
+# Get the hash from `python -m journal.keys` on your own machine. It is not a
+# credential: it is what the token hashes to, so this file and this server can be
+# read without yielding a way in, and the records stay unreadable either way.
+services:
+  journal:
+    build:
+      context: .
+      dockerfile: journal/Dockerfile
+    image: meerail-journal:latest
+    restart: unless-stopped
+    environment:
+      # Comma-separated. More than one lets a single server hold unrelated
+      # journals that cannot see each other.
+      JOURNAL_SPACES: ${JOURNAL_SPACES:?set JOURNAL_SPACES — see python -m journal.keys}
+      # How long a superseded record is kept. Records that no snapshot has
+      # replaced are never dropped, whatever this says (journal/server.py::_prune).
+      JOURNAL_RETAIN_DAYS: ${JOURNAL_RETAIN_DAYS:-90}
+    volumes:
+      - journal-data:/data
+    ports:
+      # Loopback by default. Put TLS in front of it before this is reachable from
+      # anywhere else — the bearer token is a bearer token, and a plaintext hop
+      # hands it to whoever is listening. The records stay sealed regardless,
+      # but a stolen token is a way to append junk and to read the ciphertext.
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz').status==200 else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  journal-data:

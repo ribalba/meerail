@@ -20,10 +20,22 @@ httpx==0.28.1
 # server read-side (rendering tests)
 nh3==0.2.20
 
+# core/journal.py — the sealed record format the journal tests drive directly.
+# A server dependency rather than an agent one (the agent never syncs a
+# journal), so the test venv needs it explicitly.
+cryptography==44.0.0
+
 # The proxy-header middleware, driven directly in tests/test_proxy_unit.py.
 # Plain uvicorn rather than the server's uvicorn[standard]: the test needs the
 # middleware, not a running server.
 uvicorn==0.34.0
+
+# The journal server (journal/server.py), driven in-process through Starlette's
+# TestClient against a temp SQLite file — no container, no port. It is the piece
+# that runs on a rented machine, so its auth and its space isolation are worth
+# testing directly rather than through the app that talks to it.
+fastapi==0.116.1
+starlette==0.47.3
 
 # agent-side preview rendering — the thumbnail tests drive ingest.thumb_pending
 # in-process, exactly as the agent does.

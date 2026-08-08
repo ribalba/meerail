@@ -32,7 +32,7 @@ PLATFORMS  ?= linux/amd64,linux/arm64
 # builds at all. Created on demand by the buildx target below.
 BUILDER    ?= meerail
 
-.PHONY: help up down logs build infra dev venv backup restore agent agent-docker agent-test agent-logs agent-service agent-service-status agent-service-stop desktop psql fmt test test-up test-down test-psql screenshots version buildx images images-push
+.PHONY: help up down logs build infra dev venv backup restore journal journal-keys journal-down agent agent-docker agent-test agent-logs agent-service agent-service-status agent-service-stop desktop psql fmt test test-up test-down test-psql screenshots version buildx images images-push
 
 help:
 	@echo "meerail targets:"
@@ -42,6 +42,9 @@ help:
 	@echo "  make infra   - run only postgres + tika (for native server dev)"
 	@echo "  make dev     - run the server natively with --reload (needs 'make infra' + venv)"
 	@echo "  make venv    - create .venv and install server deps"
+	@echo "  make journal-keys - make a journal passphrase + the hash the server needs"
+	@echo "  make journal      - run the journal sync server (see journal/README.md)"
+	@echo "  make journal-down - stop it"
 	@echo "  make agent   - run the meerail-agent natively (see agent/README.md)"
 	@echo "  make agent-docker - run the agent in Docker, host network (Linux only)"
 	@echo "  make agent-test   - check the agent's connections in Docker, then exit"
@@ -84,6 +87,20 @@ dev:
 	DATABASE_URL=$${DATABASE_URL:-postgresql+psycopg://meerail:meerail@localhost:5432/meerail} \
 	TIKA_URL=$${TIKA_URL:-http://localhost:9998} \
 	.venv/bin/uvicorn app.main:app --reload --port 8000 --timeout-graceful-shutdown 3
+
+# The sync server, for installs that keep several machines in step. Separate
+# from `make up` on purpose: this is the one part of meerail meant to run
+# somewhere else, and it shares nothing with the mail stack.
+JOURNAL_COMPOSE = $(COMPOSE) -p meerail-journal -f docker-compose.journal.yml
+
+journal-keys:
+	@python3 -m journal.keys
+
+journal:
+	$(JOURNAL_COMPOSE) up -d --build
+
+journal-down:
+	$(JOURNAL_COMPOSE) down
 
 agent:
 	cd agent && ./run.sh

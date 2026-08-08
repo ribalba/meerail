@@ -394,6 +394,7 @@ def update_flags(db, mailbox: Mailbox, items: list[dict]) -> int:
     by_uid = {loc.imap_uid: loc for loc in locs}
 
     changed = 0
+    now_read: set[int] = set()
     for item in items:
         loc = by_uid.get(item["uid"])
         if loc is None:
@@ -405,9 +406,25 @@ def update_flags(db, mailbox: Mailbox, items: list[dict]) -> int:
         before = (loc.seen, loc.flagged, loc.answered, loc.draft, loc.deleted)
         if before == after and sorted(loc.keywords or []) == sorted(keywords):
             continue
+        if after[0] and not loc.seen:
+            # Read somewhere else — the phone, webmail — since the last sweep.
+            # This is the other half of what fills messages.read_at; the reader's
+            # own half is app/mailops.py::set_seen. Only the transition counts:
+            # a placement that arrived already seen was read at a time no server
+            # records. See models.Message.read_at.
+            now_read.add(loc.message_pk)
         (loc.seen, loc.flagged, loc.answered, loc.draft, loc.deleted) = after
         loc.keywords = keywords
         changed += 1
+
+    if now_read:
+        # One statement rather than a load per message: a sweep after a phone
+        # catch-up can carry hundreds, and the WHERE keeps the first stamp.
+        db.execute(
+            update(Message)
+            .where(Message.id.in_(now_read), Message.read_at.is_(None))
+            .values(read_at=utcnow())
+        )
 
     if not changed:
         return 0

@@ -27,6 +27,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -213,6 +214,11 @@ class Message(Base):
         # Ingest time, not send time — powers the "downloaded in the last hour/day"
         # counters in /api/sync/status, which would otherwise seq-scan the table.
         Index("ix_messages_account_created", "account_id", "created_at"),
+        # Partial: read_at is set only from the moment a read is observed, so on
+        # any mailbox with history most rows are NULL and indexing them would be
+        # most of the index. See the column, and analytics' read heatmap.
+        Index("ix_messages_account_read", "account_id", "read_at",
+              postgresql_where=text("read_at IS NOT NULL")),
         Index("ix_messages_thread", "thread_id"),
         Index("ix_messages_message_id", "message_id"),
         # GIN trigram index: lets Postgres use the index for ~*/LIKE when the
@@ -255,6 +261,22 @@ class Message(Base):
 
     date_sent: Mapped[datetime | None] = mapped_column(DateTime)
     date_received: Mapped[datetime | None] = mapped_column(DateTime)
+    # When this message was first *observed* to become read, naive UTC.
+    #
+    # IMAP stores whether a message is seen, never when it became seen, so this
+    # is the only record of it there can be. It is stamped on a transition —
+    # the reader marking a message read, or a sync finding a placement that was
+    # unread last time and is read now — and never on first sight of a message
+    # that already carried \Seen, because that read happened at an unknown time
+    # (usually years ago, during backfill). It therefore only fills in from the
+    # moment the column existed, and stays NULL for the mailbox's whole history
+    # before that: the "when mail is read" panel says so out loud rather than
+    # drawing a blank grid that looks like "you never read anything".
+    #
+    # First read only. A message re-marked unread and read again keeps the
+    # original stamp, because the question the panel answers is when mail
+    # reaches you, not how often you revisit it.
+    read_at: Mapped[datetime | None] = mapped_column(DateTime)
     size_bytes: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
 
     snippet: Mapped[str] = mapped_column(Text, default="", nullable=False)
@@ -524,6 +546,28 @@ class Reminder(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
     fired_at: Mapped[datetime | None] = mapped_column(DateTime)
 
+    # --- Which install brings this one back (journal installs only) ----------
+    #
+    # All three machines hold this reminder and all three watch the clock, so at
+    # nine on Monday all three would move the same conversation back into the
+    # inbox and mark it unread — three times, and twice against a message the
+    # first move has already taken out of Archive.
+    #
+    # So firing is claimed, and the journal's sequence number is what decides it:
+    # every install appends "I will take this one", and the lowest number wins,
+    # because the server that hands out those numbers is the only participant
+    # with an opinion all three trust. See app/journal.py::claim.
+    #
+    # NULL on an install with no journal configured, which is every install by
+    # default — there is nobody to race, and run_due fires without asking.
+    claim_seq: Mapped[int | None] = mapped_column(BigInteger)
+    claim_by: Mapped[str | None] = mapped_column(String(64))
+    # When the claim was made. A claim expires (app/journal.py::CLAIM_TTL): the
+    # machine that won may be shut before it fires, and a promise that can only
+    # be kept by a laptop that is now in a bag is not a promise. After the TTL
+    # the others may claim it again.
+    claim_at: Mapped[datetime | None] = mapped_column(DateTime)
+
 
 # --- App settings ----------------------------------------------------------
 
@@ -683,3 +727,79 @@ class Outbound(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+# --- Cross-install sync ----------------------------------------------------
+
+
+class JournalOutbox(Base):
+    """A record this install owes the journal server, held until it is taken.
+
+    The same shape of promise as PendingAction and Outbound, for the same
+    reason: the thing that has to happen (a reminder set here becoming a
+    reminder everywhere) must not depend on a network being up at the moment a
+    key was pressed. Setting a reminder writes a row here and returns; the
+    journal loop drains it whenever the server is reachable, and a laptop that
+    was on a train publishes what it did when it lands.
+
+    Rows are kept after they are sent rather than deleted, because ``seq`` is
+    worth having: it is what the log said this record was numbered, and the one
+    thing that makes a claim on a due reminder resolvable (see
+    app/journal.py::claim). The sweep in the loop drops the old ones.
+
+    ``body`` is the *plain* record — this is our own database, and sealing it
+    here would only mean a row we cannot read while debugging. It is sealed on
+    the way out.
+    """
+
+    __tablename__ = "journal_outbox"
+    __table_args__ = (
+        # The loop's only query: the unsent ones, oldest first.
+        Index("ix_journal_outbox_pending", "status", "id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    body: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    # Told to the server in the clear, and only so that it can ever delete
+    # anything — it cannot read a record to discover that a later one restates
+    # it. See journal/server.py::_prune.
+    snapshot: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    # pending | sent. Nothing else: a record that could not be posted is still
+    # wanted, exactly as a PendingAction that could not be applied is, and the
+    # reason lives in ``error`` while it goes on being retried.
+    status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
+    # What the server numbered it. NULL until it has been taken.
+    seq: Mapped[int | None] = mapped_column(BigInteger)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    error: Mapped[str | None] = mapped_column(Text)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class JournalDeferred(Base):
+    """A record from the journal that this install cannot apply *yet*.
+
+    The common case is not an error and not rare: a reminder set on the laptop
+    names a conversation by its Message-ID, and the desktop has not finished
+    syncing that mail. There is nothing wrong with either machine — one is simply
+    ahead — and the record has to wait rather than be dropped, because dropping
+    it means the desktop never learns about that reminder at all.
+
+    It cannot wait by stalling the cursor: everything appended after it would
+    wait too, and one message that never arrives (deleted on the server before
+    this install ever saw it) would freeze the whole log. So the cursor moves on
+    and the record is parked here, retried on every pass, and given up on after
+    ``MAX_TRIES`` — by which point the mail it names is not coming.
+    """
+
+    __tablename__ = "journal_deferred"
+    __table_args__ = (Index("ix_journal_deferred_seq", "seq"),)
+
+    seq: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    record: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    tries: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)

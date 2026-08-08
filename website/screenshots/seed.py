@@ -427,6 +427,48 @@ def _history() -> list[dict]:
     return out
 
 
+def stamp_reads() -> None:
+    """Give the seeded mail read times, for the stats modal's "Read" tab.
+
+    `messages.read_at` is only ever written when meerail *watches* a message go
+    from unread to read, so mail that was ingested already seen — which is all
+    of the history above — carries none. Nothing here can produce that
+    transition after the fact, so the times are written directly.
+
+    Shaped, not random: a lag of minutes to hours after arrival, and anything
+    that lands overnight is pushed to the next morning. That is what makes the
+    read grid a different picture from the arrival grid — mail comes in around
+    the clock, reading happens during the day — which is the entire reason the
+    panel has three tabs.
+    """
+    rnd = random.Random(HISTORY_SEED + 1)
+    now = NOW.replace(tzinfo=None)
+    with SessionLocal() as db:
+        ours = {PERSONAL, WORK, "hannah@northwind-example.com",
+                "press@northwind-example.com"}
+        rows = db.query(Message).filter(
+            Message.from_addr.not_in(ours), Message.date_sent.is_not(None)
+        ).all()
+        for msg in rows:
+            # A fifth stays unread, so the two grids do not carry identical
+            # totals and the mailbox reads like one with a backlog.
+            if rnd.random() < 0.2:
+                continue
+            when = msg.date_sent + timedelta(minutes=rnd.choice([
+                rnd.uniform(2, 50),          # at the desk when it landed
+                rnd.uniform(60, 400),        # later that morning/afternoon
+                rnd.uniform(600, 1900),      # the next day
+            ]))
+            if when.hour < 7:
+                when = when.replace(hour=rnd.randint(7, 9), minute=rnd.randint(0, 59))
+            elif when.hour > 21:
+                when = (when + timedelta(days=1)).replace(
+                    hour=rnd.randint(8, 10), minute=rnd.randint(0, 59))
+            msg.read_at = min(when, now)
+        db.commit()
+    print(f"  stamped read times on {len(rows)} received messages")
+
+
 def touch_agent() -> None:
     """Stamp both accounts as just-synced.
 
@@ -539,6 +581,9 @@ def main() -> None:
             )
             ingest.advance_cursor(db, mailbox, uid)
             db.commit()
+
+    print("stamping read times…")
+    stamp_reads()
 
     print("setting account presentation…")
     with SessionLocal() as db:
