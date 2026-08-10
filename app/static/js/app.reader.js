@@ -138,6 +138,9 @@ App.reader = (function () {
     // with no task tracker should not carry a button that can only fail.
     { sep: true, tasks: true },
     { act: "task", icon: "task", title: "Add Task", tasks: true },
+    // Same rule, for the same reason: no model configured, no robot. See App.ai.
+    { sep: true, ai: true },
+    { act: "ai", icon: "robot", title: "Ask about this conversation", ai: true },
   ];
 
   // The bar at the top always means "the newest message". This row means "this
@@ -161,34 +164,135 @@ App.reader = (function () {
     const noSrc = !m.has_source;
     const srcHint = noSrc ? "The original message bytes are not stored"
       : "View the message source (opens in a new tab)";
+    // Two groups, and which verb sits in which is the whole layout. The left
+    // one is what survives a narrow pane: the three ways to answer a message,
+    // and the two ways to get it out of the way. Those five are the ones you
+    // reach for without looking, so they stay under the cursor at every width.
+    // Everything else is in .tb-right, which folds into the ⋯ menu when the row
+    // runs out of room — see fitToolbar.
     return `<div class="msg-toolbar" data-msg="${m.id}">
       <button class="tb-btn" data-act="reply" title="Reply">${App.icon("reply", 16)} Reply</button>
       <button class="tb-btn" data-act="replyall" title="Reply All">${App.icon("replyAll", 16)} Reply All</button>
       <button class="tb-btn" data-act="forward" title="Forward">${App.icon("forward", 16)} Forward</button>
-      ${tasksOn() ? `<button class="tb-btn" data-act="task" title="Add Task"
-        >${App.icon("task", 16)} Add Task</button>` : ""}
+      <button class="tb-btn" data-act="archive" title="Archive">${App.icon("archive", 16)}</button>
+      <button class="tb-btn" data-act="trash" title="Delete">${App.icon("trash", 16)}</button>
       <span class="tb-spacer"></span>
+      <span class="tb-right">
+      <!-- Icon-only, all of them, and not only to keep the row short: this
+           group is what the ⋯ menu is built out of, and a button carrying its
+           own label would arrive in the menu with that label inside the icon
+           slot and the same words beside it. -->
+      ${tasksOn() ? `<button class="tb-btn" data-act="task" title="Add Task"
+        >${App.icon("task", 16)}</button>` : ""}
+      ${aiOn() ? `<button class="tb-btn" data-act="ai" data-label="Ask AI about this"
+        title="Ask about this conversation">${App.icon("robot", 16)}</button>` : ""}
       <button class="tb-btn${on ? " on" : ""}" data-act="plain" aria-pressed="${on}"
         title="${hint}" aria-label="${hint}"${off ? " disabled" : ""}
         >${App.icon("plaintext", 16)}</button>
-      <button class="tb-btn" data-act="source"
+      <!-- data-label is what the overflow menu calls it. The title is written
+           for a tooltip, where saying that it opens a tab is worth the words;
+           as a menu row it only gets ellipsised. Buttons without one are named
+           by their title, which for the rest of these is already the right
+           length. -->
+      <button class="tb-btn" data-act="source" data-label="View the message source"
         title="${srcHint}" aria-label="${srcHint}"${noSrc ? " disabled" : ""}
         >${App.icon("code", 16)}</button>
       <button class="tb-btn ${m.flagged ? "on" : ""}" data-act="flag" title="Flag">${App.icon("flag", 16, m.flagged)}</button>
       <button class="tb-btn" data-act="move" title="Move to folder">${App.icon("move", 16)}</button>
       <button class="tb-btn" data-act="remind" title="Remind me later">${App.icon("bell", 16)}</button>
-      <button class="tb-btn" data-act="archive" title="Archive">${App.icon("archive", 16)}</button>
-      <button class="tb-btn" data-act="trash" title="Delete">${App.icon("trash", 16)}</button>
       <button class="tb-btn" data-act="unread" title="Mark as unread">${App.icon("markunread", 16)}</button>
+      </span>
+      <!-- Only drawn when the row above has run out of width — see fitToolbar.
+           It holds exactly what .tb-right holds, read back off those buttons, so
+           the menu cannot drift from the toolbar it stands in for. -->
+      <button class="tb-btn tb-more" data-act="more" title="More actions"
+        aria-label="More actions" aria-haspopup="true">${App.icon("more", 16, true)}</button>
     </div>`;
   }
 
+  // --- Making the row fit -----------------------------------------------
+  //
+  // The per-message row is the widest thing in the reading pane — three labelled
+  // verbs and up to ten icons — and that pane is resizable, so "too narrow" is a
+  // state you drag into rather than a device size a media query could catch.
+  // Left alone the buttons squashed into each other and the filing verbs ran off
+  // the edge, which is what "does not break" looked like.
+  //
+  // Two steps out of it, taken in this order:
+  //
+  //   1. the labels go, leaving icons — which is what the phone layout does at
+  //      the foot of the stylesheet, and what a toolbar you use every day
+  //      stops needing;
+  //   2. only then does .tb-right fold into the ⋯ menu.
+  //
+  // Losing the words costs recognition, losing a button costs a click — and a
+  // row you know by heart is cheap to read by shape. So the words go first,
+  // even at widths where folding the group would have saved more.
+  //
+  // What the row needs, in pixels, before and after step 1.
+  //
+  // Read with the row pinned to zero width, which is the only way to get an
+  // answer out of it: the spacer between the two halves grows to fill whatever
+  // is left over, so a row that fits reports its *container's* width as its
+  // own — no answer at all to "does this fit?". At zero there is nothing to
+  // fill, every other child is flex:0 0 auto, and scrollWidth is the sum of
+  // them. scrollWidth leaves out the padding on the far side, so that is added
+  // back rather than quietly costing the last button its right-hand margin.
+  function widths(bar) {
+    const pad = parseFloat(getComputedStyle(bar).paddingRight) || 0;
+    const was = bar.style.width;
+    bar.style.width = "0";
+    bar.classList.remove("icons-only", "compact");
+    const full = bar.scrollWidth + pad;
+    bar.classList.add("icons-only");
+    const icons = bar.scrollWidth + pad;
+    bar.classList.remove("icons-only");
+    bar.style.width = was;
+    return { full, icons };
+  }
+
+  // Measured on every fit rather than cached, because the numbers are not
+  // constants: crossing the phone breakpoint drops the labels from underneath,
+  // and a cached desktop width would then fold a row that had plenty of room.
+  // It is safe to mutate here — the observer below watches the *pane*, whose
+  // width nothing in this function can change, so there is no loop to fall into
+  // and every write lands in the same frame as the read, before any paint.
+  function fitToolbar(bar) {
+    const avail = bar.clientWidth;
+    // No width yet: not laid out, or in a pane that is hidden. Deciding from
+    // that would fold every row in the thread shut.
+    if (!avail) return;
+    const { full, icons } = widths(bar);
+    const dropLabels = full > avail + 1;
+    bar.classList.toggle("icons-only", dropLabels);
+    // Folding is the last resort, so there is nothing to measure past it: if
+    // the icons alone do not fit, the group goes whether or not that is enough.
+    bar.classList.toggle("compact", dropLabels && icons > avail + 1);
+  }
+
+  function fitToolbars() {
+    document.querySelectorAll("#reader-content .msg-toolbar").forEach(fitToolbar);
+  }
+
   function tasksOn() { return !!(App.tasks && App.tasks.enabled()); }
+  function aiOn() { return !!(App.ai && App.ai.enabled()); }
+
+  // Is there anything in this attachment a model could be asked about? Text the
+  // server extracted (`has_text`, decided there because only the server can see
+  // it), or a picture, which goes to the provider as a picture. Everything else
+  // — a zip, a signature blob, a font — gets no robot, because the only honest
+  // answer it could give is "there is nothing here".
+  function explainable(a) {
+    if (!aiOn() || a.stored === false) return false;
+    return !!a.has_text || /^image\//.test(a.content_type || "");
+  }
 
   function renderBar() {
     const bar = document.getElementById("reader-bar");
     const m = targetMsg();
-    bar.innerHTML = BAR_BUTTONS.filter((b) => !b.tasks || tasksOn()).map((b) => {
+    bar.innerHTML = BAR_BUTTONS.filter(
+      (b) => (!b.tasks || tasksOn()) && (!b.ai || aiOn())
+    ).map((b) => {
       if (b.sep) return `<span class="tb-sep"></span>`;
       const flagged = b.act === "flag" && m && m.flagged;
       const off = b.act !== "new" && !m;
@@ -251,6 +355,61 @@ App.reader = (function () {
     openMenu = null;
   }
 
+  // Put a popup on <body> under `anchor` and wire the three ways out of it.
+  // Shared by the move menu and the toolbar's overflow menu: both hang off a
+  // button in a sticky, overflow-clipped strip, which is why neither can simply
+  // be a child of the strip.
+  function mountMenu(el, anchor) {
+    document.body.appendChild(el);
+    // Under the button, nudged back on screen when the menu would run off the
+    // bottom or the right.
+    const r = anchor.getBoundingClientRect();
+    el.style.top = Math.min(r.bottom + 4, window.innerHeight - el.offsetHeight - 8) + "px";
+    el.style.left = Math.max(8, Math.min(r.left, window.innerWidth - el.offsetWidth - 8)) + "px";
+
+    openMenu = {
+      el,
+      onOutside: (e) => { if (!el.contains(e.target) && e.target !== anchor) closeMoveMenu(); },
+      onKey: (e) => { if (e.key === "Escape") { e.stopPropagation(); closeMoveMenu(); } },
+    };
+    document.addEventListener("mousedown", openMenu.onOutside, true);
+    document.addEventListener("keydown", openMenu.onKey, true);
+    // Fixed positioning means the menu would otherwise sit still while the
+    // reading pane scrolls out from under it.
+    document.addEventListener("scroll", closeMoveMenu, true);
+    window.addEventListener("resize", closeMoveMenu);
+  }
+
+  // The buttons that did not fit, as a menu. Read back off the toolbar itself
+  // rather than listed here a second time: the icons, the titles, which of them
+  // are disabled and which is lit all live on those buttons already, and a copy
+  // of that table would be wrong the first time one of them changed. It is also
+  // what gives the menu its wording for free — the plain-text switch says
+  // "Show the plain text version" or "Show the formatted message" depending on
+  // which way it currently is.
+  function openOverflowMenu(m, anchor) {
+    closeMoveMenu();
+    const buttons = [...anchor.closest(".msg-toolbar").querySelectorAll(".tb-right .tb-btn")];
+    const el = document.createElement("div");
+    el.className = "move-menu";
+    el.innerHTML = buttons.map((b, i) => `<button class="move-item${b.classList.contains("on") ? " on" : ""}"
+        data-i="${i}"${b.disabled ? " disabled" : ""}>
+        <span class="mm-icon">${b.innerHTML}</span>
+        <span class="mm-name">${App.esc(b.dataset.label || b.title)}</span></button>`).join("");
+
+    el.addEventListener("click", (e) => {
+      const item = e.target.closest("[data-i]");
+      if (!item) return;
+      const act = buttons[Number(item.dataset.i)].dataset.act;
+      closeMoveMenu();
+      // Anchored to the ⋯ rather than to the button it stands for: Move and
+      // Remind open menus of their own, and the button theirs would have hung
+      // off is the one that is not on screen.
+      handleAction(act, m, anchor);
+    });
+    mountMenu(el, anchor);
+  }
+
   function openMoveMenu(m, anchor) {
     closeMoveMenu();
     const source = sourceOf(m);
@@ -268,13 +427,6 @@ App.reader = (function () {
           <span class="mm-icon">${App.icon(App.roleIcon(mb.role), 15)}</span>
           <span class="mm-name">${App.esc(mb.display_name)}</span></button>`).join("")
       : `<div class="move-empty">No other folders</div>`;
-    document.body.appendChild(el);
-
-    // Right-aligned under the button, nudged back on screen if the folder list
-    // is long enough to run off the bottom.
-    const r = anchor.getBoundingClientRect();
-    el.style.top = Math.min(r.bottom + 4, window.innerHeight - el.offsetHeight - 8) + "px";
-    el.style.left = Math.max(8, Math.min(r.left, window.innerWidth - el.offsetWidth - 8)) + "px";
 
     el.addEventListener("click", (e) => {
       const item = e.target.closest("[data-mailbox]");
@@ -283,18 +435,7 @@ App.reader = (function () {
       closeMoveMenu();
       moveThreadTo(mailboxId);
     });
-
-    openMenu = {
-      el,
-      onOutside: (e) => { if (!el.contains(e.target) && e.target !== anchor) closeMoveMenu(); },
-      onKey: (e) => { if (e.key === "Escape") { e.stopPropagation(); closeMoveMenu(); } },
-    };
-    document.addEventListener("mousedown", openMenu.onOutside, true);
-    document.addEventListener("keydown", openMenu.onKey, true);
-    // Fixed positioning means the menu would otherwise sit still while the
-    // reading pane scrolls out from under it.
-    document.addEventListener("scroll", closeMoveMenu, true);
-    window.addEventListener("resize", closeMoveMenu);
+    mountMenu(el, anchor);
   }
 
   // Like archive and trash, a move takes the whole conversation with it — each
@@ -433,9 +574,11 @@ App.reader = (function () {
     try {
       if (act === "new") return App.compose.openNew();
       if (!m) return;
+      if (act === "more") return anchor && openOverflowMenu(m, anchor);
       if (act === "move") return anchor && openMoveMenu(m, anchor);
       if (act === "remind") return anchor && App.reminders.open(m, anchor);
       if (act === "task") return App.tasks.open(m);
+      if (act === "ai") return App.ai.openThread(m);
       if (act === "reply") return App.compose.openReply(m.id, "reply");
       if (act === "replyall") return App.compose.openReply(m.id, "replyall");
       if (act === "forward") return App.compose.openReply(m.id, "forward");
@@ -678,14 +821,14 @@ App.reader = (function () {
         // but the bytes are gone — so the chip stops being a link rather than
         // offering a download that would 404.
         if (a.stored === false) {
-          return `<span class="attachment-chip is-absent"
+          return `<div class="att-item"><span class="attachment-chip is-absent"
               title="${App.esc(a.filename)} — not stored (outside the sync window)">
             ${App.icon("paperclip", 15)}
             <span class="att-meta">
               <span class="att-name">${App.esc(a.filename)}</span>
               <span class="att-size">${App.fmtSize(a.size)} · not stored</span>
             </span>
-          </span>`;
+          </span></div>`;
         }
         // Types the browser renders itself open in a tab; everything else keeps
         // downloading. `viewable` is the server's allowlist, not a guess here —
@@ -699,17 +842,34 @@ App.reader = (function () {
         const face = a.has_thumb
           ? `<img class="att-thumb" src="/api/attachments/${a.id}/thumb" alt="" loading="lazy">`
           : App.icon("paperclip", 15);
-        return `<a class="attachment-chip${a.has_thumb ? " has-thumb" : ""}" ${link}
-            title="${App.esc(a.filename)}">
-          ${face}
-          <span class="att-meta">
-            <span class="att-name">${App.esc(a.filename)}</span>
-            <span class="att-size">${App.fmtSize(a.size)}</span>
-          </span>
-        </a>`;
+        // The robot is a sibling of the chip, not a child: the chip is an <a>,
+        // and a button inside a link is invalid markup that navigates when you
+        // press it. It is offered only where there is something to read — text
+        // Tika extracted, or a picture a model can look at — so it never
+        // appears on a zip it could only fail on.
+        return `<div class="att-item">
+          <a class="attachment-chip${a.has_thumb ? " has-thumb" : ""}" ${link}
+              title="${App.esc(a.filename)}">
+            ${face}
+            <span class="att-meta">
+              <span class="att-name">${App.esc(a.filename)}</span>
+              <span class="att-size">${App.fmtSize(a.size)}</span>
+            </span>
+          </a>${explainable(a) ? `<button class="att-ai" data-att="${a.id}"
+            title="What is this file?" aria-label="Explain ${App.esc(a.filename)}"
+            >${App.icon("robot", 15)}</button>` : ""}
+        </div>`;
       }).join("");
       m.attachments.forEach((a, i) => {
-        if (a.match_contexts && a.match_contexts.length) at.children[i].classList.add("has-hit");
+        if (a.match_contexts && a.match_contexts.length) {
+          at.children[i].querySelector(".attachment-chip").classList.add("has-hit");
+        }
+      });
+      at.addEventListener("click", (e) => {
+        const btn = e.target.closest(".att-ai");
+        if (!btn) return;
+        const a = m.attachments.find((x) => String(x.id) === btn.dataset.att);
+        if (a) App.ai.openAttachment(a);
       });
       wrap.appendChild(at);
 
@@ -768,6 +928,10 @@ App.reader = (function () {
     const strip = App.reminders && App.reminders.strip(currentThread);
     if (strip) host.appendChild(strip);
     for (const m of currentThread.messages) host.appendChild(renderMsg(m));
+    // Fitted here rather than in renderMsg: a row's width is only knowable once
+    // it is in the document, and a collapsed message renders no toolbar at all,
+    // so everything in the pane now is a row that is really on screen.
+    fitToolbars();
     // Right away for text-only mail; the iframes redo it as they measure up.
     if (pinLast) landOn();
   }
@@ -856,11 +1020,25 @@ App.reader = (function () {
   });
   renderBar();
 
+  // The pane rather than the toolbars, for two reasons. The divider between the
+  // list and the reader is draggable, so the width that decides this changes
+  // without any message being re-rendered — and watching the pane means one
+  // observer for the life of the app, instead of one per message re-registered
+  // on every redraw. It is also the box that cannot be resized by what the
+  // callback does: folding a toolbar changes the row's contents, never the
+  // pane's width, so there is no loop to fall into.
+  if (window.ResizeObserver) {
+    new ResizeObserver(fitToolbars).observe(document.querySelector(".reading-pane"));
+  }
+
   // `redraw` is exported so App.tasks can put the Add Task buttons up (or take
   // them down) the moment the Meerato URL changes, rather than at the next
   // thread open — both the bar and the per-message toolbars carry one.
   return { openThread, clear, action, scrollBy, scrollEnd, setKeyFocus, renderEmpty,
     redraw: () => rerender(), isOpen: () => !!currentThread,
+    // How many messages the open conversation holds — App.ai says so before it
+    // sends any of them to a provider.
+    threadSize: () => (currentThread ? (currentThread.messages || []).length : 0),
     // "A thread is on its way." The keyboard moves into this pane on the same
     // keystroke that asks for the thread, which is a fetch ahead of isOpen().
     isBusy: () => loading > 0,

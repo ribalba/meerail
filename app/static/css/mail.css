@@ -524,9 +524,42 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
    draws no rule above, so sender, recipients and buttons read as one header
    block sitting on top of the white message. */
 .msg-toolbar { display: flex; gap: .3rem; padding: .3rem .8rem .35rem;
-  border-bottom: 1px solid var(--border); background: var(--bg-elev); }
+  border-bottom: 1px solid var(--border); background: var(--bg-elev);
+  /* So a row that has not been measured yet cannot push the pane into a
+     horizontal scroll, and so scrollWidth means "what this needs" — which is
+     what app.reader.js::measureToolbar reads. */
+  overflow: hidden; }
 /* The shared hover tint is this strip's own background — invert it here. */
 .msg-toolbar .tb-btn:hover:not(:disabled) { background: var(--bg); }
+/* Buttons keep their size instead of shrinking. The default flex-shrink was
+   what "does not break" looked like: the labelled verbs squashing into each
+   other until the labels touched, and the icons beside them running off the
+   edge rather than the row admitting it had run out of room. */
+.msg-toolbar .tb-btn, .msg-toolbar .tb-right { flex: 0 0 auto; }
+/* Archive and Delete sit in the group that never folds, next to the reply
+   verbs. A little air in front of them is what keeps "answer this" and "get rid
+   of this" from reading as one run of five — which is exactly what they look
+   like once the labels have gone and all five are monochrome icons. Cheaper
+   than the .tb-sep rule the bar above uses, which would need hiding again on a
+   phone, where space-between would strand it as a line in the middle of the
+   row. */
+.msg-toolbar [data-act="archive"] { margin-left: .55rem; }
+/* The half of the row that is not reply-and-file, as one group, so it can be
+   taken away as one. Same gap as the toolbar's own, so grouping them changes
+   nothing on screen. */
+.tb-right { display: flex; align-items: center; gap: .3rem; }
+/* Two steps out of a row too narrow to hold everything — app.reader.js measures
+   and picks. The labels go first (the phone layout at the foot of this file
+   does the same), and only if the icons alone still do not fit does .tb-right
+   fold into the ⋯ menu: losing a word costs recognition, losing a button costs
+   a click. */
+/* Scoped to the toolbar, not left as a bare `.tb-more`: `.tb-btn` sets
+   display:flex further down this file, and at equal specificity the later rule
+   wins — so the plain selector left the ⋯ showing at every width. */
+.msg-toolbar .tb-more { display: none; }
+.msg-toolbar.compact .tb-right { display: none; }
+.msg-toolbar.compact .tb-more { display: flex; }
+.msg-toolbar.icons-only .tb-btn { font-size: 0; padding: .35rem .45rem; }
 .msg-chevron { color: var(--text-faint); display: flex; transition: transform .15s; }
 .thread-msg.collapsed .msg-chevron { transform: rotate(-90deg); }
 @media (prefers-reduced-motion: reduce) { .msg-chevron { transition: none; } }
@@ -616,6 +649,15 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
 .msg-body-md pre code { background: none; border: none; padding: 0; }
 
 .attachments { display: flex; flex-wrap: wrap; gap: .5rem; padding: .3rem 1.1rem 1rem; }
+/* Chip + its robot, kept together so the pair wraps as one. The robot has to be
+   a sibling of the chip rather than inside it — the chip is an <a>, and a button
+   in a link navigates when pressed. Centred rather than stretched: beside a
+   preview chip a full-height button would be a 96px bar. */
+.att-item { display: flex; align-items: center; gap: .25rem; }
+.att-ai { display: flex; align-items: center; justify-content: center; cursor: pointer;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--bg-elev);
+  color: var(--text-faint); padding: .4rem; align-self: center; }
+.att-ai:hover { color: var(--accent); border-color: var(--accent); }
 .attachment-chip { display: flex; align-items: center; gap: .45rem; border: 1px solid var(--border);
   border-radius: 8px; padding: .4rem .6rem; font-size: .82rem; text-decoration: none; color: var(--text);
   background: var(--bg-elev); }
@@ -678,6 +720,16 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
   background: none; border: none; cursor: pointer; font: inherit; font-size: .85rem;
   color: var(--text); text-align: left; padding: .4rem .5rem; border-radius: 6px; }
 .move-item:hover { background: var(--bg-elev); }
+/* The toolbar's overflow menu carries the state of the buttons it stands for:
+   one that is disabled up there is disabled in here rather than quietly doing
+   nothing, and a lit Flag stays lit. */
+.move-item:disabled { opacity: .4; cursor: default; }
+.move-item:disabled:hover { background: none; }
+/* One colour for "this is currently on", whichever button it came from — the
+   toolbar tints a lit Flag and a lit plain-text switch differently, and two
+   meanings of the same dot in a nine-row menu is a distinction nobody reads.
+   The flag itself is still drawn filled, so it says which one it is. */
+.move-item.on .mm-icon { color: var(--accent); }
 .mm-icon { display: flex; color: var(--text-muted); }
 .mm-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .move-empty { padding: .5rem .6rem; font-size: .82rem; color: var(--text-muted); }
@@ -701,6 +753,17 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
   color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .move-item:hover .rm-when { color: var(--text); }
 .rm-sep { height: 1px; margin: .3rem .35rem; background: var(--border); }
+/* "Suggest a time", and the suggestion it turns into. Once answered it is one
+   more row in the same list — the reason where a preset's label goes, the moment
+   where its time goes — because that is what it is: another time to choose, not
+   a decision already taken. It only wraps to two lines here: a preset's label is
+   two words, a reason is a sentence. */
+.rm-suggest .mm-name, .rm-suggested .mm-name { white-space: normal; }
+.rm-suggested { align-items: flex-start; }
+.rm-suggested .mm-icon { padding-top: .1rem; color: var(--accent); }
+.rm-suggested .rm-when { white-space: nowrap; }
+.rm-suggest:disabled { cursor: default; color: var(--text-muted); }
+.rm-suggest-failed .mm-name { color: var(--danger); }
 .rm-custom { display: flex; gap: .35rem; padding: .15rem .35rem .3rem; }
 .rm-input { flex: 1 1 auto; min-width: 0; font: inherit; font-size: .78rem;
   padding: .25rem .35rem; border-radius: 6px; color: var(--text);
@@ -996,7 +1059,8 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
   text-transform: uppercase; letter-spacing: .04em; color: var(--text-muted); }
 .settings-section label { display: block; font-size: .74rem; color: var(--text-muted);
   margin-bottom: .3rem; }
-.settings-section input[type="text"], .settings-section input[type="number"] {
+.settings-section input[type="text"], .settings-section input[type="number"],
+.settings-section input[type="password"] {
   width: 100%; box-sizing: border-box; font: inherit;
   font-size: .84rem; padding: .5rem .65rem; border: 1px solid var(--border); border-radius: 8px;
   background: var(--bg); color: var(--text); }
@@ -1009,6 +1073,7 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
   background: var(--bg); color: var(--text); }
 .settings-section input[type="text"]:focus,
 .settings-section input[type="number"]:focus,
+.settings-section input[type="password"]:focus,
 .settings-section select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 /* A tickbox names itself, so its label sits beside it and reads at body size
    rather than above it in the muted caption the text fields use. */
@@ -1016,6 +1081,55 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
   font-size: .84rem; color: var(--text); cursor: pointer; }
 .settings-check input[type="checkbox"] { accent-color: var(--accent); margin: 0;
   width: 15px; height: 15px; cursor: pointer; }
+
+/* --- The AI dialogs --- */
+/* Wider than the 480px default. The search writer shows a query that must not
+   wrap mid-token to stay readable as syntax, and a thread answer is prose —
+   both are unreadable in a narrow column. */
+#ai-search-modal .modal, #ai-thread-modal .modal { width: min(620px, 94vw); }
+.ai-textarea { width: 100%; box-sizing: border-box; font: inherit; font-size: .88rem;
+  line-height: 1.45; padding: .55rem .7rem; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg); color: var(--text); resize: vertical; }
+.ai-textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.ai-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; margin-top: .7rem; }
+.ai-status { font-size: .78rem; color: var(--text-muted); }
+.ai-status.error { color: var(--danger); }
+.ai-warning { color: light-dark(#9a6700, #d4a72c); margin: .5rem 0 0; }
+/* The result is a second half of the dialog, not a replacement for the first:
+   the description stays on screen so it can be reworded and asked again. */
+.ai-result { margin-top: 1rem; padding-top: .9rem; border-top: 1px solid var(--border); }
+/* The written query, shown as what it is — something to be read and typed, not
+   a sentence. Wraps rather than scrolls: a query cut off at the edge cannot be
+   checked before it is run. */
+.ai-query { display: block; font-size: .88rem; line-height: 1.5; padding: .6rem .7rem;
+  border-radius: 8px; background: var(--bg-elev); border: 1px solid var(--border);
+  white-space: pre-wrap; word-break: break-word; }
+/* The four one-click instructions. They wrap on a phone rather than scrolling
+   sideways — a button half off the edge reads as three buttons, not four. */
+.ai-presets { display: flex; flex-wrap: wrap; gap: .45rem; margin: 0 0 .8rem; }
+.ai-preset { font: inherit; font-size: .8rem; font-weight: 600; cursor: pointer;
+  padding: .35rem .8rem; border-radius: 999px; border: 1px solid var(--border-strong);
+  background: transparent; color: var(--text); }
+.ai-preset:hover { background: var(--bg-elev); }
+/* pre-wrap, because the answer is plain text the model laid out with blank
+   lines and "- " bullets: collapsing that would run its list into a paragraph.
+   Capped and scrollable so a long summary cannot push the buttons under it off
+   the bottom of the modal. */
+.ai-answer { font-size: .88rem; line-height: 1.55; white-space: pre-wrap; word-break: break-word;
+  max-height: 44vh; overflow-y: auto; padding: .7rem .8rem; border-radius: 8px;
+  background: var(--bg-elev); border: 1px solid var(--border); }
+/* The model list and its Fetch button on one row — the button is only useful
+   next to the thing it fills. */
+.ai-model-row { display: flex; align-items: center; gap: .5rem; margin-bottom: .4rem; }
+.ai-model-row select { flex: 1; min-width: 0; }
+.ai-model-row button { font: inherit; font-size: .8rem; font-weight: 600; border-radius: 7px;
+  padding: .4rem .8rem; background: var(--bg-elev); color: var(--text);
+  border: 1px solid var(--border); cursor: pointer; white-space: nowrap; }
+.ai-model-row button:hover { background: var(--border); }
+/* Faint until hovered, like the ⓘ beside it: two small buttons inside the
+   search field should not compete with the field. */
+.search-ai-btn { flex: 0 0 auto; color: var(--text-faint); }
+.search-ai-btn:hover { color: var(--accent); }
 
 /* --- Add-task dialog --- */
 .task-field { display: block; margin-bottom: .8rem; }
@@ -1551,15 +1665,23 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
      wrap, which would change its height and break the offset above. */
   .reader-bar { overflow-x: auto; scrollbar-width: none; }
   .reader-bar::-webkit-scrollbar { display: none; }
-  /* The per-message row carries labels as well as icons — nine buttons wide,
-     which at this width squeezes "Reply All" onto two lines and pushes the
-     filing verbs off the edge. Drop to icons only, like the bar above it.
-     The labels are bare text nodes with no element to hide, so the size they
-     are set in is the only thing there is to take away from them. */
+  /* The per-message row carries labels as well as icons, which at this width
+     squeezes "Reply All" onto two lines. Drop to icons only, like the bar above
+     it — the labels are bare text nodes with no element to hide, so the size
+     they are set in is the only thing there is to take away from them.
+     What is left over is app.reader.js's job: thirteen icons still do not fit a
+     phone, so the row folds its filing half into the ⋯ menu, which is also how
+     those buttons stop being 30px wide on a touchscreen. */
   .msg-toolbar .tb-btn { font-size: 0; padding: .5rem; }
   /* Which leaves the row short enough to spread out rather than crowd left. */
   .msg-toolbar { justify-content: space-between; }
   .msg-toolbar .tb-spacer { display: none; }
+  /* space-between spreads *children*, and the filing icons are one child at
+     desktop widths — see .tb-right. Dissolved here so the row spreads all
+     thirteen buttons as it did before that group existed. The compact rule
+     above still wins over this one if a phone is ever narrow enough to need it,
+     since a class adds specificity and a media query does not. */
+  .msg-toolbar .tb-right { display: contents; }
 
   /* A long sender wrapped to a second line and ran under the timestamp. The
      detail line beneath it already truncates to one line; at this width the

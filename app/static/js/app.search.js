@@ -177,6 +177,28 @@ App.search = (function () {
     input.select();
   }
 
+  // Put a query in the box, from somewhere other than the keyboard — App.ai's
+  // search writer is the only caller. The mode travels with it because half a
+  // query is not a query: a regex pasted in with the switch off is a search for
+  // those characters literally, and finds nothing.
+  //
+  // `run` false stops at the box: that is the "let me read it first" button, and
+  // it leaves the cursor in the field so the query can be edited where it is.
+  function applyQuery(q, mode, run = true) {
+    const e = els();
+    e.input.value = q;
+    e.rx.checked = mode === "regex";
+    e.clear.hidden = !q;
+    e.controls.hidden = false;
+    if (run) return openFirst();
+    e.input.focus();
+    // The caret goes to the end rather than selecting the lot: the next thing
+    // somebody does to a query they are unsure about is tighten it, and a
+    // selected query is one keystroke from being gone.
+    e.input.setSelectionRange(q.length, q.length);
+    return Promise.resolve(false);
+  }
+
   // What the reader needs to mark up the thread it is about to open. Filters
   // narrowed the results rather than matching text in them, so a query that is
   // only filters has nothing to highlight.
@@ -189,6 +211,6 @@ App.search = (function () {
   function helpOpen() { return !els().helpModal.hidden; }
   function closeHelp() { els().helpModal.hidden = true; }
 
-  return { init, clear, focusInput, query, syncScope, rerun, isActive: () => active,
-           helpOpen, closeHelp };
+  return { init, clear, focusInput, query, syncScope, rerun, applyQuery,
+           isActive: () => active, helpOpen, closeHelp };
 })();

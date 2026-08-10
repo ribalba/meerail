@@ -27,6 +27,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    select,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -599,6 +600,30 @@ class UiSession(Base):
     # minutes (see app/deps.py): it is here so a person can see what is signed
     # in, not as an audit trail worth a write per request.
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
+def still_filed():
+    """A message still filed somewhere the user hasn't deleted it from.
+
+    Every read path applies this, and they have to apply the same one. The list
+    only ever joins non-deleted locations, so the thread view, the single-message
+    endpoints and search all need it too — otherwise a message the user emptied
+    out of Trash is still there to be opened by id and still comes back in search
+    results, which is not what "deleted permanently" means to anyone who pressed
+    it. The row survives that keypress by minutes or hours (the placement goes
+    at once, the row when the agent's next completed pass collects it — see
+    core.ingest.delete_orphan_messages), and this is what makes that interval
+    invisible instead of merely unlisted.
+
+    Here rather than in the router that reads it most, because it is a fact about
+    the schema and there is now more than one reader: app/routers/messages.py
+    calls it `_not_deleted`, and app/threadtext.py needs the same answer before
+    it hands a conversation to a language model.
+    """
+    return select(MessageLocation.id).where(
+        MessageLocation.message_pk == Message.id,
+        MessageLocation.deleted.is_(False),
+    ).exists()
 
 
 class Setting(Base):

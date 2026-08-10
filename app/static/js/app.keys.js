@@ -217,6 +217,9 @@ App.keys = (function () {
     // Only the × discards a draft, so Escape minimizes instead of closing.
     if (App.compose.isOpen()) return App.compose.minimize();
     if (App.tasks.isOpen()) return App.tasks.close();
+    if (App.ai.searchOpen()) return App.ai.closeSearch();
+    if (App.ai.threadOpen()) return App.ai.closeThread();
+    if (App.ai.attachmentOpen()) return App.ai.closeAttachment();
     if (App.shell.folderOpen()) return App.shell.closeFolder();
     if (App.shell.settingsOpen()) return App.shell.closeSettings();
     if (App.status.isOpen()) return App.status.close();

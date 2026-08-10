@@ -684,6 +684,23 @@ App.compose = (function () {
     } catch (e) { alert("Could not open composer: " + e.message); }
   }
 
+  // A block of text somebody wants to send — App.ai's "put it in a reply" and
+  // "put it in a new message". With a `messageId` it opens the reply it would
+  // have opened anyway, quote, footer and addressing intact, and puts the text
+  // at the top where a reply is written; without one it is a blank message with
+  // the text in it.
+  //
+  // It stops at the draft. Nothing here sends, and nothing marks the text as
+  // machine-written: it is in the composer, above the quote, waiting to be read
+  // and edited like anything else typed into that box.
+  async function openWithBody(text, { messageId = null } = {}) {
+    if (messageId) await openReply(messageId, "reply");
+    else openNew();
+    const rest = body.getText();
+    body.setText(rest ? `${text}\n\n${rest}` : text);
+    body.focus(false);
+  }
+
   // --- Sending -----------------------------------------------------------
   // Three buttons share one path. `after` is the extra step the variants add
   // once the mail is away — archiving the thread, filing a ticket — and it is
@@ -892,7 +909,8 @@ App.compose = (function () {
   }
 
   return {
-    init, openNew, openReply, close, sendNow, sendDefault, sendAndArchive, sendAndTicket,
+    init, openNew, openReply, openWithBody, close, sendNow, sendDefault, sendAndArchive,
+    sendAndTicket,
     minimize, cycle,
     htmlDefault, setHtmlDefault,     // the settings modal owns the checkbox, not the state
     isOpen: () => !$("#compose-modal").hidden,

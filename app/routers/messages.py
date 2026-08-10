@@ -17,6 +17,7 @@ from ..deps import require_ui_auth
 from ..mail.render import sanitize_html
 from core.models import (
     Account, Attachment, Mailbox, Message, MessageLocation, Recipient, Reminder, Setting,
+    still_filed,
 )
 
 router = APIRouter(prefix="/api", tags=["messages"], dependencies=[Depends(require_ui_auth)])
@@ -33,20 +34,13 @@ def _resolve_mailbox_ids(db: DBSession, mailbox_id: int | None, scope: str | Non
 def _not_deleted():
     """A message still filed somewhere the user hasn't deleted it from.
 
-    Every read path applies this, and they have to apply the same one. The list
-    only ever joins non-deleted locations, so the thread view, the single-message
-    endpoints and search all need it too — otherwise a message the user emptied
-    out of Trash is still there to be opened by id and still comes back in search
-    results, which is not what "deleted permanently" means to anyone who pressed
-    it. The row survives that keypress by minutes or hours (the placement goes
-    at once, the row when the agent's next completed pass collects it — see
-    core.ingest.delete_orphan_messages), and this is what makes that interval
-    invisible instead of merely unlisted.
+    The predicate itself is `core.models.still_filed` — it moved there when a
+    second reader outside this package needed it (app/threadtext.py, which turns
+    a conversation into the text an AI feature sends out) and two copies of "does
+    this mail still exist" would have been one too many. This name stays because
+    every read path in this module is written in terms of it.
     """
-    return select(MessageLocation.id).where(
-        MessageLocation.message_pk == Message.id,
-        MessageLocation.deleted.is_(False),
-    ).exists()
+    return still_filed()
 
 
 def _readable(db: DBSession, message_id: int) -> Message:
@@ -266,6 +260,13 @@ def _message_detail(db: DBSession, msg: Message, load_remote: bool,
             # Pruning empties the payload but keeps the row, so the reader can
             # still name what was attached — as a chip it will not offer to open.
             Attachment.content.is_not(None).label("stored"),
+            # Whether Tika got words out of it. A length test rather than a NULL
+            # test: an extraction that ran and found nothing (a scan with no OCR
+            # behind it, a spreadsheet of numbers) stores an empty string, and
+            # offering to explain that is offering a button that can only say
+            # "there is nothing here". Costs a length(), not the text itself —
+            # the column is deliberately absent from this select.
+            (func.coalesce(func.length(Attachment.extracted_text), 0) > 0).label("has_text"),
         )
         .where(Attachment.message_pk == msg.id, Attachment.is_inline.is_(False))
         .order_by(Attachment.id)
@@ -323,7 +324,11 @@ def _message_detail(db: DBSession, msg: Message, load_remote: bool,
         "attachments": [
             {"id": a.id, "filename": a.filename, "content_type": a.content_type,
              "size": a.size_bytes, "is_inline": a.is_inline, "stored": a.stored,
-             "has_thumb": a.has_thumb, "viewable": _inline_safe(a.content_type)}
+             "has_thumb": a.has_thumb, "viewable": _inline_safe(a.content_type),
+             # Is there anything for a model to read? Extracted text, or the
+             # picture itself. Decided here because only the server can see the
+             # first of the two — see the AI router's "explain this attachment".
+             "has_text": a.has_text}
             for a in atts
         ],
     }

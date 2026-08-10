@@ -118,6 +118,50 @@ max_request_bytes = 8388608   # 8 MB
 # a peer service on your own network.
 meerato_allow_private_hosts = false
 
+# --- the AI features ---------------------------------------------------------
+#
+# Which model to use is NOT set here. The provider, the model name and the API
+# key are chosen in Settings → AI and stored in the database, because they are
+# the sort of thing you change while trying models out, and the key is encrypted
+# at rest rather than left sitting in a config file. Three providers: Anthropic
+# (Claude), OpenAI, and "Other", which is any endpoint speaking OpenAI's
+# /chat/completions — Ollama, LM Studio, vLLM, OpenRouter, Groq, Mistral,
+# Gemini's compatibility URL.
+#
+# What lives here is the deployment's half.
+
+# Let the "Other (OpenAI-compatible)" provider point at a private address, which
+# is what running a model locally means — Ollama on 127.0.0.1:11434, LM Studio on
+# :1234. Off by default for the same reason as meerato_allow_private_hosts: the
+# base URL is typed into Settings and then fetched by the *server*, so without a
+# restriction it is a way to aim this machine at whatever else is on its network.
+# Turn it on if your model is local; leave it off on anything internet-facing.
+# The two hosted providers are fixed addresses in the code and are unaffected.
+llm_allow_private_hosts = false
+
+# How long to wait for a model to answer, in seconds. Generous on purpose: a long
+# thread is tens of seconds of thinking before the first byte, and a timeout
+# tuned for an ordinary web service turns a working setup into a flaky one. Only
+# the read side is this long — failing to *reach* a provider still gives up in
+# ten seconds.
+llm_timeout_seconds = 180
+
+# The most of one conversation that may be sent in a single "Ask AI", in
+# characters (roughly four to the token). A longer thread keeps its most recent
+# end and the dialog says how many messages were left out. Raise it for a model
+# with a large context window; lower it to keep per-call cost down.
+llm_max_thread_chars = 240000
+
+# The largest image "Explain this attachment" will send, in bytes. Both hosted
+# providers cap what they accept and answer an oversized one with an opaque 400,
+# so it is turned down here instead, by name and with the size said out loud.
+llm_max_image_bytes = 3500000
+
+# How much of one attachment's extracted text to send. A scanned contract runs to
+# hundreds of pages, and "what is this?" is answered by the first few thousand
+# words; the dialog says when the file was cut.
+llm_max_attachment_chars = 120000
+
 # Default search window in years (0 = search everything). The UI can override
 # it per query.
 default_search_years = 0

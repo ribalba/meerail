@@ -19,8 +19,10 @@ threading · POSIX-regex & keyword search (scope + "last N years" window, `:unre
 sandboxed HTML rendering that blocks every remote fetch a message can ask for — the images,
 and the CSS that would otherwise fetch them for it · read/flag/
 archive/delete and compose that **sync back to your mail server** over IMAP/SMTP · file a mail
-as a **Meerato task**, attachments and all · light + dark, following the system or pinned to
-either in Settings.
+as a **Meerato task**, attachments and all · optional **AI help** — write the search query from
+a description, ask anything about a whole conversation, have a reminder time suggested from
+what the thread says, explain an attachment (Claude, OpenAI, or any OpenAI-compatible endpoint
+including a local Ollama) · light + dark, following the system or pinned to either in Settings.
 
 <p align="center">
   <img src="website/public/img/screenshots/inbox.png" width="820" alt="meerail inbox" />
@@ -475,6 +477,11 @@ keys unless you specifically want a per-machine override.
 | `hsts_max_age_days` | `HSTS_MAX_AGE_DAYS` | `365` | How long a browser remembers to reach this hostname over HTTPS only (`Strict-Transport-Security`), which removes the *first* plaintext request rather than turning it away. Sent only over HTTPS, so a localhost install never sees it. It is a promise browsers keep: for this long they will not speak `http://` to this name, and will not offer a way past a bad certificate. Set `0` while you are still moving the install between hostnames. `includeSubDomains` is deliberately not sent — add it at your proxy if the whole domain is yours to commit. |
 | `max_request_bytes` | `MAX_REQUEST_BYTES` | `8388608` | Ceiling on ordinary (JSON) request bodies; `0` is no limit. Uploads to the composer get `max_attachment_bytes` instead. Enforced before the body is read **and before it is authenticated** — FastAPI parses a request body before it runs the dependency that would have said 401, so without this a stranger chooses what an unauthenticated POST costs the server. A reverse proxy should cap bodies too; see [COOLIFY.md](COOLIFY.md). |
 | `meerato_allow_private_hosts` | `MEERATO_ALLOW_PRIVATE_HOSTS` | `false` | Let "Add Task" point at a Meerato on a private address (`10.x`, `192.168.x`, a container name, localhost). The URL is typed into Settings and fetched *by the server*, so leaving this off is what stops it being a way to aim this machine at whatever else is on its network. Turn it on when Meerato really is a peer service on your own network. |
+| `llm_allow_private_hosts` | `LLM_ALLOW_PRIVATE_HOSTS` | `false` | Let the **Other (OpenAI-compatible)** AI provider point at a private address — which is what running a model locally means (Ollama on `127.0.0.1:11434`, LM Studio on `:1234`). Off by default for the same reason as `meerato_allow_private_hosts`: the base URL is typed into Settings and fetched *by the server*. Turn it on if your model is local; leave it off on anything internet-facing. Anthropic and OpenAI are fixed addresses in the code and are unaffected. |
+| `llm_timeout_seconds` | `LLM_TIMEOUT_SECONDS` | `180` | How long to wait for a model to answer. Generous on purpose — a long thread is tens of seconds of thinking before the first byte. Only the read side; failing to *reach* a provider still gives up in ten seconds. |
+| `llm_max_thread_chars` | `LLM_MAX_THREAD_CHARS` | `240000` | The most of one conversation "Ask AI" may send, in characters (roughly four to the token). A longer thread keeps its most recent end, and the dialog says how many messages were left out. |
+| `llm_max_image_bytes` | `LLM_MAX_IMAGE_BYTES` | `3500000` | The largest image "Explain this attachment" will send. Both hosted providers cap what they accept and answer an oversized one with an opaque 400, so it is refused here instead — by name, with the size said out loud. |
+| `llm_max_attachment_chars` | `LLM_MAX_ATTACHMENT_CHARS` | `120000` | How much of one attachment's extracted text to send. A scanned contract runs to hundreds of pages; the dialog says when a file was cut. |
 | `default_search_years` | `DEFAULT_SEARCH_YEARS` | `0` | Default search window; `0` searches everything. The UI can override per query. |
 | `contacts_scan_years` | `CONTACTS_SCAN_YEARS` | `1` | How far back to scan addresses for compose autocomplete; `0` is all time. |
 | `max_attachment_bytes` | `MAX_ATTACHMENT_BYTES` | `104857600` | Per-attachment cap for outgoing uploads. |
@@ -585,6 +592,64 @@ new mail is arriving.
 Nothing is deleted from your mail server. Widening the window applies to new mail
 immediately; to pull back content for mail that was already skipped, widen it and then run a
 full recheck from the UI's agent-status panel, which re-walks every folder.
+
+### The AI features
+
+Four of them, all optional and all off until you configure a model. Nothing is sent anywhere
+until you press one of the buttons — there is no background summarising, no indexing through
+a provider, and no request at all on an install that has not set one up.
+
+**A robot beside the search box** opens a small dialog: describe the mail you are after in
+your own words, and the query comes back **into the search box** rather than being run behind
+your back. That is deliberate — meerail's search is powerful and writing it is the hard part,
+so the point is to see the syntax written for something you actually wanted. *Search with
+this* runs it; *Put it in the box* leaves the cursor in the field so you can tighten it first.
+Only your description is sent, never your mail.
+
+**A robot in the reading pane** flattens the whole conversation to text and asks a model about
+it. Four one-click instructions — summarise, what do I need to do, draft a reply, explain it
+to me — and a box for anything else ("in German", "as three bullet points"). The answer comes
+back as text; *Put it in a reply* or *Put it in a new message* drops it into the composer as
+an ordinary draft, above the quote and your footer. **Nothing is ever sent for you.** The
+dialog says how many messages will go before you press anything, and says afterwards if a long
+thread did not fit (the most recent end is kept). Attachment *names* travel with the thread;
+their contents do not. `Bcc` is stripped.
+
+**Suggest a time**, in the *Remind me later* menu, reads the conversation and proposes when it
+should come back — anchored to what the thread actually says ("Ada's invoice is due on the
+14th — this brings it back the morning before") rather than to a fixed offset. It appears as
+one more row in the menu, alongside *Tomorrow* and *Next week*: a moment to choose, not a
+decision taken for you. Nothing is filed until you click it.
+
+**A robot beside each attachment** explains the file. A PDF, Word file or spreadsheet goes as
+the text Tika already extracted for the search index — so there is nothing new to extract and
+the bytes stay here. A screenshot or photo goes to the model *as a picture*, which the dialog
+says before you press anything. The robot is only drawn where there is something to read: a
+zip or an unreadable binary gets none, rather than a button whose only honest answer is "there
+is nothing here".
+
+Set it up in **Settings → AI**:
+
+| Provider | What to enter |
+| --- | --- |
+| **Anthropic (Claude)** | Your API key, then *Fetch models* and pick one. |
+| **OpenAI** | Same. |
+| **Other (OpenAI-compatible)** | A base URL plus (usually) a key. Anything speaking `/chat/completions`: Ollama `http://localhost:11434/v1`, LM Studio `http://localhost:1234/v1`, OpenRouter, Groq, Mistral, or Gemini's compatibility URL. A local model normally needs no key at all. |
+
+The model list is fetched from the provider rather than hardcoded here, so a model released
+next month shows up without meerail being updated. If an endpoint has no `/models` route —
+common for a self-hosted server with one model — type the name instead; it is saved with a
+note rather than refused.
+
+Two things about the key. It is **encrypted at rest** with `server.secret_key` and **never
+sent to the browser**: every call is made by the server, so the key is not in the page for an
+extension or a screenshot to find. And one key is kept per provider, so trying Claude and then
+GPT and going back does not cost you the first one. *Turn off* forgets all of them.
+
+Pointing **Other** at a model on `localhost` or your LAN needs `server.llm_allow_private_hosts
+= true` — the base URL is fetched by the *server*, so without that restriction the field would
+be a way to aim this machine at whatever else is on its network. The error message says so
+when you hit it.
 
 ### What meerail deletes, and when
 

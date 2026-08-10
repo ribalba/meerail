@@ -1,14 +1,19 @@
 """Symmetric encryption for the credentials this app stores itself.
 
-meerail is a single-user local app and there is no user auth, so the only secret
-that ever lands in the database is the one the Tasks integration needs: an API
-token for an external tracker, which the user pastes into Settings and which has
-to be replayed verbatim on every call. Mail credentials are not here at all —
-those live in the agent's own config, on the host, and never reach this process.
+meerail is a single-user local app and there is no user auth, so the secrets that
+land in the database are the ones an integration has to replay verbatim on every
+call: the Tasks integration's API token for an external tracker, and the AI
+features' provider key. Both are pasted into Settings. Mail credentials are not
+here at all — those live in the agent's own config, on the host, and never reach
+this process.
 
-Both functions are used from app/routers/tasks.py and nowhere else. Two id
-helpers used to sit beside them (``new_id``, ``new_token``) for a server-side
-credential store that was never built; nothing called either.
+Used from app/routers/tasks.py and app/routers/ai.py. Two id helpers used to sit
+beside them (``new_id``, ``new_token``) for a server-side credential store that
+was never built; nothing called either.
+
+Note what the key is derived from: `secret_key`. Change that and every stored
+credential becomes unreadable — not corrupt, just undecryptable, which both
+callers treat as "nothing saved" and ask for again.
 """
 
 import base64

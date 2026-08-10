@@ -656,6 +656,10 @@ App.shell = (function () {
     $("#settings-modal").hidden = false;
     renderSettingsAccounts();
     loadMeeratoUrl();
+    // Owned by App.ai rather than by this file: the provider menu, the model
+    // list and the key field are one form, and splitting it across two modules
+    // only makes the module that has the state ask the one that has the fields.
+    App.ai.onSettingsOpen();
     loadSendDelay();
     $("#theme-mode").value = App.theme.mode();
     $("#age-days").value = App.list.ageDays();
@@ -787,6 +791,7 @@ App.shell = (function () {
       App.keys.init();
       App.bulk.init();
       App.tasks.init();
+      App.ai.init();
       App.status.init();
       App.undo.init();
       App.stats.init();

@@ -67,6 +67,11 @@
           <input type="search" id="search-input" placeholder="Search all mail" autocomplete="off"
                  title="Words are ANDed; wrap a phrase in quotes to match it exactly. Filters like :unread and :from — see the ⓘ" />
           <button class="icon-btn search-clear" id="search-clear" title="Clear" hidden></button>
+          <!-- Only drawn once a model is configured — see App.ai. An install
+               with no provider should not carry a button that can only fail. -->
+          <button class="icon-btn search-ai-btn" id="search-ai-btn" hidden
+                  title="Describe what you are looking for and have it written as a query"
+                  aria-label="Write a search with AI"></button>
           <button class="icon-btn search-help-btn" id="search-help-btn"
                   title="What you can type in here"></button>
         </div>
@@ -212,6 +217,51 @@
             on it, whatever this is set to. <code>0</code> sends straight away.
             Applies to messages written from now on, and to every browser: this
             one is stored on the server.
+          </p>
+        </div>
+
+        <h3 class="settings-heading">AI</h3>
+        <div class="settings-section">
+          <label for="ai-provider">Provider</label>
+          <select id="ai-provider"></select>
+
+          <label for="ai-base-url" id="ai-base-label" hidden>Base URL</label>
+          <input type="text" id="ai-base-url" autocomplete="off" spellcheck="false" hidden
+            placeholder="http://localhost:11434/v1" />
+          <p class="muted small" id="ai-base-examples" hidden></p>
+
+          <label for="ai-key">API key</label>
+          <input type="password" id="ai-key" autocomplete="off" spellcheck="false"
+            placeholder="Paste the key" />
+
+          <label for="ai-model">Model</label>
+          <div class="ai-model-row">
+            <select id="ai-model-select"><option value="">— fetch the list first —</option></select>
+            <button type="button" id="ai-models-load">Fetch models</button>
+          </div>
+          <input type="text" id="ai-model" autocomplete="off" spellcheck="false"
+            placeholder="Or type the model name" />
+
+          <div class="sa-footer-actions">
+            <button type="button" id="ai-save">Save</button>
+            <button type="button" id="ai-clear">Turn off</button>
+            <span class="sa-footer-status" id="ai-status"></span>
+          </div>
+          <p class="muted small">
+            With a model saved, a robot appears beside the search box — describe the
+            mail you want and it writes the query — and on the reading pane, where it
+            can summarise a conversation, pull out what you need to do, or draft a
+            reply. Both send text to the provider you pick here; nothing is sent
+            until you press one of those buttons.
+          </p>
+          <p class="muted small">
+            The key is encrypted in the database and never sent to the browser: every
+            call is made by the server. <em>Other (OpenAI-compatible)</em> is any
+            endpoint speaking OpenAI's <code>/chat/completions</code> — Ollama, LM
+            Studio, OpenRouter, Groq, Mistral, Gemini's compatibility URL. Pointing
+            it at a local model needs
+            <code>server.llm_allow_private_hosts</code> in <code>meerail.toml</code>,
+            because the server, not the browser, is what makes the request.
           </p>
         </div>
 
@@ -373,6 +423,97 @@
         <p class="help-lede">The <strong>Regex</strong> switch turns the rest of the query into a
           POSIX regular expression instead of a list of words. The scope and time pickers next to
           it narrow the search the same way the filters do.</p>
+
+        <p class="help-lede">If a model is configured in Settings, the robot beside this ⓘ writes
+          one of these for you: describe the mail in your own words and the query lands in the
+          search box, where you can read it, change it, and pick the syntax up for next time.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Write me a search — the robot beside the search box -->
+  <div class="modal-backdrop" id="ai-search-modal" hidden>
+    <div class="modal">
+      <div class="modal-head">
+        <h2>Describe what you are looking for</h2>
+        <button class="icon-btn" id="btn-close-ai-search" title="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p class="help-lede">In your own words — who it was from, roughly when, what it
+          was about. The query comes back into the search box so you can see how it was
+          written, edit it, and use the same syntax yourself next time.</p>
+        <textarea id="ai-search-input" class="ai-textarea" rows="4" spellcheck="true"
+          placeholder="the invoice someone at Acme sent me as a PDF, that I never opened"></textarea>
+        <div class="ai-actions">
+          <button type="button" id="ai-search-go" class="btn-primary">Write the query</button>
+          <span class="ai-status" id="ai-search-status"></span>
+        </div>
+        <div class="ai-result" id="ai-search-result" hidden>
+          <code class="ai-query" id="ai-search-query"></code>
+          <p class="muted small" id="ai-search-note"></p>
+          <p class="ai-warning small" id="ai-search-warning" hidden></p>
+          <div class="ai-actions">
+            <button type="button" id="ai-search-use" class="btn-primary">Search with this</button>
+            <button type="button" id="ai-search-edit" class="btn-secondary">Put it in the box, don't search</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Ask about this conversation — the robot in the reading pane -->
+  <div class="modal-backdrop" id="ai-thread-modal" hidden>
+    <div class="modal ai-thread">
+      <div class="modal-head">
+        <h2 id="ai-thread-title">Ask about this conversation</h2>
+        <button class="icon-btn" id="btn-close-ai-thread" title="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p class="muted small" id="ai-thread-scope"></p>
+        <div class="ai-presets" id="ai-thread-presets"></div>
+        <textarea id="ai-thread-input" class="ai-textarea" rows="3" spellcheck="true"
+          placeholder="Anything to add — “in German”, “just the numbers”, “as three bullet points”"></textarea>
+        <div class="ai-actions">
+          <button type="button" id="ai-thread-go" class="btn-primary">Ask</button>
+          <span class="ai-status" id="ai-thread-status"></span>
+        </div>
+        <div class="ai-result" id="ai-thread-result" hidden>
+          <div class="ai-answer" id="ai-thread-answer"></div>
+          <p class="ai-warning small" id="ai-thread-warning" hidden></p>
+          <div class="ai-actions">
+            <button type="button" id="ai-thread-reply" class="btn-primary">Put it in a reply</button>
+            <button type="button" id="ai-thread-new" class="btn-secondary">Put it in a new message</button>
+            <button type="button" id="ai-thread-copy" class="btn-secondary">Copy</button>
+            <span class="ai-status" id="ai-thread-done"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- What is this file? — the robot beside an attachment -->
+  <div class="modal-backdrop" id="ai-att-modal" hidden>
+    <div class="modal ai-thread">
+      <div class="modal-head">
+        <h2 id="ai-att-title">Attachment</h2>
+        <button class="icon-btn" id="btn-close-ai-att" title="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p class="muted small" id="ai-att-scope"></p>
+        <textarea id="ai-att-input" class="ai-textarea" rows="2" spellcheck="true"
+          placeholder="Anything specific — “what's the total?”, “when is it due?”, “in English”"></textarea>
+        <div class="ai-actions">
+          <button type="button" id="ai-att-go" class="btn-primary">Explain it</button>
+          <span class="ai-status" id="ai-att-status"></span>
+        </div>
+        <div class="ai-result" id="ai-att-result" hidden>
+          <div class="ai-answer" id="ai-att-answer"></div>
+          <p class="ai-warning small" id="ai-att-warning" hidden></p>
+          <div class="ai-actions">
+            <button type="button" id="ai-att-copy" class="btn-secondary">Copy</button>
+            <span class="ai-status" id="ai-att-done"></span>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -523,6 +664,7 @@
   <script src="/static/js/app.compose.js"></script>
   <script src="/static/js/app.outbox.js"></script>
   <script src="/static/js/app.tasks.js"></script>
+  <script src="/static/js/app.ai.js"></script>
   <script src="/static/js/app.status.js"></script>
   <script src="/static/js/app.update.js"></script>
   <script src="/static/js/app.stats.js"></script>

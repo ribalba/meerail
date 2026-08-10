@@ -474,6 +474,52 @@ class Settings(BaseSettings):
     # anything internet-facing. See app/meerato.py.
     meerato_allow_private_hosts: bool = False
 
+    # --- the AI features (app/llm.py, app/routers/ai.py) ---------------------
+    #
+    # Which model to use is not here: the provider, the model name and the API
+    # key are set from the Settings modal and stored in the database, because
+    # they are the kind of thing somebody changes while trying models out, and
+    # the key wants encrypting at rest rather than sitting in a config file. What
+    # is here is the deployment's half — the limits and the one security switch.
+
+    # Let the "Other (OpenAI-compatible)" provider point at a private address, so
+    # that a local Ollama or LM Studio on 127.0.0.1 can be used. Off by default,
+    # and for exactly the reason meerato_allow_private_hosts is: the base URL is
+    # typed into the UI and then fetched *by the server*, so an unrestricted one
+    # makes this install a probe for whatever else is on its network. Turn it on
+    # when you are running a model locally — which is the main reason to use that
+    # provider — and leave it off on anything internet-facing. The hosted
+    # providers are constants in app/llm.py and are not affected either way.
+    llm_allow_private_hosts: bool = False
+
+    # How long to wait for a model. Generous on purpose: a large thread at high
+    # effort is tens of seconds of thinking before the first byte, and a timeout
+    # tuned for an ordinary web service turns a working setup into an
+    # intermittently failing one. Only the read side is this long — failing to
+    # *reach* a provider still gives up in ten seconds.
+    llm_timeout_seconds: int = 180
+
+    # How much of a conversation may be sent in one go, in characters. A thread
+    # longer than this keeps its most recent end and the dialog says how many
+    # messages were left out — see app/routers/ai.py::render_thread. Raise it for
+    # a model with a large context window and lower it to keep per-call cost
+    # down; roughly four characters to the token.
+    llm_max_thread_chars: int = 240_000
+
+    # The largest image "Explain this attachment" will send, in bytes. Both
+    # providers cap what they will accept (Anthropic refuses above ~5 MB of
+    # base64, which is ~3.75 MB of image), and a refusal from them arrives as an
+    # opaque 400 — so an oversized attachment is turned down here, by name, with
+    # the size said out loud. Only images: a document goes as its extracted text,
+    # which llm_max_attachment_chars bounds instead.
+    llm_max_image_bytes: int = 3_500_000
+
+    # How much of one attachment's extracted text to send. A scanned contract can
+    # run to hundreds of pages, and the question being asked of it ("what is
+    # this?") is answered by the first several thousand words; the dialog says
+    # when it was cut.
+    llm_max_attachment_chars: int = 120_000
+
     # Default search window in years (0 = everything). The UI can override per query.
     default_search_years: int = 0
 

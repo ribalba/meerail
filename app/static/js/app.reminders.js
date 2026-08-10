@@ -129,6 +129,20 @@ App.reminders = (function () {
       <div class="rm-sep"></div>`;
   }
 
+  // "When does this actually need me?" — offered only once a model is
+  // configured, and offered rather than applied: the menu is a list of moments
+  // to choose from, and a suggestion is one more of them, not a decision made
+  // on your behalf. See App.ai.suggestReminder.
+  function aiOn() { return !!(App.ai && App.ai.enabled()); }
+
+  function suggestBlock() {
+    if (!aiOn()) return "";
+    return `<button class="move-item rm-suggest" data-act="suggest">
+        <span class="mm-icon">${App.icon("robot", 15)}</span>
+        <span class="mm-name">Suggest a time</span></button>
+      <div class="rm-sep"></div>`;
+  }
+
   function open(m, anchor) {
     close();
     if (!anchor) return;
@@ -142,6 +156,7 @@ App.reminders = (function () {
     el.className = "move-menu remind-menu";
     el.innerHTML = currentBlock(rem)
       + `<div class="rm-head">${rem ? "Change to…" : "Remind me…"}</div>`
+      + suggestBlock()
       + items.map((p, i) => `<button class="move-item" data-idx="${i}">
           <span class="mm-name">${App.esc(p.label)}</span>
           <span class="rm-when">${App.esc(stamp(p.when, now))}</span></button>`).join("")
@@ -155,13 +170,55 @@ App.reminders = (function () {
     document.body.appendChild(el);
 
     // Right under the button, nudged back on screen when the menu would run off
-    // the bottom or the right — same placement as the move menu.
-    const r = anchor.getBoundingClientRect();
-    el.style.top = Math.min(r.bottom + 4, window.innerHeight - el.offsetHeight - 8) + "px";
-    el.style.left = Math.max(8, Math.min(r.left, window.innerWidth - el.offsetWidth - 8)) + "px";
+    // the bottom or the right — same placement as the move menu. A function
+    // rather than three statements because the suggestion row changes the
+    // menu's height after it is already on screen.
+    function place() {
+      const r = anchor.getBoundingClientRect();
+      el.style.top = Math.min(r.bottom + 4, window.innerHeight - el.offsetHeight - 8) + "px";
+      el.style.left = Math.max(8, Math.min(r.left, window.innerWidth - el.offsetWidth - 8)) + "px";
+    }
+    place();
+
+    // The suggested moment, once it arrives, standing where the button that
+    // asked for it was. It is drawn as one more item in the list — same shape,
+    // same click — because that is what it is: a time to choose, offered rather
+    // than applied.
+    let suggested = null;
+    async function suggest(btn) {
+      if (btn.disabled) return;
+      btn.disabled = true;
+      btn.querySelector(".mm-name").textContent = "Reading the conversation…";
+      let out;
+      try {
+        out = await App.ai.suggestReminder(m.id);
+      } catch (err) {
+        // The menu can be gone by now — a slow model outlives a stray scroll.
+        if (!openMenu || openMenu.el !== el) return;
+        btn.classList.add("rm-suggest-failed");
+        btn.querySelector(".mm-name").textContent = err.message || "Could not suggest a time";
+        place();
+        return;
+      }
+      if (!openMenu || openMenu.el !== el) return;
+      suggested = out.when;
+      btn.disabled = false;
+      btn.classList.add("rm-suggested");
+      btn.dataset.act = "take-suggestion";
+      btn.innerHTML = `<span class="mm-icon">${App.icon("robot", 15)}</span>
+        <span class="mm-name">${App.esc(out.reason || "Suggested")}</span>
+        <span class="rm-when">${App.esc(stamp(out.when, now))}</span>`;
+      place();
+    }
 
     el.addEventListener("click", (e) => {
       const verb = e.target.closest("[data-act]");
+      if (verb && verb.dataset.act === "suggest") return suggest(verb);
+      if (verb && verb.dataset.act === "take-suggestion") {
+        close();
+        if (suggested) App.reader.remindThread(suggested);
+        return;
+      }
       if (verb) {
         close();
         // "wake" returns the mail, "drop" leaves it filed and forgets the

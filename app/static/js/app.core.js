@@ -204,6 +204,26 @@ App.api = {
   },
   reminders() { return this.get("/api/reminders"); },
 
+  // The two AI features (app/routers/ai.py). Every one of these is proxied by
+  // the server: the provider key is never sent to the page, so there is no
+  // endpoint here that returns one and none of these calls carries one except
+  // the two that are saving or probing a key the user just typed.
+  aiConfig() { return this.get("/api/ai/config"); },
+  saveAiConfig(cfg) { return this.put("/api/ai/config", cfg); },
+  clearAiConfig() { return this.del("/api/ai/config"); },
+  // POST, not GET: the key being tried is in the body, and a key in a query
+  // string is a key in an access log.
+  aiModels(probe) { return this.post("/api/ai/models", probe); },
+  aiSearch(description) { return this.post("/api/ai/search", { description }); },
+  aiThread(payload) { return this.post("/api/ai/thread", payload); },
+  // "When should this come back?" — the reader's own clock goes with it, because
+  // the answer is a moment on *this* calendar and the server has none. Same
+  // reason App.api.remind sends an absolute instant rather than a preset name.
+  aiRemindSuggest(messageId, now, timezone) {
+    return this.post("/api/ai/remind-suggest", { message_id: messageId, now, timezone });
+  },
+  aiAttachment(payload) { return this.post("/api/ai/attachment", payload); },
+
   taskConfig() { return this.get("/api/tasks/config"); },
   saveTaskConfig(url) { return this.request("PUT", "/api/tasks/config", { url }); },
   taskOptions() { return this.get("/api/tasks/options"); },
@@ -294,6 +314,17 @@ const ICON_PATHS = {
   external: '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>',
   // Asleep rather than broken — the background power-save screen.
   moon: '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>',
+  // A little robot: the two places a language model is asked something. The eyes
+  // are zero-length lines, which the round line-cap draws as dots — a circle
+  // that small disappears at 15px.
+  robot: '<rect x="4" y="9" width="16" height="11" rx="2"/><path d="M12 9V5.5"/><circle cx="12" cy="4" r="1.5"/><line x1="9" y1="14" x2="9" y2="14.01"/><line x1="15" y1="14" x2="15" y2="14.01"/><line x1="2" y1="13" x2="2" y2="16"/><line x1="22" y1="13" x2="22" y2="16"/>',
+  // A tick in a speech bubble — "use this answer".
+  check: '<polyline points="20 6 9 17 4 12"/>',
+  // Three dots — the actions that did not fit on a toolbar. Drawn filled
+  // (App.icon's third argument): as outlines at this size they read as rings.
+  more: '<circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/>',
+  // Two sheets — copy the answer out.
+  copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
 };
 
 App.icon = function (name, size = 18, fill = false) {

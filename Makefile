@@ -15,6 +15,12 @@ TEST_COMPOSE = $(COMPOSE) -p meerail-test -f docker-compose.test.yml
 TEST_DATABASE_URL = postgresql+psycopg://meerail:meerail@127.0.0.1:55432/meerail_test
 TEST_MEERAIL_URL = http://127.0.0.1:18000
 TEST_TIKA_URL = http://127.0.0.1:59998
+# The same value docker-compose.test.yml gives the test server. Secrets this app
+# stores (the Meerato token, the AI provider key) are Fernet-encrypted from it,
+# so a test that writes such a row directly has to derive the same key as the
+# server that reads it — otherwise the row is unreadable and the assertion is
+# about the mismatch rather than about the feature. Keep the two in step.
+TEST_SECRET_KEY = test-insecure
 PYTEST ?= .venv-test/bin/pytest
 
 # --- release images ----------------------------------------------------------
@@ -157,6 +163,7 @@ test: test-up
 	@DATABASE_URL="$(TEST_DATABASE_URL)" \
 	 MEERAIL_URL="$(TEST_MEERAIL_URL)" \
 	 TIKA_URL="$(TEST_TIKA_URL)" \
+	 SECRET_KEY="$(TEST_SECRET_KEY)" \
 	 MEERAIL_CONFIG= \
 	 $(PYTEST) tests/ $(PYTEST_ARGS); \
 	 status=$$?; \

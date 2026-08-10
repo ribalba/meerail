@@ -14,7 +14,7 @@ from core.database import engine, init_db
 from core.version import VERSION
 from .limits import MaxBodySize
 from .routers import (
-    accounts, actions, analytics, auth, compose, contacts, mailboxes, messages, outbox,
+    accounts, actions, ai, analytics, auth, compose, contacts, mailboxes, messages, outbox,
     reminders, search, stream, sync, tasks, undo, version,
 )
 from .deps import is_secure_request, require_ui_auth, ui_password
@@ -261,6 +261,7 @@ app.include_router(search.router)
 app.include_router(analytics.router)
 app.include_router(sync.router)
 app.include_router(tasks.router)
+app.include_router(ai.router)
 app.include_router(undo.router)
 app.include_router(stream.router)
 app.include_router(version.router)
