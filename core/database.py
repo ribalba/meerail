@@ -55,6 +55,23 @@ _STORAGE_Q = text(
 )
 
 
+def _column_exists(table: str, column: str) -> bool:
+    """Whether a column is already there — asked before the ALTER that adds it.
+
+    Only used by fixups that have a *data* half as well as a schema one: the
+    ALTER is idempotent on its own, but the UPDATE that follows it is a
+    one-time judgement about rows that predate the column, and re-running it on
+    every startup would keep overwriting whatever happened since. Best-effort,
+    like `_already_applied`: an error reads as "already there", which skips the
+    backfill rather than repeating it.
+    """
+    try:
+        with engine.connect() as conn:
+            return conn.execute(_COLUMN_Q, {"table": table, "column": column}).scalar() is not None
+    except Exception:  # noqa: BLE001 — never block startup over this
+        return True
+
+
 def _already_applied(stmt: str) -> bool:
     """Whether this statement would be a no-op, judged from the system catalog.
 
@@ -138,6 +155,11 @@ def init_db() -> None:
     # needing a wipe. create_all never alters existing tables.
     if settings.database_url.startswith("postgresql"):
         from .models import DEFAULT_FOOTER
+
+        # Asked before the ALTER below adds it: on an existing volume the answer
+        # is "no", which is the one run that gets to guess which accounts were
+        # imported rather than synced. See the backfill after the loop.
+        had_local = _column_exists("accounts", "local")
 
         for stmt in (
             "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS "
@@ -251,8 +273,53 @@ def init_db() -> None:
             # attempts that cannot win. Metadata-only; affects new rows.
             "ALTER TABLE attachments ALTER COLUMN content SET STORAGE EXTERNAL",
             "ALTER TABLE attachments ALTER COLUMN thumb SET STORAGE EXTERNAL",
+            # An account no agent syncs — imported mail — and a folder that
+            # exists only here. FALSE for everything already in the volume,
+            # which is right for every account an agent has ever run for; the
+            # backfill below is what finds the ones it is wrong for.
+            "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS "
+            "local BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE mailboxes ADD COLUMN IF NOT EXISTS "
+            "local BOOLEAN NOT NULL DEFAULT FALSE",
+            # What the mail server lets a folder be called. Unknown on an
+            # existing volume until the agent's next pass reports it, which
+            # reads as "flat names only" — exactly what the app did before
+            # these columns existed.
+            "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS "
+            "folder_delimiter VARCHAR(8) NOT NULL DEFAULT ''",
+            "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS "
+            "folder_nesting BOOLEAN NOT NULL DEFAULT FALSE",
         ):
             _run_migration(stmt)
+
+        if not had_local:
+            # One-time, on the upgrade that introduces the column. An account no
+            # agent has ever stamped is one nothing is syncing — an mbox import,
+            # in practice, since that is the only other way a row gets here — so
+            # meerail owns its folders and can create and move within them.
+            #
+            # A guess, and deliberately one that corrects itself: an agent that
+            # does turn up clears the flag on its first pass
+            # (ingest.get_or_create_account). What must not be got wrong in the
+            # meantime is the mail, which is why folders made under the guess
+            # carry mailboxes.local and prune_mailboxes leaves those alone.
+            _run_migration("UPDATE accounts SET local = TRUE WHERE last_agent_seen IS NULL")
+            _run_migration(
+                "UPDATE mailboxes SET local = TRUE WHERE account_id IN "
+                "(SELECT id FROM accounts WHERE local)"
+            )
+            # Instructions for an agent that does not exist. They were queued by
+            # the UI before it knew the difference, and every one of them
+            # addresses a UID this install invented for mail that came off disk
+            # — so they are not merely undrainable, they are dangerous to drain:
+            # an agent configured for the address later would EXPUNGE by a number
+            # that names somebody else's message on the real server. Sends are
+            # left alone: those are mail waiting to go out, and nothing about
+            # having no agent makes them wrong.
+            _run_migration(
+                "DELETE FROM pending_actions WHERE type <> 'send' AND account_id IN "
+                "(SELECT id FROM accounts WHERE local)"
+            )
 
         # Give accounts predating the default footer one — but only those the
         # user has never touched, so a deliberately cleared footer stays clear.

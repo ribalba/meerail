@@ -73,6 +73,17 @@ class Account(Base):
     color: Mapped[str] = mapped_column(String(32), default="#1d6ff2", nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
+    # No agent syncs this account: its mail came off disk (tools/import_mbox.py)
+    # and there is no server on the other end of it. Everything that would
+    # otherwise be queued for an agent — creating a folder, moving a message —
+    # is applied here instead, because nothing is ever going to drain that queue.
+    #
+    # Set by the importer when it creates the account, and cleared by
+    # ``ingest.get_or_create_account`` the moment an agent does turn up for it,
+    # so a wrong guess corrects itself on the first sync pass rather than
+    # standing forever. See app/routers/mailboxes.py and app/mailops.py.
+    local: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
     # Extra "send as" addresses for this account (Proton lets one account own
     # several addresses/aliases). Declared in the agent config and reported on
     # sync; the primary ``email`` is always a valid sender regardless of this.
@@ -106,6 +117,24 @@ class Account(Base):
     # to show those fields as configured elsewhere and refuse to PATCH them.
     # Empty is the ordinary case: nothing pinned, everything editable.
     config_fields: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+
+    # What the mail server will let a folder be called, read off its LIST by the
+    # agent on every pass (agent/imap.py::folder_capabilities) because only the
+    # agent has a connection to ask.
+    #
+    # ``folder_delimiter`` is what goes between a parent and a child — "/" on
+    # Bridge and Gmail, "." on plenty of Dovecot installs — and "" until an
+    # agent has said. ``folder_nesting`` is whether a folder may hold another
+    # one at all: false on Proton Bridge, where every user folder comes back
+    # \\Noinferiors, true on most other servers.
+    #
+    # The web app reads both to decide whether "Archive/2024" is a name it may
+    # accept. It used to answer that for every account with Bridge's answer,
+    # which refused nesting on servers that do it perfectly well. False is the
+    # right default: an account no agent has reported on yet keeps the old
+    # behaviour rather than offering something that might fail on the server.
+    folder_delimiter: Mapped[str] = mapped_column(String(8), default="", nullable=False)
+    folder_nesting: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     # Sync status (denormalized for the UI).
     backfill_complete: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -188,6 +217,15 @@ class Mailbox(Base):
     # into (Proton Bridge) is otherwise chosen again on every archive. See
     # agent/actions.py::_mark_write_refused.
     writes_refused_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+    # A folder that exists only in meerail — made here, never listed by any
+    # server. It is the one thing prune_mailboxes must not remove: that pass
+    # deletes every folder missing from the server's LIST, and a local folder is
+    # missing from it by definition, so without this flag the folder and (with
+    # the last placement of each message) its mail would go on the first pass
+    # after it was made. Kept on the folder rather than inferred from
+    # ``Account.local`` so it stays true even if that guess is later corrected.
+    local: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     unread_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     total_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

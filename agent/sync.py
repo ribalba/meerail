@@ -885,6 +885,12 @@ def sync_once(account: AccountConfig, cfg: Settings, reconcile: bool = True) -> 
         ingest.record_content_window(db, cfg.content_window_months)
 
         folders = bridge.list_folders()
+        if folders:
+            # Only when the LIST answered with something. A Bridge that is still
+            # starting answers with nothing, and reading "no folders" as "this
+            # server has no hierarchy" would turn the New Folder dialog flat for
+            # an account that nests perfectly well, until the next good pass.
+            ingest.record_folder_capabilities(db, account_row, bridge.folder_capabilities())
         if not folders:
             # Not fatal and not silent. A Bridge that is still starting, signed
             # out, or sitting on a machine that has been offline for days

@@ -47,6 +47,67 @@ class Suspended(Exception):
 _SPECIAL = {b"\\sent", b"\\drafts", b"\\junk", b"\\trash", b"\\archive", b"\\all", b"\\flagged"}
 
 
+def _flags(flags) -> set[bytes]:
+    """A LIST row's flags, lower-cased bytes, whichever way the library gave them."""
+    return {f.lower() if isinstance(f, bytes) else str(f).lower().encode() for f in flags}
+
+
+def _sep(delim) -> str:
+    """A LIST row's hierarchy separator. "" means the server published NIL —
+    a flat namespace, where nothing can be nested under anything."""
+    if isinstance(delim, bytes):
+        return delim.decode()
+    return delim or ""
+
+
+def _user_folder_parent(rows) -> str:
+    for flags, delim, name in rows:
+        if b"\\noselect" in _flags(flags) and name.lower() == "folders":
+            return name + (_sep(delim) or "/")
+    return ""
+
+
+def _folder_capabilities(rows) -> dict:
+    """Read "may a folder hold another folder" off one LIST answer.
+
+    ``delimiter`` is what the server puts between a parent and a child; NIL
+    everywhere means a flat namespace and settles the question on its own.
+
+    ``nesting`` is then decided by the folders that live where a new one would
+    go — directly under the \\Noselect node Bridge insists on, or at the root on
+    a server with no such node. If every one of them comes back \\Noinferiors,
+    this server does not do children and the UI should say so rather than let a
+    CREATE fail minutes later under a button that reported success. That is
+    exactly Proton Bridge, and it is the only server this has been seen on.
+
+    "Every one of them", not "any": some servers mark a single special mailbox
+    \\Noinferiors — an INBOX that cannot take children while everything else can
+    — and reading that as "no nesting anywhere" would refuse the whole account
+    over one folder. And an account with no folders there yet gets a yes: there
+    is nothing to judge from, most servers allow it, and the honest failure for
+    the rest is the CREATE being refused and saying so.
+    """
+    rows = list(rows)
+    delimiter = next((s for s in (_sep(d) for _f, d, _n in rows) if s), "")
+    if not delimiter:
+        return {"delimiter": "", "nesting": False}
+
+    parent = _user_folder_parent(rows)
+    siblings = []
+    for flags, _delim, name in rows:
+        lower = _flags(flags)
+        if b"\\noselect" in lower:
+            continue
+        rest = name[len(parent):] if parent and name.startswith(parent) else name
+        if parent and rest == name:
+            continue                      # lives outside the user-folder node
+        if delimiter in rest:
+            continue                      # already a child of something else
+        siblings.append(b"\\noinferiors" in lower)
+
+    return {"delimiter": delimiter, "nesting": not siblings or not all(siblings)}
+
+
 def _ssl_context(verify: bool) -> ssl.SSLContext:
     ctx = ssl.create_default_context()
     if not verify:
@@ -498,12 +559,24 @@ class Bridge:
         IMAP server has no such node and takes the bare name, which is what the
         empty return gives.
         """
-        for flags, delim, name in self._list():
-            lower = {f.lower() if isinstance(f, bytes) else str(f).lower().encode() for f in flags}
-            if b"\\noselect" in lower and name.lower() == "folders":
-                sep = delim.decode() if isinstance(delim, bytes) else (delim or "/")
-                return name + sep
-        return ""
+        return _user_folder_parent(self._list())
+
+    def folder_capabilities(self) -> dict:
+        """What this server will let a new folder be called: its hierarchy
+        separator, and whether a folder may hold another one.
+
+        Both are things only this side can see, and the web app needs them to
+        answer a question it was previously answering for every account with
+        Bridge's answer: may I type "Archive/2024"? On Bridge, no — every user
+        folder comes back \\Noinferiors, so nesting is refused before it can
+        fail. On Gmail, on Dovecot, on the university mail servers people
+        actually have alongside it, yes — and refusing there was refusing
+        something the server does perfectly well.
+
+        See _folder_capabilities for how the two are read off one LIST; this is
+        the round trip, that is the rule.
+        """
+        return _folder_capabilities(self._list())
 
     def select(self, name: str) -> tuple[int | None, int | None]:
         info = self._call("select", self._roundtrip_limit(),

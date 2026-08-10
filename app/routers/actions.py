@@ -55,6 +55,22 @@ class BulkTrashAllRequest(BaseModel):
     unread_only: bool = False
 
 
+class BulkMoveRequest(BulkTrashRequest):
+    """The ticked rows, and the one folder they are all going into."""
+    target_mailbox_id: int
+
+
+class BulkMoveAllRequest(BulkTrashAllRequest):
+    """Everything matching the list selector, into one folder.
+
+    ``mailbox_id`` is the source — the folder on screen — and
+    ``target_mailbox_id`` is where it all goes. Two ids for what reads as one
+    operation, because the selector is the same object the list was built from
+    and the destination is not part of it.
+    """
+    target_mailbox_id: int
+
+
 # Both bulk routes are registered ahead of the /{message_id}/... ones below:
 # FastAPI matches in declaration order, and "bulk" is a perfectly good
 # message_id as far as /{message_id}/trash is concerned.
@@ -109,6 +125,62 @@ def bulk_trash(req: BulkTrashRequest, db: DBSession = Depends(get_db)):
     mailops.recompute(db, touched)
     db.commit()
     mailops.announce(db, accounts, moved)
+    return {"ok": True, "moved": moved, "op_id": op_id}
+
+
+def _move_target(db: DBSession, mailbox_id: int) -> Mailbox:
+    target = db.get(Mailbox, mailbox_id)
+    if target is None:
+        raise HTTPException(status_code=400, detail="Invalid target mailbox")
+    return target
+
+
+@router.post("/bulk/move")
+def bulk_move(req: BulkMoveRequest, db: DBSession = Depends(get_db)):
+    """File a set of selected rows into one folder.
+
+    The single-message move done to a selection, and shaped like bulk_trash
+    rather than like a loop over it: the rows are gathered into one query and
+    one operation, so two hundred conversations is one entry in the panel and
+    one Undo, not two hundred requests each racing the list refresh behind them.
+
+    One account, because a move is: IMAP has no way to move a message between
+    two mailboxes on different servers, and the destination is one folder that
+    belongs to one of them. A selection spanning accounts — which the unified
+    inbox makes easy to build — is refused rather than half-applied to the rows
+    that happen to match, since the other half would silently stay put.
+    """
+    target = _move_target(db, req.target_mailbox_id)
+    if any(item.account_id != target.account_id for item in req.items):
+        raise HTTPException(
+            status_code=400,
+            detail="These messages are not all in the same account as that folder. "
+                   "Mail can only be moved within one account.")
+
+    threads = {item.thread_id for item in req.items if item.thread_id}
+    loose = {item.message_id for item in req.items if not item.thread_id and item.message_id}
+    match = []
+    if threads:
+        match.append(Message.thread_id.in_(threads))
+    if loose:
+        match.append(Message.id.in_(loose))
+    if not match:
+        return {"ok": True, "moved": 0, "op_id": None}
+
+    msgs = db.execute(
+        select(Message)
+        .where(Message.account_id == target.account_id, or_(*match))
+        # See bulk_trash: without this every message lazy-loads its own
+        # placements, one round trip each, inside move_messages.
+        .options(selectinload(Message.locations))
+    ).scalars().all()
+
+    touched: set[int] = set()
+    op_id = undo.new_op_id()
+    moved = mailops.move_messages(db, msgs, target, touched, op_id, "move")
+    mailops.recompute(db, touched)
+    db.commit()
+    mailops.announce(db, {target.account_id}, moved)
     return {"ok": True, "moved": moved, "op_id": op_id}
 
 
@@ -226,6 +298,92 @@ def bulk_trash_all(req: BulkTrashAllRequest, db: DBSession = Depends(get_db)):
     mailops.recompute(db, touched)
     db.commit()
     mailops.announce(db, accounts, moved)
+    return {"ok": True, "moved": moved, "done": remaining <= len(locs), "op_id": op_id}
+
+
+@router.post("/bulk/move-all")
+def bulk_move_all(req: BulkMoveAllRequest, db: DBSession = Depends(get_db)):
+    """File everything matching a list selector into one folder, a chunk at a time.
+
+    The whole-folder move: "everything in here belongs over there", which is
+    what an import that landed in the wrong place needs and what ticking rows a
+    page at a time cannot honestly do. Chunked and looped by the client exactly
+    like bulk_trash_all, and for the same reason — a folder-wide operation is
+    tens of thousands of placements, which is not one request.
+
+    Two things keep that loop finite. Placements already in the destination are
+    excluded, so a message that has arrived cannot match again; and the whole
+    selector is narrowed to the destination's own account, which is what makes
+    "move all flagged" — a selector that spans every account — mean the flagged
+    mail this folder could actually take, rather than repeatedly matching mail
+    no move will ever touch.
+    """
+    target = _move_target(db, req.target_mailbox_id)
+
+    q = (select(MessageLocation)
+         .join(Message, Message.id == MessageLocation.message_pk)
+         .where(MessageLocation.deleted.is_(False),
+                Message.account_id == target.account_id,
+                MessageLocation.mailbox_id != target.id))
+    if req.scope == "flagged":
+        q = q.where(MessageLocation.flagged.is_(True))
+    else:
+        ids = _resolve_mailbox_ids(db, req.mailbox_id, req.scope)
+        if not ids:
+            raise HTTPException(status_code=400, detail="No mailbox selected")
+        if ids == [target.id]:
+            raise HTTPException(status_code=400,
+                                detail=mailops.already_there(target))
+        q = q.where(MessageLocation.mailbox_id.in_(ids))
+    if req.unread_only:
+        q = q.where(MessageLocation.seen.is_(False))
+
+    remaining = db.scalar(select(func.count()).select_from(q.subquery())) or 0
+    locs = db.execute(q.limit(BULK_ALL_CHUNK)).scalars().all()
+
+    by_id = {
+        m.id: m for m in db.execute(
+            select(Message).where(Message.id.in_({loc.message_pk for loc in locs}))
+            .options(selectinload(Message.locations))
+        ).scalars().all()
+    } if locs else {}
+
+    touched: set[int] = set()
+    moved = 0
+    # One id per chunk, like bulk_trash_all: each call is its own committed
+    # transaction, so an id spanning them would offer an Undo that could only
+    # take back the last one.
+    op_id = undo.new_op_id()
+    collapse = mailops.labels_one_message(db, target.account_id)
+
+    # Grouped by message rather than walked placement by placement — see
+    # bulk_trash_all, where doing the latter queued a second command against a
+    # UID the first had just retired.
+    by_message: dict[int, list[MessageLocation]] = {}
+    for loc in locs:
+        msg = by_id.get(loc.message_pk)
+        if msg is None:
+            # Orphaned placement: drop it here, or it matches the selector again
+            # on the next chunk and the loop never finishes.
+            db.delete(loc)
+            touched.add(loc.mailbox_id)
+            continue
+        by_message.setdefault(loc.message_pk, []).append(loc)
+
+    for message_pk, group in by_message.items():
+        msg = by_id[message_pk]
+        mailbox_ids = [loc.mailbox_id for loc in group]
+        carrier = mailops._carrier(db, msg, mailbox_ids) if collapse else None
+        snaps = mailops.snapshots(db, msg, mailbox_ids)
+        for mailbox_id in mailbox_ids:
+            if mailops.move_to(db, msg, mailbox_id, target, touched,
+                               enqueue_action=not collapse or mailbox_id == carrier,
+                               op_id=op_id, op_kind="move", undo_from=snaps):
+                moved += 1
+
+    mailops.recompute(db, touched)
+    db.commit()
+    mailops.announce(db, {target.account_id}, moved)
     return {"ok": True, "moved": moved, "done": remaining <= len(locs), "op_id": op_id}
 
 

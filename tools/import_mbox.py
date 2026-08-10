@@ -15,7 +15,10 @@ Two things on disk are called an mbox and only one of them is a file:
   ``mbox``.
 * Apple Mail's own store, ``~/Library/Mail/V10/<account>/<Folder>.mbox``, which
   is a *directory* and contains no mbox at all: one ``.emlx`` file per message
-  under ``<UUID>/Data/``, with attachments alongside them rather than in them.
+  under ``<UUID>/Data/``, with attachments alongside them rather than in them. A
+  mailbox that has sub-mailboxes keeps them inside itself as further ``.mbox``
+  directories, nested as deep as they were filed; those come in too, each as a
+  folder of its own under the one named on the command line.
 
 Both go in — see ``_open_mbox`` — and both land as the same ordinary mail:
 threaded, searchable, with attachments extracted. What it is not is *synced*
@@ -251,7 +254,8 @@ def _agent_owns(cfg, email: str) -> bool:
 class MboxFile:
     """An actual mbox file: messages end to end, ``From `` lines between them."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, kind: str = "an mbox file") -> None:
+        self.kind = kind
         # Never creates one: a typo'd path must not silently produce an empty
         # mailbox and an import of nothing.
         self._box = mailbox.mbox(str(path), factory=None, create=False)
@@ -274,6 +278,8 @@ class MboxFile:
 class AppleMailbox:
     """Apple Mail's .mbox: a directory holding one .emlx file per message."""
 
+    kind = "an Apple Mail mailbox"
+
     def __init__(self, paths: list[Path]) -> None:
         self._paths = paths
         # Counted rather than raised on: an archive where Mail never downloaded
@@ -292,53 +298,47 @@ class AppleMailbox:
         return raw, emlx_flags(meta)
 
 
-def _open_mbox(path: Path):
-    """The mailbox at this path, whichever of the two shapes it is."""
+def _open_mbox(path: Path, *, recurse: bool = True) -> list[tuple[str, object]]:
+    """Every mailbox at this path, as (relative folder, mailbox) pairs.
+
+    The relative folder is ``""`` for the mailbox that was named, and the
+    sub-mailbox's own name — ``"Announce"``, ``"Announce/2019"`` — for one nested
+    inside it. The caller puts its --folder in front of them, so one command
+    imports a tree the way it is filed rather than one leaf at a time.
+    """
+    if not path.exists():
+        raise SystemExit(f"Nothing at {path}: no such file or directory.")
     if path.is_dir():
-        return _open_directory(path)
+        return _open_directory(path, recurse=recurse)
     try:
-        return MboxFile(path)
+        return [("", MboxFile(path))]
     except mailbox.NoSuchMailboxError:
         raise SystemExit(f"No mbox file at {path}") from None
 
 
-def _open_directory(path: Path):
+def _open_directory(path: Path, *, recurse: bool) -> list[tuple[str, object]]:
     """A .mbox that is a directory — on macOS, both kinds of export are.
 
     Mail.app's *Export Mailbox* writes a folder with the real mbox inside it,
     called ``mbox``. Mail's own store has no mbox anywhere in it: the messages
     are .emlx files under ``<UUID>/Data/``, and a mailbox that has sub-mailboxes
-    keeps those as further .mbox directories inside this one. Each of those is
-    its own import, because this tool files everything into one folder.
+    keeps those as further .mbox directories inside this one.
     """
-    try:
-        entries = sorted(path.iterdir())
-    except PermissionError:
-        raise SystemExit(_no_access(path)) from None
+    children = _sub_mailboxes(path)
 
-    exported = path / "mbox"
-    if exported.is_file():
-        print(f"Reading the mbox inside {path.name} (a Mail.app export).", flush=True)
-        return MboxFile(exported)
+    # ~/Library/Mail/V10/<account-id> is one directory up from anything
+    # importable: it is not a mailbox, it just holds them — and in Mail's store
+    # only a mailbox is named .mbox. Walking into it would sweep an entire
+    # account into one import, which is a much bigger thing than anyone means by
+    # naming a folder, so it is still named rather than read.
+    if children and not path.name.endswith(".mbox"):
+        raise SystemExit(_holds_mailboxes(path, children))
 
-    children = [p for p in entries if p.is_dir() and p.name.endswith(".mbox")]
-    messages = _emlx_files(path)
-    if messages:
-        if children:
-            names = ", ".join(p.name for p in children)
-            print(f"! {path.name} has sub-mailboxes ({names}) which are not part of "
-                  f"this import — run the tool again on each, with its own --folder.",
-                  flush=True)
-        print(f"Reading {len(messages)} .emlx file(s) from {path.name} "
-              f"(an Apple Mail mailbox).", flush=True)
-        return AppleMailbox(messages)
-
+    found = _walk(path, recurse=recurse)
+    if found:
+        return found
     if children:
-        listing = "\n  ".join(str(p) for p in children)
-        raise SystemExit(
-            f"{path} holds mailboxes rather than messages. Import one of these:\n"
-            f"  {listing}"
-        )
+        raise SystemExit(_holds_mailboxes(path, children))
     raise SystemExit(
         f"Nothing to import in {path}: it holds no mbox file and no .emlx messages.\n"
         f"An Apple Mail mailbox is ~/Library/Mail/V10/<account-id>/<Folder>.mbox; "
@@ -346,17 +346,66 @@ def _open_directory(path: Path):
     )
 
 
+def _walk(path: Path, *, recurse: bool) -> list[tuple[str, object]]:
+    """This mailbox and, unless told otherwise, every mailbox filed under it.
+
+    A mailbox holding nothing but sub-mailboxes — which is what most of the top
+    level of an Apple Mail account looks like — contributes no folder of its own,
+    only its children. Nothing is merged: each mailbox keeps its own messages,
+    because filing a parent's and a child's mail together is not something a
+    second run could take apart again.
+    """
+    exported = path / "mbox"
+    if exported.is_file():
+        return [("", MboxFile(exported, kind="a Mail.app export"))]
+
+    messages = _emlx_files(path)
+    found = [("", AppleMailbox(messages))] if messages else []
+    if recurse:
+        for child in _sub_mailboxes(path):
+            name = _folder_name(child)
+            found.extend(
+                (f"{name}/{rel}" if rel else name, box)
+                for rel, box in _walk(child, recurse=True)
+            )
+    return found
+
+
+def _sub_mailboxes(path: Path) -> list[Path]:
+    """The .mbox directories filed directly inside this one, in name order."""
+    try:
+        entries = sorted(path.iterdir())
+    except PermissionError:
+        raise SystemExit(_no_access(path)) from None
+    return [p for p in entries if p.is_dir() and p.name.endswith(".mbox")]
+
+
+def _folder_name(path: Path) -> str:
+    """The folder a mailbox becomes: its own name, without the .mbox suffix."""
+    name = path.name
+    if name.lower().endswith(".mbox"):
+        name = name[: -len(".mbox")]
+    return name.strip() or path.name
+
+
+def _holds_mailboxes(path: Path, children: list[Path]) -> str:
+    listing = "\n  ".join(str(p) for p in children)
+    return (f"{path} holds mailboxes rather than messages. Import one of these "
+            f"(each brings its own sub-mailboxes with it):\n  {listing}")
+
+
 def _emlx_files(root: Path) -> list[Path]:
     """Every message file belonging to this mailbox, in Mail's own order.
 
-    Anything under a nested .mbox belongs to a sub-mailbox and is left for that
-    mailbox's own import — otherwise a parent folder would swallow its children.
+    Anything under a nested .mbox belongs to a sub-mailbox and is read by that
+    mailbox's own pass — otherwise a parent folder would swallow its children.
+    Pruned rather than filtered afterwards, so walking a tree of mailboxes reads
+    each directory once instead of once per level above it.
     """
-    found = [
-        p for p in root.rglob("*.emlx")
-        if p.is_file()
-        and not any(part.endswith(".mbox") for part in p.relative_to(root).parts[:-1])
-    ]
+    found = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if not d.endswith(".mbox")]
+        found.extend(Path(dirpath) / f for f in filenames if f.endswith(".emlx"))
     # Mail numbers messages per mailbox, roughly in arrival order, so importing
     # in that order makes the UIDs invented here run the way the real ones did.
     return sorted(found, key=_numeric_first)
@@ -369,6 +418,33 @@ def _no_access(path: Path) -> str:
         f"terminal (System Settings > Privacy & Security > Full Disk Access), "
         f"restart the terminal, and run this again."
     )
+
+
+def _targets(mbox_path: Path, folder: str | None, *,
+             recurse: bool) -> list[tuple[str, object]]:
+    """The mailboxes to import and the folder each one lands in.
+
+    ``--folder`` names the mailbox that was pointed at; a sub-mailbox hangs off
+    it under its own name, which is how the sidebar nests folders. Left out, it
+    is INBOX — unless the mailbox named holds nothing but sub-mailboxes, in which
+    case its own name is what they hang off, because ``INBOX/API Errors`` is not
+    where anybody filed anything.
+    """
+    boxes = _open_mbox(mbox_path, recurse=recurse)
+    if folder is None:
+        holds_mail = any(rel == "" for rel, _ in boxes)
+        folder = "INBOX" if holds_mail else _folder_name(mbox_path)
+    targets = [(f"{folder}/{rel}" if rel else folder, box) for rel, box in boxes]
+
+    if len(targets) == 1:
+        name, box = targets[0]
+        print(f"Reading {len(box.keys())} message(s) from {mbox_path.name} "
+              f"({box.kind}) into {name}.", flush=True)
+    else:
+        print(f"Reading {len(targets)} mailboxes under {mbox_path.name}:", flush=True)
+        for name, box in targets:
+            print(f"  {name} — {len(box.keys())} message(s)", flush=True)
+    return targets
 
 
 class Progress:
@@ -406,7 +482,14 @@ def import_messages(db, account, folder: str, box, *, keep_unread: bool,
     from core.mail.store import ingest_raw, same_message
     from core.models import Message, MessageLocation
 
-    mailbox_row = ingest.register_folder(db, account, folder)
+    # ensure_local_folder rather than register_folder for an account nothing
+    # syncs: it makes the parents a nested name asks for, so "Archive/2024"
+    # arrives as a folder inside Archive rather than as a top-level row whose
+    # name happens to have a slash in it. An account an agent owns (--force)
+    # takes the ordinary path — there the server decides what folders exist,
+    # and inventing two of them here is not this tool's business.
+    mailbox_row = (ingest.ensure_local_folder(db, account, folder) if account.local
+                   else ingest.register_folder(db, account, folder))
     # UIDs are ours to invent — there is no server holding the real ones — so
     # they carry on from wherever a previous import of this folder stopped.
     # Positive and increasing, because that is what everything downstream reads
@@ -491,8 +574,8 @@ def drain(db, fn, label: str) -> int:
         progress.maybe(f"{label}: {total} so far")
 
 
-def run(mbox_path: Path, email: str, folder: str, *, keep_unread: bool,
-        index: bool, batch: int) -> int:
+def run(mbox_path: Path, email: str, folder: str | None, *, keep_unread: bool,
+        index: bool, batch: int, recurse: bool) -> int:
     from sqlalchemy import select
 
     from core import events, ingest
@@ -504,7 +587,7 @@ def run(mbox_path: Path, email: str, folder: str, *, keep_unread: bool,
     cfg = get_settings()
     email = email.strip().lower()
 
-    box = _open_mbox(mbox_path)
+    targets = _targets(mbox_path, folder, recurse=recurse)
 
     print(f"Database: {re.sub(r'://[^@/]*@', '://***@', cfg.database_url)}", flush=True)
     init_db()
@@ -522,6 +605,11 @@ def run(mbox_path: Path, email: str, folder: str, *, keep_unread: bool,
                 # there is — so saying otherwise would leave the status panel
                 # reporting a first sync that never finishes.
                 backfill_complete=True,
+                # And nothing is going to act on its queue either, which is what
+                # this says. The web app reads it to apply folder creation and
+                # moves here and now rather than asking an agent that will never
+                # answer — see core/models.py::Account.local.
+                local=True,
             )
             db.add(account)
             db.flush()
@@ -531,12 +619,18 @@ def run(mbox_path: Path, email: str, folder: str, *, keep_unread: bool,
         else:
             print(f"Using the existing account {email} (id {account.id}).", flush=True)
 
-        imported, skipped = import_messages(
-            db, account, folder, box, keep_unread=keep_unread, batch=batch
-        )
-        print(f"Imported {imported} message(s); {skipped} were already in {folder}.",
-              flush=True)
-        absent = getattr(box, "missing_attachments", 0)
+        imported = skipped = absent = 0
+        for name, box in targets:
+            got, had = import_messages(
+                db, account, name, box, keep_unread=keep_unread, batch=batch
+            )
+            print(f"Imported {got} message(s); {had} were already in {name}.", flush=True)
+            imported += got
+            skipped += had
+            absent += getattr(box, "missing_attachments", 0)
+        if len(targets) > 1:
+            print(f"{imported} message(s) imported over {len(targets)} folder(s); "
+                  f"{skipped} were already here.", flush=True)
         if absent:
             print(f"! {absent} attachment(s) were not on disk beside their message — "
                   f"Mail had not downloaded them from the server — so those parts came "
@@ -616,9 +710,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("-a", "--account", default=None,
                         help="account to import into; created if it does not exist "
                              "(default: <filename>@imported.local)")
-    parser.add_argument("-f", "--folder", default="INBOX",
-                        help="folder the mail lands in (default: INBOX). A name like "
-                             "Sent or Archive takes that folder's role in the sidebar.")
+    parser.add_argument("-f", "--folder", default=None,
+                        help="folder the mail lands in (default: INBOX, or the "
+                             "mailbox's own name when it has sub-mailboxes, which land "
+                             "under it). A name like Sent or Archive takes that "
+                             "folder's role in the sidebar. Slashes nest, and the "
+                             "parents are made if they are not there: "
+                             "--folder Archive/2024 files into 2024 inside Archive.")
+    parser.add_argument("--no-recurse", action="store_true",
+                        help="import only the mailbox named, leaving the sub-mailboxes "
+                             "inside it out")
     parser.add_argument("--keep-unread", action="store_true",
                         help="take read/unread from the mbox Status headers instead of "
                              "marking everything read (most exports carry no flags at "
@@ -632,6 +733,11 @@ def main(argv: list[str] | None = None) -> int:
                         help="import into an account this machine's agent syncs — see "
                              "the warning it prints")
     args = parser.parse_args(argv)
+
+    # A path in single quotes reaches us with its ~ intact — the shell only
+    # expands an unquoted one — and quoting is exactly what a mailbox name with
+    # a space in it invites. Expanding it here means both spellings work.
+    args.mbox = args.mbox.expanduser()
 
     # Must precede the first get_settings(), and so any core.* import that reaches
     # one — which is why every core import in this file is inside a function.
@@ -661,7 +767,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         return run(args.mbox, email, args.folder, keep_unread=args.keep_unread,
-                   index=not args.no_index, batch=args.batch)
+                   index=not args.no_index, batch=args.batch,
+                   recurse=not args.no_recurse)
     except OperationalError as e:
         print(f"\nCannot reach the database: {e.orig or e}\n"
               f"Is the stack up? ./meerail.sh start", file=sys.stderr)

@@ -1,10 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session as DBSession
 
-from core import outbox as outbox_core
+from core import ingest, outbox as outbox_core
 from core.database import get_db
+from core.ingest import FOLDER_SEP
 from .. import mailops
 from ..deps import require_ui_auth
 from core.models import (
@@ -16,6 +17,59 @@ router = APIRouter(prefix="/api/mailboxes", tags=["mailboxes"], dependencies=[De
 # Sidebar ordering by role.
 ROLE_ORDER = {"inbox": 0, "flagged": 1, "drafts": 2, "sent": 3, "archive": 4,
               "junk": 5, "trash": 6, "all": 7, "custom": 8}
+
+
+def server_sep(account: Account) -> str:
+    """What separates a parent from a child in this account's folder names.
+
+    The agent reads it off the server's LIST and writes it here — "/" on Bridge
+    and Gmail, "." on many Dovecot installs — and it is empty until an agent has
+    reported, or for an account no agent syncs at all. Both of those fall back
+    to "/", which is what the importer writes and what the folder dialog reads
+    from the user.
+    """
+    return account.folder_delimiter or FOLDER_SEP
+
+
+def _chains(account: Account, mailboxes: list[Mailbox]) -> dict[int, list[Mailbox]]:
+    """For each folder, the folders it hangs under — itself last.
+
+    Nesting is read off imap_name, but only where the parent is a folder that
+    actually exists. That distinction is the whole of it: Bridge stores every
+    user folder as "Folders/<leaf>" without there being any folder called
+    "Folders", so indenting on the separator alone would put a mailbox's entire
+    contents one level in under a heading that is not there. An "Archive/2024"
+    made beside a real "Archive" is the case that does nest, and it nests
+    because both rows exist.
+
+    Returns chains rather than depths because the sidebar needs both: the depth
+    to indent by, and the ancestry to sort a child directly beneath its parent
+    instead of alphabetically among its aunts.
+    """
+    sep = server_sep(account)
+    by_name = {m.imap_name: m for m in mailboxes}
+    chains: dict[int, list[Mailbox]] = {}
+    for m in mailboxes:
+        parts = m.imap_name.split(sep)
+        chain = [by_name[sep.join(parts[:i])]
+                 for i in range(1, len(parts))
+                 if sep.join(parts[:i]) in by_name]
+        chains[m.id] = chain + [m]
+    return chains
+
+
+def _paths(account: Account, mailboxes: list[Mailbox]) -> dict[int, str]:
+    """Each folder as a person reads it: the display names down its chain,
+    joined with "/" whatever the server's own separator is.
+
+    This is the name the sidebar, the move menu and the New Folder box all deal
+    in, so it is also what a typed name has to be compared against — see
+    create_mailbox, where comparing against imap_name alone would let somebody
+    make a second "Receipts" on Bridge because the first one is stored as
+    "Folders/Receipts".
+    """
+    return {mid: FOLDER_SEP.join(a.display_name for a in chain)
+            for mid, chain in _chains(account, mailboxes).items()}
 
 
 @router.get("")
@@ -69,7 +123,9 @@ def list_mailboxes(db: DBSession = Depends(get_db)):
     unified_unread = 0
     for acc in accounts:
         mbs = db.execute(select(Mailbox).where(Mailbox.account_id == acc.id)).scalars().all()
-        mbs.sort(key=lambda m: (ROLE_ORDER.get(m.role, 8), m.display_name.lower()))
+        chains = _chains(acc, mbs)
+        mbs.sort(key=lambda m: (ROLE_ORDER.get(chains[m.id][0].role, 8),
+                                tuple(a.display_name.lower() for a in chains[m.id])))
         mb_out = []
         for m in mbs:
             total, unread = counts.get(m.id, (0, 0))
@@ -77,10 +133,19 @@ def list_mailboxes(db: DBSession = Depends(get_db)):
                 unified_unread += unread
             mb_out.append({"id": m.id, "role": m.role, "display_name": m.display_name,
                            "imap_name": m.imap_name, "unread": unread, "total": total,
-                           "favorite": m.favorite})
+                           "favorite": m.favorite, "depth": len(chains[m.id]) - 1,
+                           # The path as a person would read it — what the move
+                           # menu shows, where a bare "2024" under three parents
+                           # would not say which one.
+                           "path": FOLDER_SEP.join(a.display_name for a in chains[m.id])})
         out_accounts.append({
             "id": acc.id, "email": acc.email, "label": acc.label, "color": acc.color,
-            "backfill_complete": acc.backfill_complete, "mailboxes": mb_out,
+            "backfill_complete": acc.backfill_complete, "local": acc.local,
+            # Whether the New Folder box may offer "Parent/Child" here. Per
+            # account, because one install commonly holds a Bridge account that
+            # cannot nest beside an IMAP account that can.
+            "nesting": acc.local or acc.folder_nesting,
+            "mailboxes": mb_out,
         })
 
     return {
@@ -99,56 +164,111 @@ class CreateMailbox(BaseModel):
     name: str
 
 
-def _clean_folder_name(raw: str) -> str:
-    """Validate a user-typed folder name. Returns a bare leaf, never a path.
+# How deep a typed path may nest. No server rule behind it — most IMAP servers
+# have no limit — just a number past which "Archive/2024/Q1/July/week 2/…" is a
+# typo rather than a filing scheme.
+MAX_FOLDER_DEPTH = 8
 
-    "/" is rejected rather than treated as a nesting delimiter: on Bridge every
-    real folder comes back \\Noinferiors, so it cannot hold children, and "/"
-    inside a Proton folder name is an escaped literal ("A\\/B") rather than a
-    separator. The agent prepends whatever namespace the server demands — see
-    Bridge.user_folder_parent."""
-    name = raw.strip()
+# What the New Folder box says when the account's server cannot nest. Named
+# rather than inline because it is the one refusal here that is about the
+# server rather than about the name, and the sentence has to say which.
+NO_NESTING = ("This account's mail server does not allow folders inside folders, "
+              "so a name cannot contain /.")
+
+
+def _clean_folder_name(raw: str, nested: bool = False) -> str:
+    """Validate a user-typed folder name. Returns a bare leaf, or a path.
+
+    ``nested`` is whether "/" may mean what it looks like, and it is the
+    server's answer rather than a constant — Account.folder_nesting, read off
+    IMAP's LIST by the agent (agent/imap.py::_folder_capabilities). It used to
+    be "never", which was Proton Bridge's answer applied to everybody: there
+    every user folder comes back \\Noinferiors and a "/" inside a Proton folder
+    name is an escaped literal ("A\\/B") rather than a separator. Gmail, Dovecot
+    and the university IMAP servers people run beside it nest perfectly well,
+    and refusing them was refusing something that works.
+
+    Where it is allowed, each segment is checked as a name in its own right, so
+    "Archive//2024" and "Archive/ /2024" are refused rather than quietly
+    collapsed into something the user did not type. The path is always in "/",
+    whatever the server's own delimiter is: the agent joins the segments with
+    that when it creates the folder, so nobody typing a name has to know it.
+    """
+    name = raw.strip().strip(FOLDER_SEP) if nested else raw.strip()
     if not name:
         raise HTTPException(status_code=400, detail="Folder name is required")
     if len(name) > 255:
         raise HTTPException(status_code=400, detail="Folder name is too long")
     if any(ord(ch) < 32 or ch == "\x7f" for ch in name):
         raise HTTPException(status_code=400, detail="Folder name contains invalid characters")
-    if "/" in name:
+    if not nested and FOLDER_SEP in name:
+        raise HTTPException(status_code=400, detail=NO_NESTING)
+    segments = name.split(FOLDER_SEP) if nested else [name]
+    if len(segments) > MAX_FOLDER_DEPTH:
         raise HTTPException(status_code=400,
-                            detail="Folder name cannot contain / — nested folders are not supported")
-    # IMAP quoting and LIST wildcards.
-    if any(ch in name for ch in '"\\%*'):
-        raise HTTPException(status_code=400, detail='Folder name cannot contain " \\ % or *')
-    return name
+                            detail=f"Folders can be nested at most {MAX_FOLDER_DEPTH} deep")
+    for segment in segments:
+        if not segment.strip():
+            raise HTTPException(status_code=400, detail="Folder name has an empty part")
+        if segment != segment.strip():
+            raise HTTPException(status_code=400,
+                                detail="Folder names cannot start or end with a space")
+        # IMAP quoting and LIST wildcards. Meaningless for a folder no server
+        # will ever be told about, but a local account can stop being one — an
+        # agent configured for the address later takes over these folders — and
+        # a name that cannot survive that is not worth allowing here.
+        if any(ch in segment for ch in '"\\%*'):
+            raise HTTPException(status_code=400, detail='Folder name cannot contain " \\ % or *')
+    return FOLDER_SEP.join(segments)
 
 
 @router.post("", status_code=202)
-def create_mailbox(body: CreateMailbox, db: DBSession = Depends(get_db)):
-    """Queue an IMAP folder creation for the agent.
+def create_mailbox(body: CreateMailbox, response: Response, db: DBSession = Depends(get_db)):
+    """Make a folder: here and now if nothing syncs this account, queued if
+    something does.
 
-    The Mailbox row is deliberately NOT written here: prune_mailboxes deletes
-    any folder missing from the server's LIST, so an optimistic row would be
-    wiped by the very pass that is meant to confirm it. The agent creates the
-    folder, the LIST at the top of the same pass registers it, and the sidebar
-    picks it up off the "folders" event seconds later."""
+    For an account with an agent the Mailbox row is deliberately NOT written
+    here: prune_mailboxes deletes any folder missing from the server's LIST, so
+    an optimistic row would be wiped by the very pass that is meant to confirm
+    it. The agent creates the folder, the LIST at the top of the same pass
+    registers it, and the sidebar picks it up off the "folders" event seconds
+    later.
+
+    An imported account has no agent and never will (Account.local), so that
+    queue has no reader: the request used to answer 202 "queued" and the folder
+    then never appeared, which is the same thing as the + button not working.
+    There the row is the folder — written now, returned 201, on screen on the
+    way back from the click.
+
+    Whether the name may nest is the *server's* answer either way — see
+    _clean_folder_name — and for a queued create the path travels as segments,
+    because "/" is what a person types and not necessarily what the server puts
+    between a parent and a child (agent/actions.py joins them with the real
+    one)."""
     account = db.get(Account, body.account_id)
     if account is None:
         raise HTTPException(status_code=404, detail="Account not found")
 
-    name = _clean_folder_name(body.name)
+    name = _clean_folder_name(body.name, nested=account.local or account.folder_nesting)
+    segments = name.split(FOLDER_SEP)
 
-    # display_name, not just imap_name: the agent stores the folder under
-    # whatever namespace the server imposes ("Folders/Receipts"), so comparing
-    # the bare leaf against imap_name alone would miss every Bridge folder.
-    clash = db.execute(
-        select(Mailbox).where(
-            Mailbox.account_id == account.id,
-            or_(Mailbox.imap_name == name, Mailbox.display_name == name),
-        )
-    ).scalars().first()
-    if clash is not None:
+    # Compared as paths — the name as the sidebar prints it — rather than
+    # against imap_name, which is the server's spelling of it. Bridge stores a
+    # folder called Receipts as "Folders/Receipts" and a Dovecot child as
+    # "Archive.2024", and a person typing either would otherwise be told they
+    # were making something new. Leaves are free to repeat: "2024" under Archive
+    # does not make "2024" under Receipts a duplicate, which is the point of
+    # nesting.
+    mbs = db.execute(select(Mailbox).where(Mailbox.account_id == account.id)).scalars().all()
+    if name in set(_paths(account, mbs).values()):
         raise HTTPException(status_code=409, detail="That folder already exists")
+
+    if account.local:
+        mailbox = ingest.ensure_local_folder(db, account, name)
+        db.commit()
+        response.status_code = 201
+        return {"status": "created", "name": name, "account_id": account.id,
+                "mailbox_id": mailbox.id}
 
     # A second click before the agent has run would otherwise queue a duplicate.
     # "leased" counts as queued: that is a row an agent is creating the folder
@@ -164,8 +284,12 @@ def create_mailbox(body: CreateMailbox, db: DBSession = Depends(get_db)):
     if any((a.payload or {}).get("name") == name for a in already_queued):
         raise HTTPException(status_code=409, detail="That folder is already being created")
 
-    db.add(PendingAction(account_id=account.id, message_pk=None,
-                         type="create_folder", payload={"name": name}))
+    # Both: `segments` is what the agent builds the folder from, `name` is the
+    # sentence the log and the dropped-actions notice print — and is what an
+    # agent from before nesting existed still reads, which for a flat name is
+    # the same thing.
+    db.add(PendingAction(account_id=account.id, message_pk=None, type="create_folder",
+                         payload={"name": name, "segments": segments}))
     db.commit()
     mailops.wake_agent(db, account.id)
     return {"status": "queued", "name": name, "account_id": account.id}

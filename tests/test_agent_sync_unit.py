@@ -155,6 +155,10 @@ class RecheckBridge:
     def list_folders(self):
         return [{"name": "INBOX", "role_hint": "\\inbox"},
                 {"name": "Archive", "role_hint": ""}]
+    # What the pass records so the web app knows whether "Archive/2024" is a
+    # name this account may be given — see agent/imap.py::folder_capabilities.
+    def folder_capabilities(self):
+        return {"delimiter": "/", "nesting": True}
     def select(self, _name):
         return (1, 1)
     def new_uids(self, _last):
@@ -217,6 +221,7 @@ class RecheckIngest:
     def record_sync(self, *_a, **_kw): pass
     def content_cutoff(self, _months): return None
     def record_content_window(self, _db, months): self.window = months
+    def record_folder_capabilities(self, _db, _account, caps): self.capabilities = caps
 
 
 class Cfg:

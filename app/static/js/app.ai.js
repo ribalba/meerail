@@ -76,22 +76,54 @@ App.ai = (function () {
     });
     $("#ai-att-copy").addEventListener("click", () => copy(attAnswer, "#ai-att-done"));
 
+    $("#btn-close-ai-off").innerHTML = App.icon("close", 18);
+    $("#btn-close-ai-off").addEventListener("click", closeOff);
+    $("#ai-off-close").addEventListener("click", closeOff);
+    $("#ai-off-modal").addEventListener("click", (e) => {
+      if (e.target.id === "ai-off-modal") closeOff();
+    });
+    // The note ends where it points: straight into the section that turns the
+    // thing on, scrolled to, rather than leaving somebody to find "AI" in a
+    // settings page they have never opened.
+    $("#ai-off-settings").addEventListener("click", () => {
+      closeOff();
+      App.shell.openSettings();
+      const h = $("#settings-ai-heading");
+      if (h) h.scrollIntoView({ block: "start" });
+      $("#ai-provider").focus();
+    });
+
     wireSettings();
   }
 
-  // The robot buttons appear and disappear with the setting, so the reader's bar
-  // is redrawn on every change rather than only when a thread opens.
+  // The robot buttons inside a conversation appear and disappear with the
+  // setting, so the reader's bar is redrawn on every change rather than only
+  // when a thread opens.
+  //
+  // The one beside the search box is the exception: it stays, and with no model
+  // configured it opens the note that says what it would do and what it needs.
+  // Those buttons live on a message you are already reading, where an
+  // explanation nobody asked for is in the way; this one is the only place the
+  // feature can be found at all if you have not read the settings page.
   async function refreshConfig() {
     let next = { enabled: false, providers: [], presets: {}, keys: {}, examples: [] };
     try { next = await App.api.aiConfig(); } catch (_) {}
     const was = cfg.enabled;
     cfg = next;
-    $("#search-ai-btn").hidden = !cfg.enabled;
+    $("#search-ai-btn").title = cfg.enabled
+      ? "Describe what you are looking for and have it written as a query"
+      : "Have a search written for you — needs a language model (not set up yet)";
     if (was !== cfg.enabled && App.reader) App.reader.redraw();
     return cfg;
   }
 
   function enabled() { return !!cfg.enabled; }
+
+  // --- Nothing configured: what this would do -----------------------------
+
+  function offOpen() { return !$("#ai-off-modal").hidden; }
+  function openOff() { $("#ai-off-modal").hidden = false; $("#ai-off-settings").focus(); }
+  function closeOff() { $("#ai-off-modal").hidden = true; }
 
   function setStatus(id, text, isError) {
     const el = $(id);
@@ -104,7 +136,7 @@ App.ai = (function () {
   function searchOpen() { return !$("#ai-search-modal").hidden; }
 
   function openSearch() {
-    if (!cfg.enabled) return;
+    if (!cfg.enabled) return openOff();
     $("#ai-search-modal").hidden = false;
     $("#ai-search-result").hidden = true;
     setStatus("#ai-search-status", "");
@@ -470,6 +502,7 @@ App.ai = (function () {
   }
 
   return { init, enabled, refreshConfig, onSettingsOpen,
+           openOff, closeOff, offOpen,
            openSearch, closeSearch, searchOpen,
            openThread, closeThread, threadOpen,
            openAttachment, closeAttachment, attachmentOpen,

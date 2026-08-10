@@ -44,6 +44,13 @@ def test_never_seen():
     assert state(Acc(last_agent_seen=None)) == "never"
 
 
+def test_imported_account_is_not_reported_as_a_missing_agent():
+    """Same absence, different fact. An account whose mail came off disk has no
+    agent because none was ever meant to exist, and "never seen" is that read as
+    a fault — a warning pill and a sentence about an agent that is not late."""
+    assert state(Acc(last_agent_seen=None, local=True)) == "local"
+
+
 def test_recorded_error_with_no_open_pass_is_failing():
     acc = Acc(last_error="BrokenPipeError(32, 'Broken pipe')")
     assert state(acc) == "failing"

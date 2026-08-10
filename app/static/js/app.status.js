@@ -42,6 +42,9 @@ App.status = (function () {
     failing:     { pill: "error", label: "failing" },
     offline:     { pill: "error", label: "offline" },
     never:       { pill: "warn",  label: "never seen" },
+    // Mail imported off disk. Nothing is syncing it and nothing is supposed to
+    // be, so the pill is plain rather than warning — see app/syncstate.py.
+    local:       { pill: "",      label: "imported" },
   };
 
   const meta = (state) => STATES[state] || STATES.never;

@@ -29,6 +29,13 @@ def account_state(acc, last_ingest, now) -> tuple[str, str]:
     Decided here rather than in the browser so every consumer agrees, and so the
     thresholds sit next to the agent behaviour they are derived from.
     """
+    # Nothing is meant to be connecting, so nothing is missing. Asked before
+    # "never seen", which is the same absence read as a fault — and read that
+    # way it is a warning pill and a sentence about an agent, on an account
+    # whose mail came off disk and was never going to have one.
+    if getattr(acc, "local", False):
+        return "local", "Imported mail. No agent syncs this account, and none is expected."
+
     if acc.last_agent_seen is None:
         return "never", "No agent has ever connected for this account."
 

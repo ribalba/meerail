@@ -597,7 +597,10 @@ full recheck from the UI's agent-status panel, which re-walks every folder.
 
 Four of them, all optional and all off until you configure a model. Nothing is sent anywhere
 until you press one of the buttons — there is no background summarising, no indexing through
-a provider, and no request at all on an install that has not set one up.
+a provider, and no request at all on an install that has not set one up. With nothing
+configured, the robot beside the search box is the one that stays: pressing it opens a note
+saying what the four would do and what they need, including how to point meerail at an Ollama
+running on your own machine. The rest appear once a model is saved.
 
 **A robot beside the search box** opens a small dialog: describe the mail you are after in
 your own words, and the query comes back **into the search box** rather than being run behind
@@ -662,7 +665,7 @@ removes one because a connection failed.
 | A message you trash or archive | You pressed it | Leaves the folder locally at once and is applied to IMAP on the next pass. It is a move, never a deletion: with no Trash folder on the account the action is refused rather than turned into an expunge. |
 | Everything in Trash | You pressed **Empty Trash**, in Trash, and confirmed | The only thing in meerail that destroys mail: `\Deleted` plus a UID `EXPUNGE`, aimed one message at a time. It cannot be reached from any other button — no ordinary delete, however many messages it covers, is ever re-read as this one. |
 | Mail deleted on your phone or in webmail | The server no longer lists its UID | meerail mirrors the server; a message deleted elsewhere goes here too. Only ever on a UID list the server has confirmed in full — see below. |
-| A folder | It has been gone from the server's `LIST` for an hour | Its messages go with it, unless they are also filed elsewhere. Never on an empty `LIST`, and never on one absence: a Bridge that is still loading answers with part of the mailbox, so a folder that disappears is marked and kept — with all its mail — until it stays gone. |
+| A folder | It has been gone from the server's `LIST` for an hour | Its messages go with it, unless they are also filed elsewhere. Never on an empty `LIST`, and never on one absence: a Bridge that is still loading answers with part of the mailbox, so a folder that disappears is marked and kept — with all its mail — until it stays gone. Never for a folder meerail made itself — an imported account's folders, and any you add to one — which is absent from `LIST` by definition. |
 | A message no folder holds any more | At the end of a completed pass, hours after the last placement went | Almost always a reused UID after a `UIDVALIDITY` reset: the walk binds the number to the message that has it now, and the one it used to mean is left with no folder, invisible and still on disk. Never asked mid-pass, when a message is legitimately between folders, and never about one a queued action still names. |
 | Bodies and attachments of old mail | `content_window_months` is set | Headers stay; the mail still lists, threads and searches. Off by default. Age is counted from when the mail *arrived* (the server's `INTERNALDATE`), not from its `Date:` header — a header is written by the sender, and a window read from one could be aimed: date a message 1998 and its body would be stripped on the pass that stored it. See [The content window](#the-content-window). |
 | Everything for an account | `DELETE /api/accounts/{id}` | The one command that removes an account's mail wholesale. No button in the UI calls it. |
@@ -693,6 +696,25 @@ server that has been down since Friday.
   press them, not when the agent gets round to applying it. The copy you see in Archive is
   written locally and replaced by the server's own once the move lands; file the same
   message twice before that and it is still one move, to wherever it ended up.
+- **Folders nest where the mail server nests.** The `+` on an account heading takes
+  `Archive/2024` and makes `2024` inside `Archive`, creating `Archive` if it is not there —
+  up to eight levels, and each level is `CREATE`d in turn so a server that will not invent
+  the parents for you gets them anyway. Whether it is offered at all is *the server's*
+  answer, read off IMAP's `LIST` by the agent on every pass: Proton Bridge marks every user
+  folder `\Noinferiors` and genuinely cannot hold a folder inside a folder, so there the box
+  says so; Gmail, Dovecot and the university IMAP servers people run beside it can, and used
+  to be refused along with it. You always type `/`; the agent puts the server's own
+  separator in (`.` on many Dovecot installs) so nobody has to know what it is. See
+  [Nested folders](#nested-folders).
+- **A selection can be filed, not only deleted.** Ticking rows in the list puts a bar above
+  it with **Move to…** beside Delete, and the folder you pick takes every ticked
+  conversation in one operation — one entry in Recent actions, one Undo. When every loaded
+  row is ticked and the folder holds more, the bar offers **Select all N**, and Move then
+  means the whole folder including the pages you never scrolled to; that version asks
+  first, and runs in chunks so a folder of forty thousand is a progress count rather than a
+  request that times out. Moving is within one account, because IMAP has no way to carry a
+  message to another server — a selection spanning two accounts (easy to make in the
+  unified inbox) simply offers no Move button rather than half-applying one.
 - **You can take a filing back.** A **Recent actions** box in the sidebar lists the last
   dozen things that moved mail — trashed, archived, moved — one line per keypress rather
   than per message, so a bulk delete of two hundred conversations is one entry and one
@@ -773,6 +795,37 @@ On Linux the same thing runs containerised with `make agent-docker` / `make agen
 the background under launchd. [`agent/README.md`](agent/README.md) covers the logs, the
 full-recheck path, and start-at-boot setups for all three platforms.
 
+### Nested folders
+
+`Archive/2024` in the New Folder box makes `2024` inside `Archive`. Whether the box lets
+you type it depends on the account, because it depends on the mail server, and the only
+part of meerail with a connection to ask is the agent — so it asks once per pass, off the
+`LIST` it already runs, and writes the answer where the web app can read it (which on a
+split deployment is another machine entirely):
+
+| | |
+| --- | --- |
+| `folder_delimiter` | What the server puts between a parent and a child: `/` on Bridge and Gmail, `.` on many Dovecot installs. You always type `/`; the agent translates. It is also what the sidebar splits folder names on, so a `.`-delimited server draws as a tree and its folders are named by their leaf rather than by their whole path. |
+| `folder_nesting` | Whether a folder may hold another one. False when the server publishes no hierarchy separator at all, and false when every folder where a new one would go comes back `\Noinferiors` — which is exactly Proton Bridge. |
+
+One `\Noinferiors` folder does not condemn an account: some servers mark a single special
+mailbox that way, and reading it as "this server does not nest" would refuse the whole
+account over one folder. An account with no user folders yet is allowed to try — most
+servers nest, and the honest failure for the rest is the `CREATE` being refused, which
+shows up in the dropped-actions notice like any other.
+
+Until an agent has reported, an account is treated as flat. That is what every account did
+before this existed, so an upgrade never *loses* a name — it gains nesting a few seconds
+after the next sync pass.
+
+Existing nesting shows up too, without anything being created: folders that already sit
+under one another are drawn indented, and everything that names a folder — the move menu,
+the search scope, the list header — shows the whole path, because three folders called
+`2024` are not a choice anybody can make. The indent only happens where the parent is
+itself a folder: Bridge stores every user folder as `Folders/<name>` without there being
+any folder called `Folders`, and indenting on the separator alone would push a whole
+account one level in under a heading that is not in the list.
+
 ### Importing an mbox
 
 Old mail that is not on a server any more — a Thunderbird folder, a Gmail Takeout export,
@@ -802,17 +855,39 @@ directory and it reads that layout — flags, attachments and all:
 tools/import-mbox.sh ~/Library/Mail/V10/*/Immobilien-Verteiler.mbox --folder Verteiler
 ```
 
-Two things to know. `~/Library/Mail` is behind **Full Disk Access**, so grant it to your
+A mailbox that has sub-mailboxes keeps them *inside* itself as further `.mbox`
+directories, and they come in with it — each as a folder of its own under the one you
+named, nested as deep as you filed them:
+
+```bash
+tools/import-mbox.sh ~/Library/Mail/V10/*/01-GCS.mbox --folder GCS-Sysadmin
+# GCS-Sysadmin/API Errors, GCS-Sysadmin/DNS Errors, GCS-Sysadmin/NGINX Logs, ...
+```
+
+Nothing is merged: a parent's mail and a child's stay in separate folders, because that
+is not something a second run could take apart again. `--no-recurse` imports only the
+mailbox you named. Leave `--folder` out and a tree lands under the mailbox's own name.
+
+Two more things. `~/Library/Mail` is behind **Full Disk Access**, so grant it to your
 terminal in System Settings > Privacy & Security first, or every read comes back as
-"Operation not permitted". And a mailbox that has sub-mailboxes keeps them *inside* itself
-as further `.mbox` directories; each is its own import, with its own `--folder`, and the
-tool names them rather than sweeping them into the parent. Mail.app's **Mailbox > Export
-Mailbox** works too and needs neither: it writes a `.mbox` folder with a real mbox inside.
+"Operation not permitted". And `~/Library/Mail/V10/<account-id>` itself is one level up
+from anything importable — it holds mailboxes rather than messages, and the tool names
+them rather than sweeping a whole account into one import. Mail.app's **Mailbox > Export
+Mailbox** needs none of this: it writes a `.mbox` folder with a real mbox inside.
+
+Mailbox names have spaces in them, so paths get quoted — and a `~` inside quotes is one
+the shell never expands. The tool expands a leading `~` itself, so both spellings work:
+
+```bash
+tools/import-mbox.sh '~/Library/Mail/V10/F34D.../API Errors.mbox' --folder Errors
+tools/import-mbox.sh ~/Library/Mail/V10/F34D.../API\ Errors.mbox  --folder Errors
+```
 
 | Flag | |
 | --- | --- |
 | `--account EMAIL` | Import into this account, creating it if it does not exist. Default: derived from the filename. |
-| `--folder NAME` | Which folder the mail lands in (default `INBOX`). A name like `Sent` or `Archive` takes that folder's role in the sidebar. |
+| `--folder NAME` | Which folder the mail lands in (default `INBOX`, or the mailbox's own name when it has sub-mailboxes — they land under it as `NAME/Child`). A name like `Sent` or `Archive` takes that folder's role in the sidebar. |
+| `--no-recurse` | Import only the mailbox named, leaving the sub-mailboxes inside it out. |
 | `--keep-unread` | Take read/unread from the mailbox itself — mbox `Status` headers, or Apple Mail's per-message flags. Most mbox exports carry none, so this marks the whole import unread; by default everything is imported as read. |
 | `--no-index` | Import only, leaving attachment text and previews queued for a running agent. |
 | `--config PATH` | Use a config file other than the repository's `meerail.toml`. |
@@ -825,6 +900,30 @@ Import into an account **no agent syncs** — the default, and the tool refuses 
 without `--force`. The agent deletes folders its IMAP server does not list ([What meerail
 deletes, and when](#what-meerail-deletes-and-when)), and an imported folder exists nowhere
 but here, so its next pass would take the imported mail with it.
+
+#### Rearranging what you imported
+
+An imported account is marked as one nothing syncs, and that changes what the UI does with
+it rather than what it offers. Everywhere else, making a folder or filing a message is an
+*instruction*: the app writes it down and an agent applies it to your mail server. Here
+there is no agent and never will be, so the same buttons do the work themselves and the
+result is on screen on the way back from the click.
+
+- **New folders are made, not requested.** The `+` on the account heading creates the
+  folder immediately. (It used to answer "queued — appears once the agent syncs", about an
+  agent that does not exist, and nothing ever appeared.)
+- **Folders nest.** Type `Archive/2024` and you get `2024` inside `Archive`, with `Archive`
+  created if it is not there yet — up to eight levels. This is not special to imported
+  accounts; see [Nested folders](#nested-folders) for the accounts that do have a server.
+- **Moving mail is just moving mail.** Filing an imported message — one, a selection, or a
+  whole folder with **Select all** — writes the placement and is finished. It still shows
+  in Recent actions with a working **Undo**, which matters more here than anywhere else:
+  no mail server is holding a second copy of where things were.
+
+The flag corrects itself if the address stops being imported-only. Configure an agent for
+it and the first sync pass takes ownership back — from then on the folders come from the
+server and the buttons go back to queueing. Folders you made in the meantime are marked as
+local and are the one thing that pass will *not* delete for being missing from `LIST`.
 
 ### Putting back mail whose move never landed
 

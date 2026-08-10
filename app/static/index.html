@@ -67,9 +67,11 @@
           <input type="search" id="search-input" placeholder="Search all mail" autocomplete="off"
                  title="Words are ANDed; wrap a phrase in quotes to match it exactly. Filters like :unread and :from — see the ⓘ" />
           <button class="icon-btn search-clear" id="search-clear" title="Clear" hidden></button>
-          <!-- Only drawn once a model is configured — see App.ai. An install
-               with no provider should not carry a button that can only fail. -->
-          <button class="icon-btn search-ai-btn" id="search-ai-btn" hidden
+          <!-- Always drawn, even with no model configured: with nothing here the
+               feature is invisible to everybody who has not read the settings,
+               so with no provider it opens a note saying what it would do and
+               what it needs instead — see App.ai.openOff. -->
+          <button class="icon-btn search-ai-btn" id="search-ai-btn"
                   title="Describe what you are looking for and have it written as a query"
                   aria-label="Write a search with AI"></button>
           <button class="icon-btn search-help-btn" id="search-help-btn"
@@ -220,7 +222,7 @@
           </p>
         </div>
 
-        <h3 class="settings-heading">AI</h3>
+        <h3 class="settings-heading" id="settings-ai-heading">AI</h3>
         <div class="settings-section">
           <label for="ai-provider">Provider</label>
           <select id="ai-provider"></select>
@@ -248,11 +250,12 @@
             <span class="sa-footer-status" id="ai-status"></span>
           </div>
           <p class="muted small">
-            With a model saved, a robot appears beside the search box — describe the
-            mail you want and it writes the query — and on the reading pane, where it
-            can summarise a conversation, pull out what you need to do, or draft a
-            reply. Both send text to the provider you pick here; nothing is sent
-            until you press one of those buttons.
+            With a model saved, the robot beside the search box starts working —
+            describe the mail you want and it writes the query — and more robots
+            appear on the reading pane, where they can summarise a conversation, pull
+            out what you need to do, draft a reply, or explain an attachment. All of
+            them send text to the provider you pick here; nothing is sent until you
+            press one of those buttons.
           </p>
           <p class="muted small">
             The key is encrypted in the database and never sent to the browser: every
@@ -427,6 +430,52 @@
         <p class="help-lede">If a model is configured in Settings, the robot beside this ⓘ writes
           one of these for you: describe the mail in your own words and the query lands in the
           search box, where you can read it, change it, and pick the syntax up for next time.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- What the robot would do, for an install that has no model configured.
+       The button is drawn either way, so this is what it opens until there is
+       something to ask. -->
+  <div class="modal-backdrop" id="ai-off-modal" hidden>
+    <div class="modal">
+      <div class="modal-head">
+        <h2>No model is configured yet</h2>
+        <button class="icon-btn" id="btn-close-ai-off" title="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p class="help-lede">meerail can hand four jobs to a language model, once you
+          tell it which one to use. Nothing is sent anywhere until you press one of
+          these buttons yourself, and none of them touches your mail on its own — each
+          one answers with text you then decide what to do with.</p>
+        <ul class="ai-off-list">
+          <li><strong>Write a search.</strong> Describe the mail in your own words and
+            this button writes the query, into the search box, where you can read it
+            and change it before it runs.</li>
+          <li><strong>Ask about a conversation.</strong> Summarise it, pull out what you
+            need to do, or draft a reply — the draft opens in the composer like any
+            other, unsent.</li>
+          <li><strong>Explain an attachment.</strong> What is in this PDF, what is the
+            total, when is it due.</li>
+          <li><strong>Suggest a reminder time.</strong> One more row in the "remind me"
+            menu, proposing when the thread actually needs you back.</li>
+        </ul>
+        <p class="muted small">To switch them on, open <strong>Settings → AI</strong> and
+          save a provider, an API key and a model. The key is encrypted in the database
+          and never sent back to the browser: every call is made by the server.</p>
+        <p class="muted small">You do not need to buy anything, and the mail does not
+          have to leave your machine. <a href="https://ollama.com" target="_blank"
+          rel="noopener noreferrer">Ollama</a> runs a model locally: install it,
+          <code>ollama pull llama3.1</code>, then pick <em>Other (OpenAI-compatible)</em>
+          here, set the base URL to <code>http://localhost:11434/v1</code>, leave the key
+          blank and type the model's name. LM Studio and vLLM work the same way. A local
+          address needs <code>server.llm_allow_private_hosts = true</code> in
+          <code>meerail.toml</code> — the request is made by the server, not by this
+          browser, so it has to be told that a private host is on purpose.</p>
+        <div class="ai-actions">
+          <button type="button" id="ai-off-settings" class="btn-primary">Open settings</button>
+          <button type="button" id="ai-off-close" class="btn-secondary">Not now</button>
+        </div>
       </div>
     </div>
   </div>

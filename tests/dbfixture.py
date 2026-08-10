@@ -52,6 +52,65 @@ def create_account(email: str, label: str = "") -> dict:
         return {"id": account.id, "email": account.email, "label": account.label}
 
 
+def create_local_account(email: str, label: str = "") -> dict:
+    """An account with no agent behind it, made the way the mbox importer makes one.
+
+    Deliberately not through ``ingest.get_or_create_account``: that is the
+    agent's entry point and stamps ``last_agent_seen`` — which is exactly what
+    tells the app an agent exists, and would undo the flag this fixture is for.
+    See tools/import_mbox.py and core/models.py::Account.local.
+    """
+    with session() as db:
+        account = Account(email=email.strip().lower(), label=label or email.split("@")[0],
+                          backfill_complete=True, local=True)
+        db.add(account)
+        db.flush()
+        return {"id": account.id, "email": account.email, "label": account.label}
+
+
+def set_folder_capabilities(email: str, delimiter: str, nesting: bool) -> None:
+    """Report what this account's mail server allows, as a sync pass does.
+
+    The agent reads it off IMAP's LIST once a pass; here it is stated outright,
+    because what is under test is what the *app* does with the answer.
+    """
+    with session() as db:
+        account = ingest.get_or_create_account(db, email)
+        ingest.record_folder_capabilities(
+            db, account, {"delimiter": delimiter, "nesting": nesting})
+
+
+def import_raw_message(email: str, raw: bytes, folder: str = "INBOX",
+                       flags: dict | None = None) -> None:
+    """Store one message in a local account, exactly as the importer does.
+
+    UIDs come off the folder's own cursor because no server is handing any out,
+    which is the whole difference from ``ingest_raw_message``.
+    """
+    from core.mail.parse import parse_email
+    from sqlalchemy import select
+
+    with session() as db:
+        account = db.execute(
+            select(Account).where(Account.email == email.strip().lower())
+        ).scalar_one()
+        mailbox = ingest.ensure_local_folder(db, account, folder)
+        uid = mailbox.last_uid + 1
+        ingest.store_message(db, account, mailbox, uid, flags or {}, raw,
+                             received=parse_email(raw).date_sent)
+        ingest.advance_cursor(db, mailbox, uid)
+
+
+def placements(email: str, message_pk: int) -> list[dict]:
+    """Where a message is filed, and under what UID in each folder."""
+    with session() as db:
+        rows = db.query(MessageLocation, Mailbox).join(
+            Mailbox, Mailbox.id == MessageLocation.mailbox_id
+        ).filter(MessageLocation.message_pk == message_pk).all()
+        return [{"imap_name": mb.imap_name, "imap_uid": loc.imap_uid,
+                 "deleted": loc.deleted, "local": mb.local} for loc, mb in rows]
+
+
 def _mailbox(db, account: Account, imap_name: str, role_hint: str = "",
              uidvalidity: int = 1) -> Mailbox:
     return ingest.register_folder(db, account, imap_name, role_hint, uidvalidity, None)

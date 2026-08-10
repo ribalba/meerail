@@ -45,7 +45,9 @@ from sqlalchemy.orm import Session as DBSession
 from core import undo
 from core.events import publish_command
 from core.ingest import derive_role
-from core.mail.store import is_pending, move_in_flight, place_pending, recompute_counts
+from core.mail.store import (
+    is_pending, move_in_flight, place_local, place_pending, recompute_counts,
+)
 from core.models import Account, Mailbox, Message, MessageLocation, PendingAction, utcnow
 
 from . import events
@@ -54,8 +56,26 @@ from . import events
 # --- naming things to the agent ----------------------------------------------
 
 
-def enqueue(db: DBSession, account_id: int, message_pk: int, type_: str, payload: dict) -> None:
-    db.add(PendingAction(account_id=account_id, message_pk=message_pk, type=type_, payload=payload))
+def enqueue(db: DBSession, account_id: int, message_pk: int, type_: str, payload: dict,
+            status: str = "pending") -> None:
+    db.add(PendingAction(account_id=account_id, message_pk=message_pk, type=type_,
+                         payload=payload, status=status))
+
+
+def is_local(db: DBSession, account_id: int) -> bool:
+    """Is this an account nothing syncs — mail imported off disk?
+
+    Asked before anything is queued for it. There is no agent to drain that
+    queue and never will be, so an action left on it is not "waiting", it is
+    lost: the message would leave the folder it was moved out of and appear in
+    the target as a placement no server can ever confirm, with a UID this
+    process invented, and the instruction to make it true would sit in
+    pending_actions until the account was deleted. Filing it here and telling
+    nobody is not a shortcut in that case — it is the whole operation. See
+    core/models.py::Account.local.
+    """
+    account = db.get(Account, account_id)
+    return bool(account is not None and account.local)
 
 
 def uid_ref(mailbox: Mailbox, loc: MessageLocation, key: str = "folder") -> dict:
@@ -478,6 +498,36 @@ def _in_flight(db: DBSession, msg: Message) -> bool:
     return move_in_flight(db, msg.id)
 
 
+def _record_local_move(db: DBSession, msg: Message, source: Mailbox, target: Mailbox | None,
+                       op_id: str | None, op_kind: str, undo_from: list[dict] | None,
+                       loc: MessageLocation) -> None:
+    """Write down a move nobody was asked to make, so it can still be taken back.
+
+    An account with no agent queues nothing, and for a while that also meant it
+    remembered nothing: the Recent actions panel is built out of the queue table
+    (app/routers/undo.py), so filing two thousand imported messages into the
+    wrong folder was an operation with no entry and no Undo — the one place a
+    bulk move most wants one, since there is no mail server holding a second
+    copy of where things were.
+
+    So the row is written anyway, as a record rather than an instruction, and
+    "done" is what says which it is: the agent's ``_claimable`` only ever takes
+    "pending" and a lapsed "leased", so a row in this state is inert even if an
+    agent is later configured for the address. Undo then finds it in the state
+    it finds an applied move in, and puts the mail back by moving it back —
+    which here is again a local move, and again just the move.
+    """
+    if op_id is None:
+        return
+    payload = {**uid_ref(source, loc, "from_folder"),
+               **undo.fields(op_id, op_kind,
+                             undo_from if undo_from is not None else [undo.snapshot(db, loc)])}
+    if target is not None:
+        payload["to_folder"] = target.imap_name
+    enqueue(db, msg.account_id, msg.id, "move" if target is not None else "delete",
+            payload, status="done")
+
+
 def move_to(db: DBSession, msg: Message, source_mailbox_id: int, target: Mailbox | None,
             touched: set[int] | None = None, enqueue_action: bool = True,
             op_id: str | None = None, op_kind: str = "move",
@@ -509,6 +559,9 @@ def move_to(db: DBSession, msg: Message, source_mailbox_id: int, target: Mailbox
     before it. Both ride on the action's payload, so a caller that passes neither
     (the sync's own flag catch-up, say) simply does not appear in the panel. See
     core/undo.py.
+
+    An account with no agent behind it takes the same path with the queueing cut
+    out — see is_local. The move is not optimistic there; it is simply the move.
     """
     loc = next((item for item in msg.locations if item.mailbox_id == source_mailbox_id), None)
     if loc is None:
@@ -551,6 +604,18 @@ def move_to(db: DBSession, msg: Message, source_mailbox_id: int, target: Mailbox
             and any(item.mailbox_id == target.id and not is_pending(item)
                     for item in msg.locations)):
         return False
+
+    # Nothing to tell, so nothing is asked and nothing is waited for. Everything
+    # below that reasons about a queued move — re-aiming one, refusing while one
+    # is in flight, writing a placement the server has yet to confirm — is about
+    # the gap between here and a mail server, and an imported account has no
+    # such gap. Deciding it once, here, is what keeps that reasoning in one
+    # place rather than repeated as an `if` in each of the four branches.
+    local = is_local(db, msg.account_id)
+    if local:
+        if enqueue_action:
+            _record_local_move(db, msg, source, target, op_id, op_kind, undo_from, loc)
+        enqueue_action = False
 
     if enqueue_action:
         if is_pending(loc):
@@ -602,7 +667,10 @@ def move_to(db: DBSession, msg: Message, source_mailbox_id: int, target: Mailbox
                     {**uid_ref(source, loc), **undo.fields(op_id, "delete", None)})
 
     if target is not None:
-        place_pending(db, msg, target.id, loc)
+        if local:
+            place_local(db, msg, target, loc)
+        else:
+            place_pending(db, msg, target.id, loc)
     db.delete(loc)
     if touched is None:
         recompute(db, {source.id} | ({target.id} if target is not None else set()))

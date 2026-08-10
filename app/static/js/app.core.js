@@ -181,6 +181,17 @@ App.api = {
   // itself and deletes a chunk of everything matching it — see app.bulk.js.
   bulkTrash(items) { return this.request("POST", "/api/messages/bulk/trash", { items }); },
   bulkTrashAll(selector) { return this.request("POST", "/api/messages/bulk/trash-all", selector); },
+  // The same two tiers for filing rather than deleting: the ticked rows, or
+  // everything the selector matches, a chunk per call. Both take one folder,
+  // and the server refuses a selection that is not all in its account.
+  bulkMove(items, targetMailboxId) {
+    return this.request("POST", "/api/messages/bulk/move",
+                        { items, target_mailbox_id: targetMailboxId });
+  },
+  bulkMoveAll(selector, targetMailboxId) {
+    return this.request("POST", "/api/messages/bulk/move-all",
+                        { ...selector, target_mailbox_id: targetMailboxId });
+  },
   // The one call that destroys mail, and the only one that has to say so: it
   // deletes the Trash folder's contents from the server, a chunk per call.
   // `confirm` is the server's requirement, not a formality — see

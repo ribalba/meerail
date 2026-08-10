@@ -262,6 +262,38 @@ def place_pending(
     return loc
 
 
+def place_local(
+    db: Session, msg: Message, mailbox: Mailbox, flags_from: MessageLocation | None = None
+) -> MessageLocation:
+    """Put a message in a folder of an account no server stands behind.
+
+    The same job as place_pending, minus the pending: nothing is going to
+    confirm this placement later because nothing was told to make it true, so a
+    UID that says "ours, not the server's" would be a promise that never comes
+    due — and everything that reads that sign (the vanished sweep, the retarget
+    path, "this message is still being moved") would go on treating a finished
+    move as one in flight, forever.
+
+    So the folder's own cursor hands out the number, exactly as the importer
+    does for the mail it puts there in the first place: positive, unique within
+    the folder, and never colliding with an import that resumes afterwards,
+    because last_uid moves with it.
+    """
+    existing = next((item for item in msg.locations if item.mailbox_id == mailbox.id), None)
+    if existing is not None:
+        return existing
+    mailbox.last_uid += 1
+    loc = MessageLocation(mailbox_id=mailbox.id, imap_uid=mailbox.last_uid)
+    msg.locations.append(loc)
+    if flags_from is not None:
+        loc.seen = flags_from.seen
+        loc.flagged = flags_from.flagged
+        loc.answered = flags_from.answered
+        loc.draft = flags_from.draft
+        loc.keywords = flags_from.keywords
+    return loc
+
+
 def drop_pending_placement(db: Session, message_pk: int, mailbox_id: int) -> None:
     """Retire the optimistic placement written while a move was queued.
 

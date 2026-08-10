@@ -129,6 +129,21 @@ def account(require_server):
     api("DELETE", f"/api/accounts/{acc['id']}")
 
 
+@pytest.fixture
+def local_account(require_server):
+    """An account nothing syncs — mail imported off disk rather than fetched.
+
+    The other half of the `account` fixture. Everything that files mail asks
+    which of the two it is looking at (mailops.is_local), because for this one
+    there is no agent to hand the work to and doing it here is the whole
+    operation rather than an optimistic half of it.
+    """
+    email = f"pytest-{uuid.uuid4().hex[:10]}@imported.local"
+    acc = dbfixture.create_local_account(email, label="pytest import")
+    yield acc
+    api("DELETE", f"/api/accounts/{acc['id']}")
+
+
 def status_for(email: str) -> dict | None:
     code, body = api("GET", "/api/sync/status")
     assert code == 200

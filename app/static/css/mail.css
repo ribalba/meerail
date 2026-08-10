@@ -118,7 +118,12 @@ body.resizing { cursor: col-resize; user-select: none; }
 .mailbox-tree { flex: 1; overflow-y: auto; padding: .25rem .5rem 1rem; }
 .tree-section { font-size: .68rem; font-weight: 700; text-transform: uppercase;
   letter-spacing: .04em; color: var(--sidebar-section); padding: .8rem .55rem .25rem; }
+/* --mb-depth is how many folders this one hangs under; unset at the top level.
+   The indent is padding rather than a margin so the hover and selection fills
+   still run the full width of the tree — a nested folder that is on screen
+   should read as a row of the same list, one step in, not as a narrower one. */
 .mailbox-row { display: flex; align-items: center; gap: .5rem; padding: .32rem .55rem;
+  padding-left: calc(.55rem + var(--mb-depth, 0) * .85rem);
   border-radius: 6px; cursor: pointer; font-size: .875rem; color: var(--text);
   user-select: none; }
 .mailbox-row:hover { background: var(--hover-tint); }
@@ -1130,6 +1135,13 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
    search field should not compete with the field. */
 .search-ai-btn { flex: 0 0 auto; color: var(--text-faint); }
 .search-ai-btn:hover { color: var(--accent); }
+
+/* The "nothing is configured" note: four short lines about what the button
+   would do, so they read as a list rather than as a paragraph of prose. */
+.ai-off-list { margin: .6rem 0 .9rem; padding-left: 1.1rem; font-size: .85rem;
+  line-height: 1.5; color: var(--text); }
+.ai-off-list li { margin-bottom: .35rem; }
+.ai-off-list strong { font-weight: 600; }
 
 /* --- Add-task dialog --- */
 .task-field { display: block; margin-bottom: .8rem; }

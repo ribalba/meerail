@@ -6,6 +6,12 @@ App.search = (function () {
   let requestSeq = 0;
   const $ = (s) => document.querySelector(s);
 
+  // The time window sticks across reloads. Someone who searches their mail a
+  // year at a time means it every time — unlike the scope, which clear() drops
+  // because a folder narrower than the box suggests is invisible once the query
+  // is gone. The window is written on the control itself, so it stays readable.
+  const YEARS_KEY = "meerail.search.years";
+
   function els() {
     return {
       input: $("#search-input"), clear: $("#search-clear"), controls: $("#search-controls"),
@@ -39,7 +45,9 @@ App.search = (function () {
     const multi = accounts.length > 1;
     for (const acc of accounts) {
       const opts = acc.mailboxes
-        .map((mb) => `<option value="${mb.id}">${App.esc(mb.display_name)}</option>`)
+        // Paths, for the same reason the move menu uses them: a list holding
+        // two folders called "2024" says nothing about which is which.
+        .map((mb) => `<option value="${mb.id}">${App.esc(mb.path || mb.display_name)}</option>`)
         .join("");
       if (!opts) continue;
       html += multi
@@ -147,8 +155,21 @@ App.search = (function () {
     if (restore) App.shell.reloadList();
   }
 
+  // A stored value that no longer names an option leaves the select empty, so
+  // it is checked against the menu rather than assigned on trust.
+  function restoreYears() {
+    const years = els().years;
+    if (!years) return;
+    let saved = null;
+    try { saved = localStorage.getItem(YEARS_KEY); } catch { /* private mode */ }
+    if (saved === null) return;
+    const known = [...years.options].some((o) => o.value === saved);
+    if (known) years.value = saved;
+  }
+
   function init() {
     const e = els();
+    restoreYears();
     e.input.addEventListener("input", debouncedRun);
     e.input.addEventListener("keydown", (ev) => {
       if (ev.key !== "Enter") return;
@@ -159,7 +180,10 @@ App.search = (function () {
     e.clear.addEventListener("click", () => { clear(true); e.input.focus(); });
     e.rx.addEventListener("change", () => run());
     e.scope.addEventListener("change", () => run());
-    e.years.addEventListener("change", () => run());
+    e.years.addEventListener("change", () => {
+      try { localStorage.setItem(YEARS_KEY, e.years.value); } catch { /* private mode */ }
+      run();
+    });
     e.clear.innerHTML = App.icon("close", 15);
 
     e.help.innerHTML = App.icon("info", 15);

@@ -490,23 +490,35 @@ def apply_action(db, bridge, account, action: PendingAction) -> None:
         # Idempotent: a retry after a timeout that actually landed must not fail
         # the action permanently on an ALREADYEXISTS. The folder row itself is
         # created by the LIST pass that follows this drain, not here.
-        # Where a user folder is allowed to live is the server's business, not
-        # the web app's, and only this side can see it — so the name arrives as
-        # a bare leaf and gets its namespace here.
+        #
+        # Where a user folder is allowed to live, and what separates it from a
+        # child, are the server's business rather than the web app's, and only
+        # this side can see either — so the name arrives as segments and is
+        # assembled here: the namespace prefix in front, the server's own
+        # delimiter between. "Archive/2024" typed in a browser reaches a
+        # Dovecot server as "Archive.2024" without the browser ever knowing.
         parent = bridge.user_folder_parent()
-        name = p["name"]
-        if parent and not name.startswith(parent):
-            name = parent + name
-        if not c.folder_exists(name):
-            c.create_folder(name)
-        # Best-effort: Bridge subscribes on create and then rejects the
-        # redundant SUBSCRIBE outright ("already subscribed to this mailbox").
-        # Letting that propagate would fail — and endlessly retry — an action
-        # whose folder is already sitting on the server.
-        try:
-            c.subscribe_folder(name)
-        except Exception:  # noqa: BLE001
-            pass
+        segments = p.get("segments") or [p["name"]]
+        delimiter = bridge.folder_capabilities()["delimiter"] or "/"
+        # Each level in turn. Some servers create the parents of a nested name
+        # for you and some answer "no such parent mailbox"; making them
+        # explicitly is the only version that works on both, and folder_exists
+        # keeps it idempotent on the ones that did it themselves.
+        made = ""
+        for depth in range(len(segments)):
+            made = delimiter.join(segments[: depth + 1])
+            if parent and not made.startswith(parent):
+                made = parent + made
+            if not c.folder_exists(made):
+                c.create_folder(made)
+            # Best-effort: Bridge subscribes on create and then rejects the
+            # redundant SUBSCRIBE outright ("already subscribed to this
+            # mailbox"). Letting that propagate would fail — and endlessly retry
+            # — an action whose folder is already sitting on the server.
+            try:
+                c.subscribe_folder(made)
+            except Exception:  # noqa: BLE001
+                pass
 
     elif t == "send":
         outbound = db.get(Outbound, p["outbound_id"])

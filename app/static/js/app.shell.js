@@ -19,9 +19,16 @@ App.shell = (function () {
   // omitted on the smart rows, which are always there.
   // `extra` is an extra class for the row — only the Outbox uses it, to go red
   // when the mail in it has stopped going out.
-  function mailboxRow(sel, iconName, name, count, activeKey, star, extra) {
+  // `depth` indents a folder under the folder it hangs off. The server works out
+  // which folders those are (mailboxes.py::_chains) rather than the sidebar
+  // splitting names on "/", because Bridge stores every user folder under a
+  // "Folders/" prefix that is not itself a folder — indenting on the separator
+  // alone would push a whole account one level in under a heading that is not
+  // in the list.
+  function mailboxRow(sel, iconName, name, count, activeKey, star, extra, depth) {
     const active = (sel.key === activeKey ? " active" : "") + (extra ? " " + extra : "");
     const badge = count ? `<span class="mailbox-count">${count}</span>` : "";
+    const indent = depth ? ` style="--mb-depth:${depth}"` : "";
     let pin = "";
     if (star) {
       const label = star.on ? "Remove from Favorites" : "Add to Favorites";
@@ -29,7 +36,7 @@ App.shell = (function () {
         data-on="${star.on ? 1 : 0}" title="${label}" aria-label="${label}"
         >${App.icon("star", 13, star.on)}</button>`;
     }
-    return `<div class="mailbox-row${active}" data-key="${sel.key}">
+    return `<div class="mailbox-row${active}" data-key="${sel.key}"${indent}>
       <span class="mb-icon">${App.icon(iconName, 16)}</span>
       <span class="mailbox-name">${App.esc(name)}</span>${pin}${badge}</div>`;
   }
@@ -99,7 +106,8 @@ App.shell = (function () {
       for (const mb of acc.mailboxes) {
         if (!mb.favorite) continue;
         const key = "fav-" + mb.id;
-        const title = multi ? `${mb.display_name} — ${acc.label || acc.email}` : mb.display_name;
+        const path = mb.path || mb.display_name;
+        const title = multi ? `${path} — ${acc.label || acc.email}` : path;
         // `role` rides along because one bulk action is not the same action in
         // every folder: Delete files mail in Trash, and in Trash itself there is
         // nowhere left to file it — see app.bulk.js.
@@ -118,14 +126,19 @@ App.shell = (function () {
       html += `<div class="account-head"><span class="account-dot" style="background:${App.esc(acc.color)}"></span>
         <span class="account-label">${App.esc(accName)}</span>
         <button class="acc-add" data-account="${acc.id}" data-label="${App.esc(accName)}"
+          data-nesting="${acc.nesting ? 1 : 0}"
           title="New folder" aria-label="New folder in ${App.esc(accName)}"
           >${App.icon("plus", 14)}</button></div>`;
       for (const mb of acc.mailboxes) {
         const key = "mb-" + mb.id;
-        register({ key, title: mb.display_name, showAccount: false, ageTint: mb.role === "inbox",
+        // The title is the path, not the leaf: the header above the list has to
+        // say which "2024" is on screen when two parents each have one, and it
+        // is also what the bulk bar quotes back in "Delete all 812 in …".
+        register({ key, title: mb.path || mb.display_name, showAccount: false,
+                   ageTint: mb.role === "inbox",
                    role: mb.role, params: { mailbox_id: mb.id } });
         html += mailboxRow(selections[key], App.roleIcon(mb.role), mb.display_name, mb.unread,
-          activeKey, { id: mb.id, on: mb.favorite });
+          activeKey, { id: mb.id, on: mb.favorite }, "", mb.depth);
       }
     }
     tree.innerHTML = html;
@@ -146,7 +159,8 @@ App.shell = (function () {
       });
     });
     tree.querySelectorAll(".acc-add").forEach((el) => {
-      el.addEventListener("click", () => openFolder(el.dataset.account, el.dataset.label));
+      el.addEventListener("click", () =>
+        openFolder(el.dataset.account, el.dataset.label, el.dataset.nesting === "1"));
     });
     // A folder added or renamed since the last render has to reach the search
     // scope menu too, otherwise it offers a list of folders that no longer
@@ -671,9 +685,17 @@ App.shell = (function () {
   // --- New folder ---
   let folderAccountId = null;
 
-  function openFolder(accountId, label) {
+  function openFolder(accountId, label, nesting) {
     folderAccountId = accountId;
-    $("#folder-account-hint").textContent = `Created in ${label}.`;
+    // Nesting is offered only where it works, and that is the mail server's
+    // answer rather than a constant: the agent reads it off IMAP's LIST and the
+    // sidebar payload carries it per account (see app/routers/mailboxes.py).
+    // Proton Bridge cannot hold a folder inside a folder; Gmail, Dovecot and
+    // most others can, and this used to refuse them all.
+    $("#folder-account-hint").textContent = nesting
+      ? `Created in ${label}. Use / to nest: Archive/2024 makes 2024 inside Archive.`
+      : `Created in ${label}.`;
+    $("#folder-name").placeholder = nesting ? "Folder, or Parent/Folder" : "Folder name";
     setFolderStatus("");
     $("#folder-create").disabled = false;
     $("#folder-name").value = "";
@@ -694,11 +716,22 @@ App.shell = (function () {
     if (!name) return setFolderStatus("Enter a folder name", true);
     $("#folder-create").disabled = true;
     setFolderStatus("Creating…");
+    let res;
     try {
-      await App.api.createMailbox(folderAccountId, name);
+      res = await App.api.createMailbox(folderAccountId, name);
     } catch (e) {
       $("#folder-create").disabled = false;
       return setFolderStatus(e.message || "Could not create folder", true);
+    }
+    // An account with no agent has the folder already — the row is the folder,
+    // and the request that came back is the whole of it. Close onto a sidebar
+    // that shows it, rather than onto a promise: the version of this that said
+    // "queued once the agent syncs" to an imported account was describing an
+    // agent that does not exist, and the folder never turned up.
+    if (res && res.status === "created") {
+      sidebar = await App.api.mailboxes();
+      renderSidebar();
+      return closeFolder();
     }
     // The folder is made on the server by the agent, not here, so it cannot be
     // rendered yet — say so rather than closing onto an unchanged sidebar. The
@@ -812,7 +845,8 @@ App.shell = (function () {
     }
   }
 
-  return { boot, currentMailboxId, mailboxesFor, accounts, reloadList, goto, closeSettings, settingsOpen,
+  return { boot, currentMailboxId, mailboxesFor, accounts, reloadList, goto,
+           openSettings, closeSettings, settingsOpen,
            closeFolder, folderOpen, listSelector, currentTitle, currentRole,
            listTotal: () => listTotal,
            moveFolder, moveFolderAndOpen, openFocusedFolder, setFolderKeyFocus };

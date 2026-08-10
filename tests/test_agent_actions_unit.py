@@ -969,3 +969,75 @@ def test_a_hand_rolled_move_that_the_copy_already_finished_deletes_nothing():
 ])
 def test_hints_name_the_config_mistake_behind_a_failed_send(exc, expected):
     assert expected in agent_log.hint(exc)
+
+
+# --- Creating a folder --------------------------------------------------------
+
+
+class CreateClient:
+    """Just enough IMAP to watch a folder being made."""
+
+    def __init__(self, existing=()):
+        self.existing = set(existing)
+        self.created = []
+        self.subscribed = []
+
+    def folder_exists(self, name):
+        return name in self.existing
+
+    def create_folder(self, name):
+        self.created.append(name)
+        self.existing.add(name)
+
+    def subscribe_folder(self, name):
+        self.subscribed.append(name)
+
+
+def _create(payload, *, parent="", delimiter="/", existing=()):
+    client = CreateClient(existing)
+    bridge = type("B", (), {
+        "acc": Account(),
+        "ops": lambda _self: client,
+        "user_folder_parent": lambda _self: parent,
+        "folder_capabilities": lambda _self: {"delimiter": delimiter, "nesting": True},
+    })()
+    agent_actions.apply_action(RoleDB("custom"), bridge, AccountRow(),
+                               Action("create_folder", payload))
+    return client
+
+
+def test_a_flat_folder_gets_the_servers_namespace():
+    """Bridge refuses CREATE at the root: user folders belong under "Folders"."""
+    client = _create({"name": "Receipts", "segments": ["Receipts"]}, parent="Folders/")
+    assert client.created == ["Folders/Receipts"]
+    assert client.subscribed == ["Folders/Receipts"]
+
+
+def test_a_nested_folder_is_made_one_level_at_a_time():
+    """Some servers create the parents of a nested name for you and some answer
+    "no such parent mailbox". Making each level explicitly is the only version
+    that works on both."""
+    client = _create({"name": "Archive/2024/Q1", "segments": ["Archive", "2024", "Q1"]})
+    assert client.created == ["Archive", "Archive/2024", "Archive/2024/Q1"]
+
+
+def test_a_nested_folder_is_joined_with_the_servers_own_delimiter():
+    """"/" is what a person types; "." is what a Dovecot server wants between a
+    parent and a child, and nobody typing a name should have to know that."""
+    client = _create({"name": "Archive/2024", "segments": ["Archive", "2024"]},
+                     delimiter=".")
+    assert client.created == ["Archive", "Archive.2024"]
+
+
+def test_a_level_that_is_already_there_is_not_made_again():
+    """Idempotent: a retry after a timeout that actually landed must not fail
+    the action permanently on an ALREADYEXISTS."""
+    client = _create({"name": "Archive/2024", "segments": ["Archive", "2024"]},
+                     existing=("Archive",))
+    assert client.created == ["Archive/2024"]
+
+
+def test_an_action_from_before_nesting_still_works():
+    """A queue row written by an older server carries only `name`."""
+    client = _create({"name": "Receipts"})
+    assert client.created == ["Receipts"]

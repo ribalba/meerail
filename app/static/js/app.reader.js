@@ -423,9 +423,11 @@ App.reader = (function () {
     const el = document.createElement("div");
     el.className = "move-menu";
     el.innerHTML = folders.length
+      // The path, not the leaf: a menu offering three folders called "2024" is
+      // not a choice anybody can make.
       ? folders.map((mb) => `<button class="move-item" data-mailbox="${mb.id}">
           <span class="mm-icon">${App.icon(App.roleIcon(mb.role), 15)}</span>
-          <span class="mm-name">${App.esc(mb.display_name)}</span></button>`).join("")
+          <span class="mm-name">${App.esc(mb.path || mb.display_name)}</span></button>`).join("")
       : `<div class="move-empty">No other folders</div>`;
 
     el.addEventListener("click", (e) => {

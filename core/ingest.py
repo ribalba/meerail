@@ -63,19 +63,34 @@ PRUNE_BATCH = 200
 CONTENT_WINDOW_KEY = "content_window_months"
 
 
-def derive_role(imap_name: str, role_hint: str = "") -> str:
+# The separator a folder path is written with when nobody has said otherwise:
+# what the importer stores, what the New Folder box takes from the user, and
+# what every path the UI shows is joined with. A real server publishes its own
+# in LIST — see Account.folder_delimiter — and that one wins for imap_name.
+FOLDER_SEP = "/"
+
+
+def derive_role(imap_name: str, role_hint: str = "", sep: str = FOLDER_SEP) -> str:
     hint = (role_hint or "").strip().lower()
     if hint in _ROLE_BY_FLAG:
         return _ROLE_BY_FLAG[hint]
     if imap_name.upper() == "INBOX":
         return "inbox"
-    leaf = imap_name.rsplit("/", 1)[-1].lower()
+    leaf = _leaf(imap_name, sep).lower()
     return {"sent": "sent", "drafts": "drafts", "draft": "drafts", "trash": "trash",
             "junk": "junk", "spam": "junk", "archive": "archive"}.get(leaf, "custom")
 
 
-def _leaf(imap_name: str) -> str:
-    return imap_name.rsplit("/", 1)[-1]
+def _leaf(imap_name: str, sep: str = FOLDER_SEP) -> str:
+    """The last part of a folder's path — what the sidebar prints for it.
+
+    ``sep`` is the server's own hierarchy separator, which is "/" on Bridge and
+    Gmail and "." on plenty of Dovecot installs. It used to be "/" always, so on
+    a "."-delimited server every folder was displayed by its full path
+    ("INBOX.Archive.2024") and none of the ones named Archive or Sent took their
+    role. See Account.folder_delimiter, which the agent reports each pass.
+    """
+    return imap_name.rsplit(sep, 1)[-1] if sep else imap_name
 
 
 def get_or_create_account(db, email: str) -> Account:
@@ -89,6 +104,12 @@ def get_or_create_account(db, email: str) -> Account:
         db.flush()
         events.publish({"type": "accounts", "account": normalized})
     acc.last_agent_seen = utcnow()
+    # An agent is here, so this is not an account meerail owns the folders of —
+    # whatever it was flagged as before. Reached when an address that was
+    # imported off disk is later configured for real, and when the upgrade
+    # backfill guessed "local" for an account whose agent had simply not run
+    # yet. Either way the server is the authority from now on. See Account.local.
+    acc.local = False
     return acc
 
 
@@ -141,6 +162,11 @@ def register_folder(db, account: Account, imap_name: str, role_hint: str = "",
                     uidvalidity: int | None = None, uidnext: int | None = None,
                     sort_order: int = 0) -> Mailbox:
     """Upsert a mailbox row and return it (carrying the UID cursor)."""
+    # The server's own hierarchy separator, recorded at the top of the same pass
+    # (record_folder_capabilities). What hangs on it is the folder's *name*: on a
+    # "."-delimited server, splitting on "/" leaves the sidebar printing
+    # "INBOX.Archive.2024" and leaves a folder called Archive without its role.
+    sep = account.folder_delimiter or FOLDER_SEP
     mb = db.execute(
         select(Mailbox).where(Mailbox.account_id == account.id, Mailbox.imap_name == imap_name)
     ).scalar_one_or_none()
@@ -148,9 +174,15 @@ def register_folder(db, account: Account, imap_name: str, role_hint: str = "",
         mb = Mailbox(
             account_id=account.id,
             imap_name=imap_name,
-            display_name=_leaf(imap_name),
-            role=derive_role(imap_name, role_hint),
+            display_name=_leaf(imap_name, sep),
+            role=derive_role(imap_name, role_hint, sep),
             sort_order=sort_order,
+            # A folder registered for an account no agent syncs is one only
+            # meerail knows about — the importer's, in practice. Taken off the
+            # account rather than passed in because the agent clears that flag
+            # before it registers anything (get_or_create_account), so the two
+            # callers get the right answer without either of them saying so.
+            local=account.local,
         )
         db.add(mb)
         # Mirrors prune_mailboxes' removal event, so a folder appearing on the
@@ -183,12 +215,57 @@ def register_folder(db, account: Account, imap_name: str, role_hint: str = "",
         if mb.uidvalidity is not None and uidvalidity is not None and mb.uidvalidity != uidvalidity:
             mb.last_uid = 0
         if mb.role == "custom":
-            mb.role = derive_role(imap_name, role_hint)
+            mb.role = derive_role(imap_name, role_hint, sep)
+        # Rewritten rather than left as it was found: on the first pass after an
+        # upgrade the account's delimiter may only just have been reported, and
+        # every folder on a "."-delimited server is still stored under the full
+        # path it was given when "/" was assumed.
+        leaf = _leaf(imap_name, sep)
+        if mb.display_name != leaf:
+            mb.display_name = leaf
     if uidvalidity is not None:
         mb.uidvalidity = uidvalidity
     if uidnext is not None:
         mb.uidnext = uidnext
     db.flush()
+    return mb
+
+
+def ensure_local_folder(db, account: Account, path: str) -> Mailbox:
+    """Create a folder — and any parent it names — in an account with no agent.
+
+    The counterpart to register_folder for mail that came off disk rather than
+    off a server. There is nothing to ask and nothing to wait for: the row *is*
+    the folder, so unlike the queued create the UI can render it on the way back
+    from the request.
+
+    "Archive/2024/Q1" makes three folders, not one called "Archive/2024/Q1" with
+    a slash in its name. A path whose parents do not exist is otherwise a folder
+    that cannot be reached in a tree drawn from the ones that do, and the person
+    typing it plainly meant the nesting — an mbox export is full of it.
+
+    Every row it writes is marked local, which is what keeps prune_mailboxes off
+    them if an agent is ever configured for the address.
+    """
+    parts = [p for p in path.split(FOLDER_SEP) if p]
+    mb = None
+    added = 0
+    for depth in range(len(parts)):
+        name = FOLDER_SEP.join(parts[: depth + 1])
+        mb = db.execute(
+            select(Mailbox).where(Mailbox.account_id == account.id, Mailbox.imap_name == name)
+        ).scalar_one_or_none()
+        if mb is None:
+            mb = Mailbox(account_id=account.id, imap_name=name, display_name=parts[depth],
+                         role=derive_role(name), local=True)
+            db.add(mb)
+            db.flush()
+            added += 1
+    # Only when something is new. An import that is being re-run walks the same
+    # folders again, and an event per folder per run would tell every open
+    # sidebar to refetch for a tree that has not changed.
+    if added:
+        events.publish({"type": "folders", "account": account.email, "added": added})
     return mb
 
 
@@ -317,6 +394,27 @@ def record_content_window(db, months: int) -> None:
         set_={"value": value, "updated_at": utcnow()},
         where=Setting.value != value,
     ))
+
+
+def record_folder_capabilities(db, account: Account, caps: dict) -> None:
+    """Publish what this account's mail server lets a folder be called.
+
+    Per account rather than per install, because one meerail commonly holds a
+    Proton Bridge account that cannot nest folders beside a university IMAP
+    account that can — and the web app, which may be on another machine and has
+    no connection of its own, has to answer "may I type Archive/2024?"
+    differently for each. Rewritten on every pass, like the presentation fields
+    above: the server is the source of truth and it can change under us (a
+    Bridge upgrade, a migration to a different host).
+
+    See agent/imap.py::folder_capabilities for how the two values are read.
+    """
+    delimiter = str(caps.get("delimiter") or "")[:8]
+    nesting = bool(caps.get("nesting"))
+    if account.folder_delimiter != delimiter:
+        account.folder_delimiter = delimiter
+    if account.folder_nesting != nesting:
+        account.folder_nesting = nesting
 
 
 def note_ingested(account: Account, mailbox: Mailbox, stored: int) -> None:
@@ -665,10 +763,16 @@ def prune_mailboxes(db, account: Account, present_names: set[str], now=None) -> 
         .values(missing_since=None)
     )
 
+    # A local folder is absent from LIST by definition — it was made here and no
+    # server has ever heard of it — so the rule this pass exists to apply says
+    # nothing about it. Excluded rather than given the grace period, because an
+    # hour later the answer would be the same and the folder would go, taking
+    # the mail that lives only there with it. See Mailbox.local.
     absent = db.execute(
         select(Mailbox).where(
             Mailbox.account_id == account.id,
             Mailbox.imap_name.not_in(present_names),
+            Mailbox.local.is_(False),
         )
     ).scalars().all()
 

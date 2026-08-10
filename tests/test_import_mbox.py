@@ -379,10 +379,51 @@ def test_partial_emlx_gets_its_attachment_back(tmp_path, email):
         assert att.size_bytes == len(pdf)
 
 
-def test_sub_mailboxes_are_left_for_their_own_import(tmp_path, email):
-    """A mailbox with children keeps them inside itself. Sweeping up every .emlx
-    under the directory would file the children's mail into the parent's folder,
-    where nothing would ever separate it again."""
+def test_sub_mailboxes_come_in_as_folders_of_their_own(tmp_path, email):
+    """A mailbox with children keeps them inside itself, nested as deep as they
+    were filed, and one command brings the lot in — but each into its own folder.
+    Sweeping every .emlx under the directory into one would file a parent's and a
+    child's mail together, where nothing could ever separate it again."""
+    parent, child, deep = (f"{p}-{uuid.uuid4().hex}@t"
+                           for p in ("parent", "child", "deep"))
+    box = apple_mailbox(tmp_path, [
+        make_message(f"<{parent}>", "Parent mail", "x@y.com", email, "body", T0),
+    ], name="Lists.mbox")
+    announce = apple_mailbox(box, [
+        make_message(f"<{child}>", "Child mail", "x@y.com", email, "body", T0),
+    ], name="Announce.mbox")
+    apple_mailbox(announce, [
+        make_message(f"<{deep}>", "Deep mail", "x@y.com", email, "body", T0),
+    ], name="2019.mbox")
+
+    assert import_mbox.main([str(box), "--account", email, "--folder", "Lists",
+                             "--no-index"]) == 0
+
+    with SessionLocal() as db:
+        account = account_row(db, email)
+        assert folder_row(db, account, "Lists").total_count == 1
+        assert folder_row(db, account, "Lists/Announce").total_count == 1
+        assert folder_row(db, account, "Lists/Announce/2019").total_count == 1
+        placed = db.execute(
+            select(Message.message_id, Mailbox.imap_name)
+            .join(MessageLocation, MessageLocation.message_pk == Message.id)
+            .join(Mailbox, Mailbox.id == MessageLocation.mailbox_id)
+            .where(Message.account_id == account.id)
+        ).all()
+        assert dict(placed) == {parent: "Lists", child: "Lists/Announce",
+                                deep: "Lists/Announce/2019"}
+
+    # And again: a tree re-imports nothing twice either.
+    assert import_mbox.main([str(box), "--account", email, "--folder", "Lists",
+                             "--no-index"]) == 0
+    with SessionLocal() as db:
+        account = account_row(db, email)
+        assert db.scalar(
+            select(func.count()).select_from(Message).where(Message.account_id == account.id)
+        ) == 3
+
+
+def test_no_recurse_imports_only_the_mailbox_named(tmp_path, email):
     parent, child = (f"{p}-{uuid.uuid4().hex}@t" for p in ("parent", "child"))
     box = apple_mailbox(tmp_path, [
         make_message(f"<{parent}>", "Parent mail", "x@y.com", email, "body", T0),
@@ -392,20 +433,96 @@ def test_sub_mailboxes_are_left_for_their_own_import(tmp_path, email):
     ], name="Announce.mbox")
 
     assert import_mbox.main([str(box), "--account", email, "--folder", "Lists",
-                             "--no-index"]) == 0
+                             "--no-recurse", "--no-index"]) == 0
 
     with SessionLocal() as db:
         account = account_row(db, email)
         assert db.execute(
             select(Message.message_id).where(Message.account_id == account.id)
         ).scalars().all() == [parent]
+        assert db.execute(
+            select(Mailbox).where(Mailbox.account_id == account.id,
+                                  Mailbox.imap_name == "Lists/Announce")
+        ).scalar_one_or_none() is None
 
-    # The child is a mailbox of its own, and imports as one.
-    assert import_mbox.main([str(box / "Announce.mbox"), "--account", email,
-                             "--folder", "Lists/Announce", "--no-index"]) == 0
+
+def test_a_mailbox_holding_only_sub_mailboxes_names_the_folder_they_land_under(
+        tmp_path, email):
+    """01-GCS.mbox holds nothing but mailboxes — the shape most of an Apple Mail
+    account's top level has. It contributes no mail of its own, and with no
+    --folder to hang them off its own name is the one that makes sense: INBOX/API
+    Errors is not where anybody filed anything.
+
+    The container does get a folder row, holding nothing. It used not to, back
+    when the sidebar drew a flat list and an empty row was pure furniture — but
+    the sidebar nests now, and the parent is what the nesting is drawn from
+    (app/routers/mailboxes.py::_chains). Without it the two children come back
+    as two unrelated top-level folders called "API Errors" and "DNS Errors",
+    which is precisely the grouping this import was preserving."""
+    one, two = (f"{p}-{uuid.uuid4().hex}@t" for p in ("one", "two"))
+    box = tmp_path / "01-GCS.mbox"
+    box.mkdir()
+    (box / "Info.plist").write_bytes(b"<plist/>")
+    apple_mailbox(box, [
+        make_message(f"<{one}>", "API mail", "x@y.com", email, "body", T0),
+    ], name="API Errors.mbox")
+    apple_mailbox(box, [
+        make_message(f"<{two}>", "DNS mail", "x@y.com", email, "body", T0),
+    ], name="DNS Errors.mbox")
+
+    assert import_mbox.main([str(box), "--account", email, "--no-index"]) == 0
+
     with SessionLocal() as db:
         account = account_row(db, email)
-        assert folder_row(db, account, "Lists/Announce").total_count == 1
+        assert folder_row(db, account, "01-GCS/API Errors").total_count == 1
+        assert folder_row(db, account, "01-GCS/DNS Errors").total_count == 1
+        # The container itself: present so the two hang off something, empty
+        # because nothing was filed in it.
+        container = db.execute(
+            select(Mailbox).where(Mailbox.account_id == account.id,
+                                  Mailbox.imap_name == "01-GCS")
+        ).scalar_one()
+        assert container.total_count == 0
+        assert container.local is True
+
+
+def test_a_lone_sub_mailbox_still_hangs_off_its_parents_name(tmp_path):
+    """One child rather than six: the folder still comes from the mailbox named,
+    not from INBOX, because what was pointed at holds no mail of its own."""
+    box = tmp_path / "01-GCS.mbox"
+    box.mkdir()
+    apple_mailbox(box, [
+        make_message("<one@t>", "API mail", "x@y.com", "a@b.c", "body", T0),
+    ], name="API Errors.mbox")
+
+    targets = import_mbox._targets(box, None, recurse=True)
+    assert [name for name, _ in targets] == ["01-GCS/API Errors"]
+
+
+def test_a_quoted_path_keeps_its_tilde_and_is_expanded_here(tmp_path, email, monkeypatch):
+    """A mailbox name with a space in it invites quotes, and a quoted ~ is one
+    the shell never expands — so 'x/My Mail.mbox' arrived as a literal ~ and the
+    import died on a path that does not exist."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    mid = f"t-{uuid.uuid4().hex}@t"
+    apple_mailbox(home, [
+        make_message(f"<{mid}>", "Tilde mail", "x@y.com", email, "body", T0),
+    ], name="My Mail.mbox")
+
+    assert import_mbox.main(["~/My Mail.mbox", "--account", email,
+                             "--folder", "My Mail", "--no-index"]) == 0
+
+    with SessionLocal() as db:
+        account = account_row(db, email)
+        assert folder_row(db, account, "My Mail").total_count == 1
+
+
+def test_a_path_that_is_not_there_says_so(tmp_path):
+    with pytest.raises(SystemExit) as exc:
+        import_mbox.main([str(tmp_path / "nope.mbox"), "--no-index"])
+    assert "no such file or directory" in str(exc.value)
 
 
 def test_exported_mailbox_folder_reads_the_mbox_inside(tmp_path, email):
