@@ -654,15 +654,26 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
 .msg-body-md pre code { background: none; border: none; padding: 0; }
 
 .attachments { display: flex; flex-wrap: wrap; gap: .5rem; padding: .3rem 1.1rem 1rem; }
-/* Chip + its robot, kept together so the pair wraps as one. The robot has to be
-   a sibling of the chip rather than inside it — the chip is an <a>, and a button
+/* Chip + its buttons, kept together so the group wraps as one. They have to be
+   siblings of the chip rather than inside it — the chip is an <a>, and a button
    in a link navigates when pressed. Centred rather than stretched: beside a
    preview chip a full-height button would be a 96px bar. */
 .att-item { display: flex; align-items: center; gap: .25rem; }
-.att-ai { display: flex; align-items: center; justify-content: center; cursor: pointer;
+/* Stacked, save above ask, so the pair takes one button's width beside the chip
+   instead of two — a row of preview chips is already 132px each, and widening
+   every one of them by a second button costs a column of the wrap. */
+.att-actions { display: flex; flex-direction: column; gap: .25rem; align-self: center; }
+.att-btn { display: flex; align-items: center; justify-content: center; cursor: pointer;
   border: 1px solid var(--border); border-radius: 8px; background: var(--bg-elev);
-  color: var(--text-faint); padding: .4rem; align-self: center; }
-.att-ai:hover { color: var(--accent); border-color: var(--accent); }
+  color: var(--text-faint); padding: .4rem; }
+.att-btn:hover { color: var(--accent); border-color: var(--accent); }
+/* Reads as one of the chips rather than as a toolbar button: it sits in the same
+   wrapping row and does the same kind of thing, only for all of them at once. */
+.att-all { display: flex; align-items: center; align-self: center; gap: .45rem;
+  border: 1px solid var(--border); border-radius: 8px; padding: .4rem .6rem;
+  font-size: .82rem; text-decoration: none; color: var(--text-muted);
+  background: var(--bg-elev); }
+.att-all:hover { color: var(--accent); border-color: var(--accent); }
 .attachment-chip { display: flex; align-items: center; gap: .45rem; border: 1px solid var(--border);
   border-radius: 8px; padding: .4rem .6rem; font-size: .82rem; text-decoration: none; color: var(--text);
   background: var(--bg-elev); }
@@ -1299,24 +1310,27 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
 
 /* Background power save — see app.power.js.
 
-   Below the login gate and above everything else. It covers the app rather than
-   sitting in a corner because what is behind it has stopped being maintained:
-   the event stream is closed and the polls are off, so those rows are as old as
-   the pause is long. A corner badge would leave stale mail looking live. */
-.power-save {
-  position: fixed; inset: 0; z-index: 550;
-  display: flex; align-items: center; justify-content: center;
-  background: var(--bg-elev); cursor: pointer;
+   A bar at the top, built like the connection bar at the bottom, and grey
+   rather than red: nothing is wrong here, the app is only standing still. It
+   used to cover the whole window on the grounds that the mail behind it is as
+   old as the pause — true, but the pause ends the moment the window comes back,
+   and a full-screen curtain made a three-second alt-tab look like a failure.
+   Top edge, so the two bars never sit on top of each other.
+
+   No entry animation, unlike .conn-bar: the .is-power-save rule below pauses
+   every animation in the document, and this element is raised inside the same
+   frame that adds the class — a slide-in would freeze half off-screen. */
+.power-bar {
+  position: fixed; left: 0; right: 0; top: 0; z-index: 500;
+  display: flex; align-items: center; justify-content: center; gap: .45rem;
+  padding: .4rem .8rem; cursor: pointer;
+  font-size: .8rem; color: var(--text-muted);
+  background: var(--bg-elev); border-bottom: 1px solid var(--border);
+  box-shadow: 0 2px 10px light-dark(rgba(0, 0, 0, .10), rgba(0, 0, 0, .35));
 }
-.power-save[hidden] { display: none; }
-.ps-card {
-  width: min(380px, 84vw); padding: 2rem 1.8rem; text-align: center;
-  color: var(--text-muted);
-}
-.ps-icon { color: var(--text-muted); opacity: .65; margin-bottom: .5rem; }
-.ps-card h2 { margin: 0 0 .5rem; font-size: 1.05rem; font-weight: 600; color: var(--text); }
-.ps-card p { margin: 0 0 .5rem; font-size: .85rem; line-height: 1.5; }
-.ps-hint { font-size: .78rem !important; opacity: .75; }
+.power-bar[hidden] { display: none; }
+.pb-icon { flex: 0 0 auto; opacity: .7; }
+.pb-hint { opacity: .7; }
 
 /* The other half of standing down, and the half that costs the most on a
    laptop: every looping animation in the app, off in one rule.
@@ -1736,6 +1750,10 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
   .mailbox-tree, .message-list, .reader-content {
     padding-bottom: calc(1.4rem + env(safe-area-inset-bottom)); }
   .conn-bar { padding-bottom: calc(.5rem + env(safe-area-inset-bottom)); }
+  /* The bar has to stay one line at phone widths, and a tap anywhere wakes the
+     app anyway — so the sentence that says so is the part that goes. */
+  .power-bar { padding-top: calc(.4rem + env(safe-area-inset-top)); }
+  .pb-hint { display: none; }
 
   /* Writing mail takes the whole screen — a draggable, resizable window is a
      desktop affordance, and there is nothing behind it worth seeing anyway. */

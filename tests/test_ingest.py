@@ -5,8 +5,10 @@ agent's sync loop makes — and assert the results through the server's read API
 (Formerly test_agent_protocol.py, which drove the deleted /api/agent/* HTTP API.)
 """
 
+import io
 import sys
 import uuid
+import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -961,6 +963,54 @@ def test_inline_disposition_is_allowlisted(account):
     # executing script on our own origin.
     _, _, h = api_bytes(f"/api/attachments/{txt['id']}?inline=1")
     assert h["Content-Disposition"].startswith("attachment;")
+
+
+def test_all_attachments_download_as_one_zip(account):
+    """"Download all" hands back every stored attachment in a single archive."""
+    email, aid = account["email"], account["id"]
+    mid = f"zip-{uuid.uuid4().hex}@t"
+    raw = make_message(f"<{mid}>", "Zip me up", "x@y.com", email, "body", T0,
+                       pdf_text="Report", text_attachment=b"just some notes", png=True)
+    dbfixture.ingest_raw_message(email, raw, uid=1)
+
+    msg = _detail_by_subject(aid, "Zip me up")
+    code, body, headers = api_bytes(f"/api/messages/{msg['id']}/attachments.zip")
+    assert code == 200
+    assert headers["Content-Type"] == "application/zip"
+    assert headers["Content-Disposition"].startswith("attachment;")
+    assert headers["X-Content-Type-Options"] == "nosniff"
+
+    with zipfile.ZipFile(io.BytesIO(body)) as zf:
+        assert sorted(zf.namelist()) == ["notes.txt", "photo.png", "report.pdf"]
+        assert zf.read("notes.txt") == b"just some notes"
+        # The bytes in the archive are the bytes the single-file route serves,
+        # so a zip is never a second, differently-mangled copy.
+        pdf = next(a for a in msg["attachments"] if a["filename"] == "report.pdf")
+        assert zf.read("report.pdf") == api_bytes(f"/api/attachments/{pdf['id']}")[1]
+
+    # Nothing attached is not an error worth a zero-entry archive.
+    plain = make_message(f"<plain-{uuid.uuid4().hex}@t>", "Nothing attached", "x@y.com",
+                         email, "body", T0)
+    dbfixture.ingest_raw_message(email, plain, uid=2)
+    bare = _detail_by_subject(aid, "Nothing attached")
+    assert api("GET", f"/api/messages/{bare['id']}/attachments.zip")[0] == 404
+    assert api("GET", "/api/messages/99999999/attachments.zip")[0] == 404
+
+
+def test_zip_entry_names_are_defanged_and_deduped():
+    """A sender names the files; the archive is unpacked on someone else's disk."""
+    from app.routers.messages import _zip_name
+
+    taken: set[str] = set()
+    # Flattened to one component and never starting with a dot: whatever a
+    # tolerant unzip does with this, it does it inside the folder it was told to.
+    assert _zip_name("../../.ssh/authorized_keys", taken) == "_.._.ssh_authorized_keys"
+    assert _zip_name("invoice.pdf", taken) == "invoice.pdf"
+    assert _zip_name("invoice.pdf", taken) == "invoice (2).pdf"
+    assert _zip_name("INVOICE.PDF", taken) == "INVOICE (3).PDF"   # case-insensitive filesystems
+    assert _zip_name("", taken) == "attachment"
+    assert _zip_name("no-extension", taken) == "no-extension"
+    assert _zip_name("no-extension", taken) == "no-extension (2)"
 
 
 def test_inline_attachments_are_not_previewed(account):

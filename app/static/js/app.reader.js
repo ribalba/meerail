@@ -844,9 +844,12 @@ App.reader = (function () {
         const face = a.has_thumb
           ? `<img class="att-thumb" src="/api/attachments/${a.id}/thumb" alt="" loading="lazy">`
           : App.icon("paperclip", 15);
-        // The robot is a sibling of the chip, not a child: the chip is an <a>,
-        // and a button inside a link is invalid markup that navigates when you
-        // press it. It is offered only where there is something to read — text
+        // Save and ask, stacked beside the chip rather than in it: the chip is
+        // an <a>, and a button inside a link is invalid markup that navigates
+        // when you press it. Save comes first because a viewable chip — a PDF,
+        // a photo — opens in a tab instead of downloading, so without it the
+        // only way to keep the file is a right-click most people never try.
+        // The robot is offered only where there is something to read — text
         // Tika extracted, or a picture a model can look at — so it never
         // appears on a zip it could only fail on.
         return `<div class="att-item">
@@ -857,14 +860,34 @@ App.reader = (function () {
               <span class="att-name">${App.esc(a.filename)}</span>
               <span class="att-size">${App.fmtSize(a.size)}</span>
             </span>
-          </a>${explainable(a) ? `<button class="att-ai" data-att="${a.id}"
-            title="What is this file?" aria-label="Explain ${App.esc(a.filename)}"
-            >${App.icon("robot", 15)}</button>` : ""}
+          </a>
+          <span class="att-actions">
+            <a class="att-btn" href="/api/attachments/${a.id}"
+              download="${App.esc(a.filename)}" title="Download"
+              aria-label="Download ${App.esc(a.filename)}"
+              >${App.icon("download", 15)}</a>
+            ${explainable(a) ? `<button class="att-btn att-ai" data-att="${a.id}"
+              title="What is this file?" aria-label="Explain ${App.esc(a.filename)}"
+              >${App.icon("robot", 15)}</button>` : ""}
+          </span>
         </div>`;
       }).join("");
+      // One archive of the lot, once there is more than one to save. Only the
+      // stored ones count towards that: a pruned row is a name with no bytes
+      // behind it, and the zip leaves those out.
+      const savable = m.attachments.filter((a) => a.stored !== false);
+      if (savable.length > 1) {
+        at.insertAdjacentHTML("beforeend", `
+          <a class="att-all" href="/api/messages/${m.id}/attachments.zip" download
+              title="Download all ${savable.length} attachments as a zip">
+            ${App.icon("download", 15)}
+            <span>Download all (${savable.length})</span>
+          </a>`);
+      }
+      const items = at.querySelectorAll(".att-item");
       m.attachments.forEach((a, i) => {
         if (a.match_contexts && a.match_contexts.length) {
-          at.children[i].querySelector(".attachment-chip").classList.add("has-hit");
+          items[i].querySelector(".attachment-chip").classList.add("has-hit");
         }
       });
       at.addEventListener("click", (e) => {

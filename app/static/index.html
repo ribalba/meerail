@@ -189,6 +189,24 @@
           </p>
         </div>
 
+        <h3 class="settings-heading">Power</h3>
+        <div class="settings-section">
+          <label class="settings-check" for="power-save-on">
+            <input type="checkbox" id="power-save-on" />
+            <span>Pause while in the background</span>
+          </label>
+          <p class="muted small">
+            A few seconds after the window goes behind another one or is
+            minimised, meerail stops polling, closes its live connection and
+            stops animating, and says so in a bar at the top. Bringing it back
+            to the front reloads what is on screen. Turned off, it keeps
+            everything running in the background — no bar, no pause, and a list
+            that is already up to date when you return, at the cost of the work
+            it takes to keep it that way. Mail is collected by the agent either
+            way, so nothing is ever missed. Stored in this browser only.
+          </p>
+        </div>
+
         <h3 class="settings-heading">Composing</h3>
         <div class="settings-section">
           <label class="settings-check" for="compose-html-default">
@@ -678,21 +696,18 @@
     <span>Connection to the server lost — retrying…</span>
   </div>
 
-  <!-- Background power save — raised by app.power.js. Covers the app because
-       what is behind it has stopped being maintained: the stream is closed and
-       the polls are off, so the mail under here is as old as the pause. -->
-  <div class="power-save" id="power-save" role="status" hidden>
-    <div class="ps-card">
-      <svg class="ps-icon" viewBox="0 0 24 24" width="34" height="34" fill="none"
-           stroke="currentColor" stroke-width="1.6" stroke-linecap="round"
-           stroke-linejoin="round" aria-hidden="true">
-        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
-      </svg>
-      <h2>Paused in the background</h2>
-      <p>meerail has stopped polling, streaming and animating to save power.
-         Nothing is being missed — the agent goes on collecting mail.</p>
-      <p class="ps-hint">Click here or bring the window to the front to carry on.</p>
-    </div>
+  <!-- Background power save — raised by app.power.js. A bar rather than a
+       cover: what is behind it is stale (the stream is closed and the polls are
+       off), but saying so in one line beats hiding a window the user is about
+       to come back to. Mirrors the connection bar at the other edge. -->
+  <div class="power-bar" id="power-save" role="status" hidden>
+    <svg class="pb-icon" viewBox="0 0 24 24" width="15" height="15" fill="none"
+         stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+         stroke-linejoin="round" aria-hidden="true">
+      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+    </svg>
+    <span>Paused in the background — polling, streaming and animations are off.</span>
+    <span class="pb-hint">Click to carry on.</span>
   </div>
 
   <script src="/static/js/app.core.js"></script>

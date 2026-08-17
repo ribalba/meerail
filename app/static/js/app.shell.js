@@ -678,6 +678,7 @@ App.shell = (function () {
     $("#theme-mode").value = App.theme.mode();
     $("#age-days").value = App.list.ageDays();
     $("#compose-html-default").checked = App.compose.htmlDefault();
+    $("#power-save-on").checked = App.power.enabled();
   }
   function closeSettings() { $("#settings-modal").hidden = true; }
   function settingsOpen() { return !$("#settings-modal").hidden; }
@@ -787,6 +788,10 @@ App.shell = (function () {
     // and the setting is not entitled to overrule it mid-sentence.
     $("#compose-html-default").addEventListener("change", (e) =>
       App.compose.setHtmlDefault(e.target.checked));
+    // Immediate too, and it has to be: unticking this is how you get out of a
+    // pause you did not want, so it cannot wait for anything.
+    $("#power-save-on").addEventListener("change", (e) =>
+      App.power.setEnabled(e.target.checked));
   }
 
   function selectDefault() {

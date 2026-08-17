@@ -1,7 +1,12 @@
 """Parse raw RFC822 bytes into the structured pieces meerail stores.
 
 Uses the stdlib ``email`` package with the modern ``policy.default`` so header
-decoding, ``get_body`` and ``iter_attachments`` do the MIME-tree walking for us.
+decoding, ``get_body`` and ``iter_attachments`` do most of the MIME-tree walking
+for us. Two places where their answer is not the one a mail reader wants are
+corrected here, both to do with a part that carries other parts: ``get_body``
+stops short of a message attached to a message, and ``iter_attachments`` will
+hand back a container as though it were a file. See ``_body_with_forwards`` and
+``_attachment_parts``.
 """
 
 from __future__ import annotations
@@ -13,8 +18,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email import message_from_bytes
 from email.message import EmailMessage
+from email.policy import compat32
 from email.policy import default as default_policy
 from email.utils import getaddresses, parsedate_to_datetime
+from html import escape as html_escape
 
 from selectolax.parser import HTMLParser
 
@@ -245,6 +252,223 @@ def _spelled_href(node, text: str) -> str:
     return "" if shown and _bare_url(shown) == _bare_url(href) else href
 
 
+# A forward of a forward of a forward is something people do; a hundred of them
+# nested is something a message is built to do. Depth bounds the recursion, the
+# character budget bounds what one message can add to the corpus, and both are
+# far above any mail anybody has written by hand.
+_MAX_FORWARD_DEPTH = 4
+_MAX_FORWARD_CHARS = 500_000
+_MAX_PART_DEPTH = 8
+
+# The headers a client writes above a forward it quotes inline, in the order it
+# writes them. Bcc is not among them for the same reason it is left out of what
+# the summariser is given: it is the header whose point is not to be passed on.
+_FORWARD_HEADERS = ("From", "Date", "Subject", "To", "Cc")
+_FORWARD_RULE = "---------- Forwarded message ----------"
+
+
+def _inner_message(part: EmailMessage) -> EmailMessage | None:
+    """The message inside a ``message/rfc822`` part, or None if it holds no
+    parsed message — a malformed part whose payload never became one."""
+    try:
+        payload = part.get_payload()
+    except Exception:
+        return None
+    if isinstance(payload, list) and payload and isinstance(payload[0], EmailMessage):
+        return payload[0]
+    return None
+
+
+def _forwarded_parts(part: EmailMessage, depth: int = 0):
+    """Every ``message/rfc822`` in this message's own tree, outermost only.
+
+    The walk stops at each attached message instead of descending into it: what
+    is inside one belongs to *that* message's body, and ``_body_with_forwards``
+    recurses to get it — under a depth bound, which a flat walk would have
+    nowhere to apply.
+    """
+    if depth >= _MAX_PART_DEPTH or not part.is_multipart():
+        return
+    try:
+        children = list(part.iter_parts())
+    except Exception:
+        return
+    for child in children:
+        if child.get_content_type() == "message/rfc822":
+            yield child
+        elif child.get_content_maintype() == "multipart":
+            yield from _forwarded_parts(child, depth + 1)
+
+
+def _forward_headers(inner: EmailMessage) -> list[str]:
+    lines = []
+    for name in _FORWARD_HEADERS:
+        try:
+            value = _WS_RE.sub(" ", strip_nuls(str(inner.get(name, "")))).strip()
+        except Exception:
+            continue
+        if value:
+            lines.append(f"{name}: {value[:998]}")
+    return lines
+
+
+def _as_html(text: str) -> str:
+    """Plain text as HTML, for a forward whose halves disagree about format —
+    an HTML original under a plain covering note, or the other way round. One of
+    the two has to be converted or the composed body would drop it."""
+    return '<div style="white-space:pre-wrap">' + html_escape(text) + "</div>"
+
+
+def _body_with_forwards(
+    msg: EmailMessage, budget: list[int], depth: int = 0
+) -> tuple[str, str]:
+    """This message's body, with any message it carries written out below it.
+
+    A forward made by attaching the original — what Thunderbird's "forward as
+    attachment" produces, and what any *signed* forward has to be, since the
+    signature covers a message that cannot then be edited down into a quote —
+    puts the whole of what was forwarded in a ``message/rfc822`` part.
+    ``get_body`` does not descend into one: ``_find_body`` returns at any part
+    whose maintype is not ``text`` or ``multipart``. So a body taken from it
+    alone is the covering note and nothing else, and the reader shows a forward
+    with the forwarded message missing — which is the part the person was sent.
+
+    The attached message is therefore spelled out here, under the same rule and
+    headers a client writes when it quotes one inline. It goes into body_text
+    and body_html both, so it reaches the reader, the search corpus and the
+    summariser by the paths those already use, rather than needing to be found
+    again at each of them.
+
+    A message with nothing attached to it comes back exactly as ``get_body``
+    gave it, empty HTML and all: the composition below only runs when there is
+    a forward to compose in, so the ordinary mail that is most of a mailbox
+    takes the path it always took.
+    """
+    text = _get_body(msg, "plain")
+    html = _get_body(msg, "html")
+    if depth >= _MAX_FORWARD_DEPTH:
+        return text, html
+
+    forwards: list[tuple[list[str], str, str]] = []      # headers, text, html
+    for part in _forwarded_parts(msg):
+        if budget[0] <= 0:
+            break
+        inner = _inner_message(part)
+        if inner is None:
+            continue
+        inner_text, inner_html = _body_with_forwards(inner, budget, depth + 1)
+        budget[0] -= len(inner_text) + len(inner_html)
+        forwards.append((_forward_headers(inner),
+                         inner_text or html_to_text(inner_html),
+                         inner_html))
+
+    if not forwards:
+        return text, html
+
+    # An HTML-only note keeps its flattening in body_text, which it would not
+    # otherwise get: an empty body_text is a signal to fall back to the HTML
+    # (see build_search_text and threadtext.body_of), and a body_text holding
+    # only the forward would silence that fallback and lose the note.
+    own_text = text or html_to_text(html)
+    body_text = "\n\n".join(part for part in [
+        own_text,
+        *("\n".join([_FORWARD_RULE, *headers]) + "\n\n" + ftext
+          for headers, ftext, _ in forwards),
+    ] if part)
+
+    if not html and not any(fhtml for _, _, fhtml in forwards):
+        return body_text, ""
+    pieces = [html or _as_html(own_text)]
+    for headers, ftext, fhtml in forwards:
+        pieces.append(
+            '<div style="margin:1.5em 0 0.5em"><b>' + html_escape(_FORWARD_RULE)
+            + "</b><br>" + "<br>".join(html_escape(h) for h in headers) + "</div>"
+            + (fhtml or _as_html(ftext))
+        )
+    return body_text, "".join(pieces)
+
+
+def _attachment_parts(msg: EmailMessage, depth: int = 0):
+    """The parts of this message that are files, containers opened up.
+
+    ``iter_attachments`` inverts ``get_body``'s logic rather than sharing it,
+    and only recognises four shapes as body (text/plain, text/html,
+    multipart/related, multipart/alternative). A ``multipart/signed`` message —
+    every OpenPGP-signed mail there is — wraps its body in a ``multipart/mixed``,
+    which is on neither list, so the whole body subtree is handed back as though
+    it were an attachment. Stored, that is a file named "attachment" holding
+    nothing (a container has no payload of its own to decode), while the real
+    attachments *inside* it are never reached at all, because the walk stopped
+    at their parent.
+
+    So a container is descended into instead of stored. Its own
+    ``iter_attachments`` then applies the ordinary rule one level down, which is
+    where the body and the files actually are.
+    """
+    if depth >= _MAX_PART_DEPTH:
+        return
+    try:
+        parts = list(msg.iter_attachments())
+    except Exception:
+        return
+    for part in parts:
+        if part.get_content_maintype() == "multipart":
+            yield from _attachment_parts(part, depth + 1)
+        else:
+            yield part
+
+
+def _attachment_bytes(part: EmailMessage) -> bytes:
+    """The part's payload, including when that payload is itself a message.
+
+    ``get_payload(decode=True)`` answers None for ``message/rfc822``: there is
+    no encoded string to decode, the payload is a parsed message object. A
+    forward stored through it was a zero-byte file. Serialising the message back
+    out gives the ``.eml`` every other client offers to save, and re-generating
+    is the only way to it — the original bytes of a sub-part are not kept.
+    """
+    if part.get_content_type() == "message/rfc822":
+        inner = _inner_message(part)
+        if inner is None:
+            return b""
+        try:
+            return inner.as_bytes()
+        except Exception:
+            # policy.default re-folds every header as it writes, and refuses
+            # ones the sender left unencodable. compat32 copies them out as they
+            # came, which for a file meant to be a faithful copy is the better
+            # answer anyway; it is second only because it does not re-wrap.
+            try:
+                return inner.as_bytes(policy=compat32)
+            except Exception:
+                return b""
+    try:
+        return part.get_payload(decode=True) or b""
+    except Exception:
+        return b""
+
+
+def _attachment_filename(part: EmailMessage) -> str:
+    """What to call the part when it is saved.
+
+    An attached message usually names itself in the Content-Type — Thunderbird
+    puts the forwarded subject there — but not always, and a file called
+    "attachment" with a message in it tells the person nothing about which
+    forward they are looking at. The subject is the name they would recognise.
+    """
+    name = strip_nuls(part.get_filename() or "").strip()[:1000]
+    if part.get_content_type() == "message/rfc822":
+        if not name:
+            inner = _inner_message(part)
+            subject = ""
+            if inner is not None:
+                subject = _WS_RE.sub(" ", strip_nuls(str(inner.get("Subject", "")))).strip()
+            name = (subject or "forwarded message")[:1000]
+        if not name.lower().endswith(".eml"):
+            name += ".eml"
+    return name or "attachment"
+
+
 def normalize_subject(subject: str) -> str:
     s = _SUBJECT_PREFIX_RE.sub("", subject or "")
     return _WS_RE.sub(" ", s).strip().lower()
@@ -331,25 +555,21 @@ def parse_email(raw: bytes) -> ParsedEmail:
     except (TypeError, ValueError, IndexError):
         date_sent = None
 
-    body_text = _get_body(msg, "plain")
-    body_html = _get_body(msg, "html")
+    body_text, body_html = _body_with_forwards(msg, [_MAX_FORWARD_CHARS])
     text_for_snippet = body_text or html_to_text(body_html)
     snippet = make_snippet(text_for_snippet)
 
     attachments: list[ParsedAttachment] = []
     seen_cids: set[str] = set()
-    for part in msg.iter_attachments():
-        try:
-            payload = part.get_payload(decode=True) or b""
-        except Exception:
-            payload = b""
+    for part in _attachment_parts(msg):
+        payload = _attachment_bytes(part)
         cid = part.get("Content-ID")
         if cid:
             cid = strip_nuls(cid).strip().strip("<>").strip()
             seen_cids.add(cid)
         attachments.append(
             ParsedAttachment(
-                filename=strip_nuls(part.get_filename() or "attachment")[:1024],
+                filename=_attachment_filename(part)[:1024],
                 content_type=_content_type(part),
                 content_id=(cid[:512] if cid else None),
                 is_inline=(part.get_content_disposition() == "inline"),

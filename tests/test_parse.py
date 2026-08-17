@@ -85,6 +85,166 @@ def test_attachments_parsed():
     assert "application/pdf" in types
 
 
+# A forward the way Thunderbird makes one when the account signs its mail: the
+# original is attached whole (it has to be — the signature covers a message that
+# cannot then be edited down into a quote), and the body the person wrote is one
+# part of a multipart/mixed that is itself wrapped in the signature. Both halves
+# of that shape used to lose something: get_body stopped at the covering note, so
+# the forward never reached the reader, and iter_attachments handed back the
+# mixed container as though it were a file, so the message showed one empty
+# attachment and none of its real ones.
+_SIGNED_FORWARD = """\
+Message-ID: <signed@x>
+Subject: Fwd: the mission
+From: Markus <markus@example.com>
+To: me@proton.me
+Date: {date}
+MIME-Version: 1.0
+Content-Type: multipart/signed; boundary="sig"; micalg=pgp-sha512;
+ protocol="application/pgp-signature"
+
+--sig
+Content-Type: multipart/mixed; boundary="mix"
+
+--mix
+Content-Type: text/plain; charset=utf-8
+
+COVERNOTE is this for you?
+
+--mix
+Content-Type: message/rfc822; name="the mission"
+
+Message-ID: <inner@x>
+From: Christian <christian@example.com>
+To: markus@example.com
+Subject: INNERSUBJECT the mission
+Date: {date}
+Content-Type: text/plain; charset=utf-8
+
+INNERBODY the whole forwarded thing
+
+--mix--
+
+--sig
+Content-Type: application/pgp-signature; name=OpenPGP_signature
+Content-Disposition: attachment; filename=OpenPGP_signature
+
+-----BEGIN PGP SIGNATURE-----
+SIGBYTES
+-----END PGP SIGNATURE-----
+
+--sig--
+"""
+
+
+def _signed_forward() -> bytes:
+    return _SIGNED_FORWARD.format(date=format_datetime(WHEN)).encode()
+
+
+def test_attached_message_is_inlined_into_the_body():
+    p = parse_email(_signed_forward())
+    assert "COVERNOTE" in p.body_text          # the note the forwarder wrote
+    assert "INNERBODY" in p.body_text          # and the message they forwarded
+    # Under the headers a client writes when it quotes a forward inline, so the
+    # reader can tell whose words are whose.
+    assert "Forwarded message" in p.body_text
+    assert "christian@example.com" in p.body_text
+    assert "INNERSUBJECT" in p.body_text
+    assert p.body_text.index("COVERNOTE") < p.body_text.index("INNERBODY")
+
+
+def test_forwarded_body_reaches_the_snippet():
+    # Nothing that only looks at body_text needs its own descent into the MIME
+    # tree: search_text, the snippet and the summariser all read what is stored.
+    p = parse_email(_SIGNED_FORWARD.format(date=format_datetime(WHEN))
+                    .replace("COVERNOTE is this for you?", "").encode())
+    assert "INNERBODY" in p.snippet
+
+
+def test_signed_message_lists_its_files_not_its_containers():
+    p = parse_email(_signed_forward())
+    types = sorted(a.content_type for a in p.attachments)
+    assert types == ["application/pgp-signature", "message/rfc822"]
+    assert not any(a.content_type.startswith("multipart/") for a in p.attachments)
+    assert all(a.payload for a in p.attachments)      # never a zero-byte container
+
+
+def test_attached_message_is_stored_as_a_readable_eml():
+    p = parse_email(_signed_forward())
+    eml = next(a for a in p.attachments if a.content_type == "message/rfc822")
+    assert eml.filename.endswith(".eml")
+    assert b"INNERBODY" in eml.payload
+    # The saved file is a message: it parses, and it is the one that was attached.
+    assert parse_email(eml.payload).message_id == "inner@x"
+
+
+def test_html_forward_under_a_plain_note_composes_an_html_body():
+    inner = EmailMessage()
+    inner["Message-ID"] = "<i2@x>"
+    inner["Subject"] = "html original"
+    inner["From"] = "orig@example.com"
+    inner["To"] = "fwd@example.com"
+    inner["Date"] = format_datetime(WHEN)
+    inner.set_content("INNERPLAIN fallback")
+    inner.add_alternative("<p><b>INNERHTML</b> formatted</p>", subtype="html")
+
+    outer = EmailMessage()
+    outer["Message-ID"] = "<o2@x>"
+    outer["Subject"] = "Fwd: html original"
+    outer["From"] = "a@b.com"
+    outer["To"] = "c@d.com"
+    outer["Date"] = format_datetime(WHEN)
+    outer.set_content("COVERNOTE plain")
+    outer.add_attachment(inner)
+
+    p = parse_email(outer.as_bytes())
+    # The forwarded HTML is what other clients show, so it has to survive — and
+    # the plain note has to come with it, converted, or the composed body would
+    # open on the forward with no sign of who sent it on.
+    assert "INNERHTML" in p.body_html
+    assert "COVERNOTE" in p.body_html
+    assert "INNERPLAIN" in p.body_text and "COVERNOTE" in p.body_text
+
+
+def test_message_without_a_forward_is_left_exactly_as_it_was():
+    # An empty body_text is a signal: it is what makes build_search_text and the
+    # summariser fall back to flattening the HTML. Composing a body for mail that
+    # has nothing attached to it would silence that for the whole mailbox.
+    m = EmailMessage()
+    m["Message-ID"] = "<plainhtml@x>"
+    m["Subject"] = "html"
+    m["From"] = "a@b.com"
+    m["To"] = "c@d.com"
+    m["Date"] = format_datetime(WHEN)
+    m.set_content("<html><body>ONLYHTML</body></html>", subtype="html")
+    p = parse_email(m.as_bytes())
+    assert p.body_text == ""
+    assert "ONLYHTML" in p.body_html
+    assert p.attachments == []
+
+
+def test_forward_nesting_is_bounded():
+    # Depth is bounded, so a message built out of a thousand nested forwards
+    # parses instead of exhausting the stack. What is past the bound is dropped,
+    # not raised over.
+    inner = EmailMessage()
+    inner["Subject"] = "seed"
+    inner["From"] = "a@b.com"
+    inner["Date"] = format_datetime(WHEN)
+    inner.set_content("DEEPSEED")
+    for depth in range(60):
+        outer = EmailMessage()
+        outer["Subject"] = f"Fwd: {depth}"
+        outer["From"] = "a@b.com"
+        outer["Date"] = format_datetime(WHEN)
+        outer.set_content(f"LEVEL{depth}")
+        outer.add_attachment(inner)
+        inner = outer
+    p = parse_email(inner.as_bytes())
+    assert "LEVEL59" in p.body_text
+    assert "DEEPSEED" not in p.body_text
+
+
 def test_multiple_recipients():
     m = EmailMessage()
     m["Message-ID"] = "<r@x>"

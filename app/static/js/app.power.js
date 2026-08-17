@@ -24,7 +24,12 @@
 
    Resuming is always immediate and always does a full reload: while stood down
    the stream was closed, so what is on screen is however stale the pause was
-   long, and the honest fix is to go and ask rather than to trust it. */
+   long, and the honest fix is to go and ask rather than to trust it.
+
+   All of it is optional. A machine that is plugged in and a user who wants the
+   list already current when they come back are a fair trade against the fan,
+   and the setting (Settings → Power) turns the whole module off rather than
+   only its banner — a silent pause would be worse than a visible one. */
 
 App.power = (function () {
   /* How long a focus loss has to last before the app stands down.
@@ -36,21 +41,25 @@ App.power = (function () {
      to be interrupted. */
   const GRACE = 3000;
 
+  // Off means "never stand down". Absent means on: the saving is the point of
+  // the feature, and a first run should get it.
+  const KEY = "meerail.powersave";
+
   let suspended = false;
   let focused = true;      // the shell tells us; a plain browser leaves it true
   let timer = null;
   const hooks = { suspend: [], resume: [] };
 
-  function overlay() { return document.getElementById("power-save"); }
+  function bar() { return document.getElementById("power-save"); }
 
   /* One module throwing must not strand the others, and above all must not
-     leave the overlay up over an app that is running again. */
+     leave the bar up over an app that is running again. */
   function run(fn) {
     try { fn(); } catch (e) { console.error("power-save hook failed", e); }
   }
 
   function render() {
-    const el = overlay();
+    const el = bar();
     if (el) el.hidden = !suspended;
     // What stops the animations — see the .is-power-save rules in mail.css. A
     // spinner nobody can see still costs a repaint every frame, and this app's
@@ -60,13 +69,16 @@ App.power = (function () {
 
   function background() { return document.hidden || !focused; }
 
+  function enabled() { return localStorage.getItem(KEY) !== "0"; }
+
   function suspend() {
     clearTimeout(timer);
     timer = null;
     // Re-checked rather than assumed: the grace timer was set on a signal that
     // may since have been undone, and standing down over a window the user is
-    // now looking at is the one unacceptable outcome.
-    if (suspended || !background()) return;
+    // now looking at is the one unacceptable outcome. `enabled` is in the same
+    // position — the setting can have been turned off during the grace wait.
+    if (suspended || !enabled() || !background()) return;
     suspended = true;
     render();
     hooks.suspend.forEach(run);
@@ -83,8 +95,17 @@ App.power = (function () {
 
   function defer() {
     clearTimeout(timer);
-    if (!background()) return;
+    if (!enabled() || !background()) return;
     timer = setTimeout(suspend, GRACE);
+  }
+
+  /* Turning it off has to undo the state as well as the setting: the usual way
+     to reach the switch is to have just been annoyed by the bar, and leaving
+     the app stood down behind the settings modal would be absurd. Turning it on
+     does nothing now — the window it would pause is the one in front. */
+  function setEnabled(on) {
+    localStorage.setItem(KEY, on ? "1" : "0");
+    if (!on) resume();
   }
 
   function init() {
@@ -95,11 +116,14 @@ App.power = (function () {
     window.addEventListener("meerail:blur", () => { focused = false; defer(); });
     window.addEventListener("meerail:focus", () => { focused = true; resume(); });
 
-    // A click lands on the overlay before it lands on the window beneath, and
-    // on some setups reaches us ahead of the shell's focus event. Treating it
-    // as a wake means the pointer never appears to hit a dead screen.
-    const el = overlay();
-    if (el) el.addEventListener("mousedown", () => { focused = true; resume(); });
+    // Any use of the app is a wake, and on some setups the first click reaches
+    // us ahead of the shell's focus event. Capture, and on the document rather
+    // than on the bar: the bar no longer covers anything, so a click meant for
+    // a message must not land on a list that stopped being maintained three
+    // minutes ago. Cheap while running — `suspended` is false and it returns.
+    const wake = () => { if (!suspended) return; focused = true; resume(); };
+    document.addEventListener("mousedown", wake, true);
+    document.addEventListener("keydown", wake, true);
 
     render();
   }
@@ -112,5 +136,7 @@ App.power = (function () {
     /* Called when it comes back. Assume everything on screen is stale. */
     whenResumed: (fn) => hooks.resume.push(fn),
     isSuspended: () => suspended,
+    /* The Power setting: whether the app is allowed to stand down at all. */
+    enabled, setEnabled,
   };
 })();

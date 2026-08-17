@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import io
 import re
+import zipfile
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import func, or_, select, tuple_
@@ -543,6 +545,76 @@ def download_attachment(
             "Content-Disposition": f'{dispo}; filename="{filename}"',
             # Belt and braces around the allowlist: never let the browser sniff
             # its way to a different type, and neuter scripts if one slips past.
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "sandbox; default-src 'none'",
+        },
+    )
+
+
+# --- "Save them all" -----------------------------------------------------
+
+def _zip_name(name: str, taken: set[str]) -> str:
+    """A filename safe to write into a zip, unique within it.
+
+    Mail names attachments, and a sender can name one `../../.ssh/authorized_keys`
+    — every path-ish character goes, because the archive is unpacked on someone
+    else's machine by a tool we do not control. Collisions are numbered rather
+    than silently overwritten: two `invoice.pdf` in one mail is ordinary, and an
+    archive that quietly held one of them would be the worst of the options.
+    """
+    name = re.sub(r"[/\\]", "_", name or "").strip().lstrip(".") or "attachment"
+    name = "".join(c for c in name if c.isprintable())[:120] or "attachment"
+    if name.lower() not in taken:
+        taken.add(name.lower())
+        return name
+    stem, dot, ext = name.rpartition(".")
+    if not dot:
+        stem, ext = name, ""
+    for n in range(2, 10_000):
+        cand = f"{stem} ({n}){dot}{ext}"
+        if cand.lower() not in taken:
+            taken.add(cand.lower())
+            return cand
+    raise HTTPException(status_code=409, detail="Too many attachments with the same name")
+
+
+@router.get("/messages/{message_id}/attachments.zip")
+def download_all_attachments(message_id: int, db: DBSession = Depends(get_db)):
+    """Every stored attachment on one message, as a single archive.
+
+    The same set the reader draws chips for — non-inline, so a signature logo
+    does not end up in the folder someone unpacked three invoices into — minus
+    the ones pruning has emptied, which have a name in the list but no bytes to
+    put in a file. Deflate at level 1: PDFs and JPEGs are already compressed and
+    would only cost CPU to re-squeeze, while the text ones still gain something.
+    """
+    msg = _readable(db, message_id)
+    atts = db.execute(
+        select(Attachment.filename, Attachment.content)
+        .where(Attachment.message_pk == message_id, Attachment.is_inline.is_(False),
+               Attachment.content.is_not(None))
+        .order_by(Attachment.id)
+    ).all()
+    if not atts:
+        raise HTTPException(status_code=404, detail="No stored attachments on this message")
+
+    buf = io.BytesIO()
+    taken: set[str] = set()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as zf:
+        for a in atts:
+            zf.writestr(_zip_name(a.filename, taken), a.content)
+
+    # The archive is named after the mail so a Downloads folder full of them can
+    # be told apart, but only out of characters that survive a latin-1 header —
+    # the id alone is the fallback, never a broken response.
+    stem = re.sub(r"[^A-Za-z0-9 ._-]+", " ", msg.subject or "").strip()[:60].strip(" .")
+    stem = re.sub(r"\s+", " ", stem)
+    filename = f"{stem} attachments.zip" if stem else f"attachments-{message_id}.zip"
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
             "X-Content-Type-Options": "nosniff",
             "Content-Security-Policy": "sandbox; default-src 'none'",
         },
