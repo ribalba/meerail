@@ -490,7 +490,10 @@ App.reader = (function () {
   // same question app.bulk.js asks of the bulk bar, and answered the same way:
   // off the folder, not off the message, because a search result or the unified
   // inbox has no one folder to be standing in and Delete means Trash there.
-  function inTrash() { return App.shell.currentRole() === "trash"; }
+  // Guarded, because this file's own boot draws the toolbar once and app.shell.js
+  // loads after it: an unguarded read here threw at load time, which took
+  // App.reader down with it and left every keyboard binding pointing at nothing.
+  function inTrash() { return !!(App.shell && App.shell.currentRole() === "trash"); }
 
   // Delete, in Trash. The move this used to be was a move to the folder the
   // conversation was already in: the server answered "This is already in Trash"
