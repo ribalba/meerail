@@ -663,8 +663,10 @@ removes one because a connection failed.
 | What | When | |
 | --- | --- | --- |
 | A message you trash or archive | You pressed it | Leaves the folder locally at once and is applied to IMAP on the next pass. It is a move, never a deletion: with no Trash folder on the account the action is refused rather than turned into an expunge. An imported account is the exception — there the Trash folder is meerail's own to make, so it is made and the move goes through. |
-| Everything in Trash | You pressed **Empty Trash**, in Trash, and confirmed | The thing that destroys mail: `\Deleted` plus a UID `EXPUNGE`, aimed one message at a time. It cannot be reached from any other button — no ordinary delete, however many messages it covers, is ever re-read as this one. On an imported account there is no server to expunge from, so it deletes the rows instead: the message, its raw copy and its attachments. |
+| Everything in Trash | You pressed **Empty Trash** — in the folder header, or in the bar over a selection — and confirmed | The thing that destroys mail: `\Deleted` plus a UID `EXPUNGE`, aimed one message at a time. It cannot be reached from any other button — no ordinary delete, however many messages it covers, is ever re-read as this one. On an imported account there is no server to expunge from, so it deletes the rows instead: the message, its raw copy and its attachments. |
 | Imported mail you delete permanently | You pressed **Delete permanently** (or Shift+Delete) and confirmed | Imported accounts only, where this app holds the only copy and Trash is a folder in this database and nothing else. The message and everything hanging off it is deleted outright, from every folder it was filed in, with no Undo. Refused on any account a mail server stands behind: there the message here is a copy, and deleting a copy is a delete that undoes itself on the next pass. See [Tidying up after an import](#tidying-up-after-an-import-folders-moving-deleting). |
+| One conversation in Trash | You pressed Delete *in Trash* and confirmed | Delete has nowhere further to file something already in Trash, so there it destroys that conversation and nothing else. On an imported account that is the rows; on an account with a server it is `\Deleted` plus a UID `EXPUNGE` on the Trash copy alone, leaving any other label the message wears. Only from Trash — mail anywhere else is refused, so that two keypresses is what it takes rather than one. |
+| A folder you delete, and what it holds | You pressed the bin beside it in the sidebar and confirmed | Imported accounts only, for the same reason as the row above. Takes the folders nested under it and the mail filed in them, message rows and all; mail also filed outside the folder keeps that copy. An empty folder with nothing under it goes without a dialog — everything else names its counts and asks first. |
 | Mail deleted on your phone or in webmail | The server no longer lists its UID | meerail mirrors the server; a message deleted elsewhere goes here too. Only ever on a UID list the server has confirmed in full — see below. |
 | A folder | It has been gone from the server's `LIST` for an hour | Its messages go with it, unless they are also filed elsewhere. Never on an empty `LIST`, and never on one absence: a Bridge that is still loading answers with part of the mailbox, so a folder that disappears is marked and kept — with all its mail — until it stays gone. Never for a folder meerail made itself — an imported account's folders, and any you add to one — which is absent from `LIST` by definition. |
 | A message no folder holds any more | At the end of a completed pass, hours after the last placement went | Almost always a reused UID after a `UIDVALIDITY` reset: the walk binds the number to the message that has it now, and the one it used to mean is left with no folder, invisible and still on disk. Never asked mid-pass, when a message is legitimately between folders, and never about one a queued action still names. |
@@ -706,7 +708,10 @@ server that has been down since Friday.
   says so; Gmail, Dovecot and the university IMAP servers people run beside it can, and used
   to be refused along with it. You always type `/`; the agent puts the server's own
   separator in (`.` on many Dovecot installs) so nobody has to know what it is. See
-  [Nested folders](#nested-folders).
+  [Nested folders](#nested-folders). A folder meerail owns can also be *removed*: on an
+  imported account a bin appears beside the folder name on hover, and takes the folder, the
+  folders under it and the mail they hold — the missing half of an import that went in under
+  the wrong name.
 - **A selection can be filed, not only deleted.** Ticking rows in the list puts a bar above
   it with **Move to…** beside Delete, and the folder you pick takes every ticked
   conversation in one operation — one entry in Recent actions, one Undo. When every loaded
@@ -935,6 +940,14 @@ more than anywhere else: no mail server is holding a second copy of where things
 meerail makes one for it on the spot. It sits there until you empty it, exactly like mail
 you deleted anywhere else.
 
+**Delete something that is already in Trash.** Press Delete again. Standing in Trash there
+is nowhere further to file a conversation, so the button destroys that one conversation
+instead of moving it — after asking, and the tooltip says **Delete forever** before you
+click. Ticked rows in Trash do the same for the selection. (Until this, Delete in Trash was
+a move to the folder the message was already in: an error popup saying "This is already in
+Trash", the row back on the next refresh, and **Empty Trash** — all of it — as the only way
+to remove the one message you were looking at.)
+
 **Delete for good.** Tick the rows and press **Delete permanently**, the second red button
 in the bar; **Shift+Delete** does the same thing. It asks once and then the mail is gone
 from the database — the message, its raw copy, its attachments, its extracted text. There
@@ -942,7 +955,17 @@ is no Undo, because there is nothing left to put back. With **Select all N** it 
 whole folder, in chunks like the move. Emptying the Trash of an imported account does the
 same thing to everything in it.
 
-That button only exists on imported accounts. On an account with a mail server behind it
+**Delete a folder.** Hover the folder in the sidebar and press the bin beside its name.
+An empty folder goes on the spot. One with anything in it asks first, and names what is at
+stake — how many messages, and how many folders sit inside it — because deleting a folder
+deletes what it holds, including every folder underneath. Mail that is also filed somewhere
+else keeps that copy; mail this folder was the last home of is gone for good. This is the
+"the import went in under the wrong name and now there are twenty folders" fix, and it is
+the one thing emptying folders one by one could never do — the empty folders themselves
+stayed. Imported accounts only: a folder a mail server owns has to be deleted there, or the
+next `LIST` puts it straight back.
+
+The **Delete permanently** button only exists on imported accounts. On an account with a mail server behind it
 the message here is a copy, and deleting the copy would only make it vanish until the next
 sync fetched it back; there, deleting for good is **Empty Trash**, which tells the server
 to expunge. See [What meerail deletes, and when](#what-meerail-deletes-and-when).

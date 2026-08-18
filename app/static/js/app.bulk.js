@@ -68,10 +68,13 @@ App.bulk = (function () {
     // endpoint did, including to flagged mail nobody had gone to Trash to
     // delete. See app/routers/actions.py::bulk_empty_trash.
     //
-    // "Empty Trash" rather than "Delete forever", because the operation behind
-    // it is the whole folder whatever happens to be ticked, and the button has
-    // to be the first thing that says so — not the confirmation dialog.
-    const verb = inTrash() ? "Empty Trash" : "Delete";
+    // "Empty Trash" rather than "Delete forever" for the escalated version,
+    // because the operation behind it is the whole folder and the button has to
+    // be the first thing that says so — not the confirmation dialog. A ticked
+    // handful is the other thing, and it took a while to admit it: the button
+    // said Empty Trash over "3 selected" and there was no way at all to remove
+    // three messages from a Trash holding five hundred.
+    const verb = !inTrash() ? "Delete" : folderMode ? "Empty Trash" : "Delete forever";
 
     // Move is offered whenever there is one account to move within — see
     // moveAccountId. It sits before Delete because it is the ordinary half of
@@ -302,6 +305,44 @@ App.bulk = (function () {
     render();
   }
 
+  // What emptying the whole folder has to be confirmed against. Two sentences
+  // for the same operation, because it is two different facts. On an account
+  // with a server this is an expunge and the folder named is the one on the
+  // server; on an imported account there is no server and the rows here are the
+  // mail. Saying "on the mail server" to someone emptying an imported Trash is
+  // a promise about a machine that does not exist.
+  function confirmEmpty() {
+    const what = importedFolder()
+      ? `\n\nThis mail was imported, so meerail holds the only copy of it. The whole ` +
+        `folder is deleted, including messages not currently on screen.`
+      : `\n\nThis empties the whole folder on the mail server, including messages ` +
+        `not currently on screen.`;
+    return confirm(`Permanently delete everything in ${App.shell.currentTitle()}?${what}` +
+                   `\n\nIt cannot be undone.`);
+  }
+
+  // Empty Trash with nothing ticked at all — the button in the folder header.
+  // The bulk bar's version only exists once rows are selected, which left the
+  // one operation that empties a Trash reachable only by first selecting mail
+  // in it and then pressing a button labelled as if it were about that
+  // selection. A folder you are standing in is a thing you can empty.
+  async function emptyOpenFolder() {
+    if (busy || !inTrash()) return;
+    if (!confirmEmpty()) return;
+    busy = true;
+    render();
+    try {
+      await emptyTrash();
+      clear();
+    } catch (e) {
+      alert("Could not delete: " + e.message);
+    } finally {
+      busy = false;
+      render();
+      await App.shell.reloadList();
+    }
+  }
+
   // Trash, emptied from the folder itself. Chunked like trashFolder(), for the
   // same reason, and always confirmed however few rows are ticked: this is the
   // one action in meerail that mail does not come back from.
@@ -392,10 +433,19 @@ App.bulk = (function () {
       ? `\n\nThis is everything in ${App.shell.currentTitle()}, including messages ` +
         `not currently on screen.`
       : "";
+    // Two sentences for the same button, because it is two different facts.
+    // Outside Trash this is only ever offered on imported mail, where the rows
+    // are the mail; inside it, it is also how one conversation is taken out of
+    // a Trash a server is holding, and there the destruction happens over
+    // there. Promising someone their imported mbox is being deleted "from the
+    // mail server" is a promise about a machine that does not exist.
+    const what = importedOnly()
+      ? `This mail was imported, so meerail holds the only copy of it. It is ` +
+        `deleted here and now — not moved to Trash — and nothing can undo it.`
+      : `This deletes it from the mail server for good, and nothing can undo it.`;
     if (!confirm(
       `Permanently delete ${plural(n, "conversation", "conversations")}?${where}` +
-      `\n\nThis mail was imported, so meerail holds the only copy of it. It is ` +
-      `deleted here and now — not moved to Trash — and nothing can undo it.`)) return;
+      `\n\n${what}`)) return;
 
     busy = true;
     render();
@@ -417,24 +467,15 @@ App.bulk = (function () {
     if (busy) return;
     const n = scope();
     if (!n) return;
+    // A ticked handful in Trash is the ticked handful, not the folder. Handed
+    // straight to the permanent delete, which is the same operation the reader's
+    // Delete button runs in there and asks the same question before it.
+    if (inTrash() && !folderMode) return purge();
     // Emptying the Trash always asks, and asks in the words of what it does:
     // this is a deletion from the mail server that nothing can undo, so the
     // question can never be the same one as "file these away".
     if (inTrash()) {
-      // Two sentences for the same button, because it is two different facts.
-      // On an account with a server this is an expunge and the folder named is
-      // the one on the server; on an imported account there is no server and
-      // the rows here are the mail. Saying "on the mail server" to someone
-      // emptying an imported Trash is a promise about a machine that does not
-      // exist.
-      const what = importedFolder()
-        ? `\n\nThis mail was imported, so meerail holds the only copy of it. The whole ` +
-          `folder is deleted, including messages not currently on screen.`
-        : `\n\nThis empties the whole folder on the mail server, including messages ` +
-          `not currently on screen.`;
-      if (!confirm(
-        `Permanently delete everything in ${App.shell.currentTitle()}?${what}` +
-        `\n\nIt cannot be undone.`)) return;
+      if (!confirmEmpty()) return;
     } else if (folderMode && !confirm(
       // Only the folder-wide version asks. A ticked handful is visible on screen
       // and undoable by hand; "everything in this folder, including the pages you
@@ -474,7 +515,7 @@ App.bulk = (function () {
     render();
   }
 
-  return { init, sync, selectAllLoaded, clear, trash, purge,
+  return { init, sync, selectAllLoaded, clear, trash, purge, emptyOpenFolder,
            // Whether Shift+Delete has anything to do — the keyboard's version of
            // the button only existing on imported mail. See app.keys.js.
            canPurge: () => importedOnly() && !inTrash(),

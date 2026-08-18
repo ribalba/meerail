@@ -96,7 +96,13 @@ App.api = {
     if (!res.ok) {
       let detail = res.statusText;
       try { detail = (await res.json()).detail || detail; } catch (_) {}
-      throw new Error(detail);
+      const err = new Error(detail);
+      // The code rides along because one caller has to tell two kinds of "no"
+      // apart: deleting a folder answers 409 with what is inside it when it has
+      // not been confirmed yet, which is a question to put to the user rather
+      // than an error to show them. Everything else still only reads .message.
+      err.status = res.status;
+      throw err;
     }
     if (res.status === 204) return null;
     const ct = res.headers.get("content-type") || "";
@@ -121,6 +127,15 @@ App.api = {
   mailboxes() { return this.get("/api/mailboxes"); },
   favoriteMailbox(id, favorite) {
     return this.patch(`/api/mailboxes/${id}/favorite?favorite=${favorite ? 1 : 0}`);
+  },
+  // Deleting a folder, with whatever is filed in it and every folder under it.
+  // Two calls: the first without `confirm` is the question — the server answers
+  // 409 with what would go — and the second is the answer. An empty folder with
+  // nothing under it needs only the first. Imported accounts only; the server
+  // refuses anything else, because a folder a mail server owns has to be
+  // deleted there. See app/routers/mailboxes.py::delete_mailbox.
+  deleteMailbox(id, confirm) {
+    return this.request("DELETE", `/api/mailboxes/${id}${confirm ? "?confirm=true" : ""}`);
   },
   createMailbox(accountId, name) {
     return this.post("/api/mailboxes", { account_id: accountId, name });

@@ -236,10 +236,15 @@ def test_purge_without_confirm_deletes_nothing(local_account):
     assert dbfixture.message_survives(mid)["message"] is True
 
 
-def test_purge_refuses_an_account_with_a_server_behind_it(account):
+def test_purge_refuses_mail_a_server_still_has_outside_trash(account):
     """Deleting rows there would delete a copy: the message is still on the
     server, so it would vanish until the next pass fetched it again — a delete
-    that silently undoes itself hours later, with no button to blame."""
+    that silently undoes itself hours later, with no button to blame.
+
+    Not trashed-then-expunged either. Two keypresses is what makes the
+    destructive one deliberate, and inferring the first from the second turns a
+    Delete on an inbox row into a delete nothing comes back from.
+    """
     email, aid = account["email"], account["id"]
     token = "SRVPURGE" + uuid.uuid4().hex[:6]
     mid, _ = ingest_one(email, aid, token)
@@ -248,9 +253,39 @@ def test_purge_refuses_an_account_with_a_server_behind_it(account):
         "items": [{"account_id": aid, "message_id": mid}], "confirm": True,
     })
     assert code == 400
-    assert "imported" in body["detail"]
+    assert "Trash" in body["detail"]
     assert dbfixture.message_survives(mid)["message"] is True
     assert api("GET", f"/api/messages/{mid}")[0] == 200
+    assert not [a for a in dbfixture.pending_actions(email, "delete")]
+
+
+def test_purge_expunges_one_conversation_out_of_a_server_trash(account):
+    """The other half, and the folder it exists for.
+
+    Delete on a message already in Trash was a move to the folder it was already
+    in: "This is already in Trash", the row back on the next refresh, and Empty
+    Trash — the whole folder, five hundred messages — the only way to remove the
+    one you were looking at. Here the same button destroys that conversation and
+    nothing else, by telling the server to, which is the only thing that can
+    destroy mail an account has a server behind it.
+    """
+    email, aid = account["email"], account["id"]
+    token = "SRVTRASH" + uuid.uuid4().hex[:6]
+    dbfixture.ingest_raw_message(email, make_message(
+        f"<t-{uuid.uuid4().hex}@t>", f"Subj {token}", "x@y.com", email, f"{token} body", T0),
+        uid=7, folder="Trash", role_hint="\\Trash")
+    _, r = api("GET", f"/api/search?q={token}&account_id={aid}")
+    mid = r["rows"][0]["id"]
+
+    code, body = api("POST", "/api/messages/bulk/purge", {
+        "items": [{"account_id": aid, "message_id": mid}], "confirm": True,
+    })
+    assert code == 200, body
+    assert body["deleted"] == 1
+    # The instruction is the delete: the rows here are a copy, and they go when
+    # the pass that ran the expunge comes back without the message.
+    assert [a["type"] for a in dbfixture.pending_actions(email, "delete")] == ["delete"]
+    assert dbfixture.placements(email, mid) == []
 
 
 def test_purge_all_refuses_a_selector_that_is_not_a_folder(local_account):

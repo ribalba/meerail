@@ -60,6 +60,12 @@
         <button class="icon-btn mobile-back" id="btn-back-folders"
                 title="Folders" aria-label="Back to folders"></button>
         <div class="pane-title" id="list-title">Inbox</div>
+        <!-- Only ever drawn in a Trash folder — see app.shell.js::paintPaneAction.
+             Emptying a Trash used to live in the bulk bar alone, which meant
+             ticking mail first and then pressing a button that said it was
+             about the whole folder anyway. -->
+        <button class="pane-action danger" id="btn-empty-trash" type="button"
+                title="Delete everything in this folder for good" hidden>Empty Trash</button>
       </header>
       <div class="search-region">
         <div class="search-bar">

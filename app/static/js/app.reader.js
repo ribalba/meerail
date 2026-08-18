@@ -296,8 +296,12 @@ App.reader = (function () {
       if (b.sep) return `<span class="tb-sep"></span>`;
       const flagged = b.act === "flag" && m && m.flagged;
       const off = b.act !== "new" && !m;
+      // Delete is a different verb in Trash — there is nowhere left to file the
+      // conversation, so the button destroys it — and the tooltip is where that
+      // has to be said before the click rather than after it.
+      const title = b.act === "trash" && inTrash() ? "Delete forever" : b.title;
       return `<button class="tb-btn${flagged ? " on" : ""}" data-act="${b.act}"
-        title="${b.title}" aria-label="${b.title}"${off ? " disabled" : ""}
+        title="${title}" aria-label="${title}"${off ? " disabled" : ""}
         >${App.icon(b.icon, 18, !!flagged)}</button>`;
     }).join("");
     // The "arrows scroll here" marker rides in the bar rather than being an
@@ -482,6 +486,38 @@ App.reader = (function () {
     })());
   }
 
+  // Is the folder on screen the one Delete would otherwise file this into? The
+  // same question app.bulk.js asks of the bulk bar, and answered the same way:
+  // off the folder, not off the message, because a search result or the unified
+  // inbox has no one folder to be standing in and Delete means Trash there.
+  function inTrash() { return App.shell.currentRole() === "trash"; }
+
+  // Delete, in Trash. The move this used to be was a move to the folder the
+  // conversation was already in: the server answered "This is already in Trash"
+  // and the row came back on the next refresh, which is the Delete button
+  // appearing not to work with an error popup for company. The only thing left
+  // for it to mean here is destroy the mail, so that is what it does — after
+  // saying so, in the words of whichever kind of account this is. Imported mail
+  // is gone when the rows go; mail with a server behind it is expunged from the
+  // Trash the server itself is holding. See app/routers/actions.py::bulk_purge.
+  function deleteForever() {
+    const msgs = currentThread ? currentThread.messages : [];
+    if (!msgs.length) return;
+    const accountId = msgs[0].account_id;
+    const acc = App.shell.accounts().find((a) => a.id === accountId);
+    const what = acc && acc.local
+      ? "This mail was imported, so meerail holds the only copy of it."
+      : "This deletes it from the mail server.";
+    if (!confirm(`Permanently delete this conversation?\n\n${what} It cannot be undone.`)) return;
+    // One item for the conversation where there is one, so a reply that landed
+    // after this pane was drawn goes with it — the same rule removeThread
+    // follows, and for the same reason.
+    const items = currentThread.thread_id
+      ? [{ account_id: accountId, thread_id: currentThread.thread_id }]
+      : msgs.map((m) => ({ account_id: m.account_id, message_id: m.id }));
+    finishRemove(msgs.slice(), App.api.bulkPurge(items));
+  }
+
   // --- "Remind me" --------------------------------------------------------
   // One call for the conversation, like archive: the server files every message
   // of the thread and every folder each of them sits in, so a reply that landed
@@ -598,6 +634,7 @@ App.reader = (function () {
       }
       if (act === "flag") { m.flagged = !m.flagged; rerender(); await App.api.flagMsg(m.id, m.flagged); return; }
       if (act === "unread") { m.seen = false; await App.api.markSeen(m.id, false); return; }
+      if (act === "trash" && inTrash()) return deleteForever();
       if (act === "archive" || act === "trash") return removeThread(act);
     } catch (e) { alert(e.message || "Action failed"); }
   }

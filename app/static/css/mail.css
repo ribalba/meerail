@@ -149,6 +149,16 @@ body.resizing { cursor: col-resize; user-select: none; }
 .mb-star:hover { color: var(--accent); }
 .mb-star.on { color: #e0a500; }
 .mailbox-row.active .mb-star, .mailbox-row.active .mb-star.on { color: #fff; }
+/* Delete folder: same reveal-on-hover idiom as the pin, and never anything but
+   hidden until then — there is no "already deleted" state for it to advertise
+   the way a filled star advertises a pinned folder. Red only under the cursor,
+   so the tree does not read as a row of warnings. Drawn on imported accounts
+   only (app.shell.js::mailboxRow). */
+.mb-del { flex: 0 0 auto; display: flex; align-items: center; padding: 0; border: 0;
+  background: none; cursor: pointer; color: var(--text-muted); opacity: 0; }
+.mailbox-row:hover .mb-del { opacity: 1; }
+.mb-del:hover { color: var(--danger); }
+.mailbox-row.active .mb-del { color: #fff; }
 .account-dot { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; }
 .account-head { display: flex; align-items: center; gap: .45rem; padding: .8rem .55rem .2rem; }
 .account-head .account-label { font-size: .72rem; font-weight: 700; text-transform: uppercase;
@@ -245,6 +255,15 @@ body.resizing { cursor: col-resize; user-select: none; }
 .pane-header { display: flex; align-items: center; justify-content: space-between;
   padding: .5rem .8rem; border-bottom: 1px solid var(--border); min-height: 44px; }
 .pane-title { font-size: 1.15rem; font-weight: 700; letter-spacing: -.01em; }
+/* A verb that belongs to the folder rather than to a selection, sitting where
+   the folder is named. Quiet — outlined, small, and only drawn where it applies
+   — because the one it currently carries is a deletion nothing comes back
+   from and a folder header is not a place to press things by accident. */
+.pane-action { flex: 0 0 auto; font: inherit; font-size: .78rem; padding: .18rem .5rem;
+  border-radius: 6px; cursor: pointer; border: 1px solid var(--border-strong);
+  background: var(--bg); color: var(--text); }
+.pane-action:hover { background: var(--bg-elev); }
+.pane-action.danger { color: var(--danger); border-color: var(--danger); }
 .search-region { border-bottom: 1px solid var(--border); }
 .search-bar { display: flex; align-items: center; gap: .4rem; padding: .5rem .7rem; }
 .search-bar input { flex: 1; border: none; background: var(--bg-elev); color: var(--text);
@@ -1732,7 +1751,7 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
   .icon-btn { padding: .5rem; }
   .tb-btn { padding: .5rem .55rem; }
   /* Reveal-on-hover hides these permanently on a device with no hover. */
-  .mb-star, .acc-add { opacity: 1; }
+  .mb-star, .acc-add, .mb-del { opacity: 1; }
   /* Same problem for the tick box, but it cannot simply be shown where it is:
      it is stacked on top of the unread dot, which is only sound while the two
      take turns. With both permanently on, the gutter widens and they sit one

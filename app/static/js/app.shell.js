@@ -25,7 +25,12 @@ App.shell = (function () {
   // "Folders/" prefix that is not itself a folder — indenting on the separator
   // alone would push a whole account one level in under a heading that is not
   // in the list.
-  function mailboxRow(sel, iconName, name, count, activeKey, star, extra, depth) {
+  // `removable` is the folder's id where this row may be deleted, and 0 where it
+  // may not. Only imported accounts get it: a folder a mail server owns has to
+  // be deleted there, and a button here would delete this app's copy of its
+  // contents and then watch the next LIST put the folder straight back. See
+  // app/routers/mailboxes.py::delete_mailbox.
+  function mailboxRow(sel, iconName, name, count, activeKey, star, extra, depth, removable) {
     const active = (sel.key === activeKey ? " active" : "") + (extra ? " " + extra : "");
     const badge = count ? `<span class="mailbox-count">${count}</span>` : "";
     const indent = depth ? ` style="--mb-depth:${depth}"` : "";
@@ -36,9 +41,13 @@ App.shell = (function () {
         data-on="${star.on ? 1 : 0}" title="${label}" aria-label="${label}"
         >${App.icon("star", 13, star.on)}</button>`;
     }
+    const del = removable
+      ? `<button class="mb-del" data-del="${removable}" title="Delete folder"
+          aria-label="Delete the folder ${App.esc(name)}">${App.icon("trash", 13)}</button>`
+      : "";
     return `<div class="mailbox-row${active}" data-key="${sel.key}"${indent}>
       <span class="mb-icon">${App.icon(iconName, 16)}</span>
-      <span class="mailbox-name">${App.esc(name)}</span>${pin}${badge}</div>`;
+      <span class="mailbox-name">${App.esc(name)}</span>${del}${pin}${badge}</div>`;
   }
 
   const selections = {};   // key -> selection object
@@ -138,7 +147,7 @@ App.shell = (function () {
                    ageTint: mb.role === "inbox",
                    role: mb.role, params: { mailbox_id: mb.id } });
         html += mailboxRow(selections[key], App.roleIcon(mb.role), mb.display_name, mb.unread,
-          activeKey, { id: mb.id, on: mb.favorite }, "", mb.depth);
+          activeKey, { id: mb.id, on: mb.favorite }, "", mb.depth, acc.local ? mb.id : 0);
       }
     }
     tree.innerHTML = html;
@@ -156,6 +165,12 @@ App.shell = (function () {
       el.addEventListener("click", (e) => {
         e.stopPropagation();   // the star sits inside a row that selects on click
         toggleFavorite(el.dataset.mailbox, el.dataset.on !== "1");
+      });
+    });
+    tree.querySelectorAll(".mb-del").forEach((el) => {
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();   // same as the star: the row underneath selects
+        deleteFolder(+el.dataset.del);
       });
     });
     tree.querySelectorAll(".acc-add").forEach((el) => {
@@ -256,6 +271,53 @@ App.shell = (function () {
     renderSidebar();
   }
 
+  // Deleting a folder: the other half of the + button, and the answer to an
+  // import that went in under the wrong name. Twenty folders inside "old", half
+  // of them empty, and until this there was nothing anywhere in meerail that
+  // removed one — emptying them left the folders themselves standing.
+  //
+  // The question is asked two ways, on purpose. An empty folder with nothing
+  // under it is a click and a one-line "delete this?", because a dialog listing
+  // what is at stake when nothing is at stake is a dialog people learn to click
+  // through. Anything else is refused by the server with the counts in it (409
+  // — see app/routers/mailboxes.py::delete_mailbox) and *that* sentence is what
+  // gets put in front of the user, because only the server knows what is really
+  // in the subtree. What the sidebar knows here only chooses which question to
+  // ask; it never decides what gets deleted.
+  async function deleteFolder(mailboxId) {
+    const acc = accounts().find((a) => a.mailboxes.some((m) => m.id === mailboxId));
+    const mb = acc && acc.mailboxes.find((m) => m.id === mailboxId);
+    if (!mb) return;
+    const path = mb.path || mb.display_name;
+    const kids = acc.mailboxes.filter((m) => (m.path || "").startsWith(path + "/"));
+    const bare = !mb.total && !kids.length;
+    if (bare && !confirm(`Delete the empty folder ${path}?`)) return;
+    try {
+      await App.api.deleteMailbox(mb.id, false);
+    } catch (e) {
+      // Anything but "confirm this first" is a refusal to report as it stands —
+      // an account with a server behind it, or a folder somebody else has
+      // already deleted.
+      if (e.status !== 409) return alert(e.message || "Could not delete the folder");
+      if (!confirm(`${e.message}\n\nDelete ${path} and everything in it?`)) return;
+      try {
+        await App.api.deleteMailbox(mb.id, true);
+      } catch (err) {
+        return alert(err.message || "Could not delete the folder");
+      }
+    }
+    // Standing in the folder that just went — or in one of its children — the
+    // list is now a query about a mailbox id nothing answers to. Hand the
+    // selection back to the default rather than leaving the pane showing a
+    // folder that has stopped existing.
+    const gone = new Set([mb.id, ...kids.map((m) => m.id)]);
+    const stranded = !!selection && gone.has(currentMailboxId());
+    sidebar = await App.api.mailboxes();
+    renderSidebar();
+    if (stranded) { selection = null; selectDefault(); }
+    else await loadList(true);
+  }
+
   // --- Selection + list ---
   async function select(sel) {
     if (!sel) return;
@@ -265,6 +327,7 @@ App.shell = (function () {
     if (App.outbox && selection && selection.outbox && sel.key !== "outbox") App.outbox.clear();
     selection = sel;
     $("#list-title").textContent = sel.title;
+    paintPaneAction();
     document.querySelectorAll(".mailbox-row.active").forEach((n) => n.classList.remove("active"));
     const el = document.querySelector(`.mailbox-row[data-key="${sel.key}"]`);
     if (el) el.classList.add("active");
@@ -409,6 +472,19 @@ App.shell = (function () {
   // one button whose meaning depends on it.
   function currentRole() { return (selection && selection.role) || ""; }
 
+  // The verb that belongs to the folder itself rather than to a selection.
+  // Exactly one so far — Empty Trash — and it is drawn only where standing in
+  // the folder is the whole of what it acts on. A search is showing results
+  // from everywhere, so the folder underneath it is not what the eye is on and
+  // the button goes: emptying a Trash while looking at search hits would be a
+  // deletion aimed at something other than what is on screen.
+  function paintPaneAction() {
+    const btn = $("#btn-empty-trash");
+    if (!btn) return;
+    const searching = !!(App.search && App.search.isActive());
+    btn.hidden = searching || currentRole() !== "trash";
+  }
+
   // Called after an action changed what the list should show. loadList() bails
   // while a search is up (it would replace the results with the folder), so the
   // search has to refresh itself — otherwise a deleted conversation sits on
@@ -417,6 +493,7 @@ App.shell = (function () {
     if (App.search && App.search.isActive()) return App.search.rerun();
     if (!selection) return;
     $("#list-title").textContent = selection.title;
+    paintPaneAction();
     await loadList(true);   // an archive from row 200 shouldn't snap back to page one
   }
 
@@ -764,6 +841,7 @@ App.shell = (function () {
     $("#settings-modal").addEventListener("click", (e) => {
       if (e.target.id === "settings-modal") closeSettings();
     });
+    $("#btn-empty-trash").addEventListener("click", () => App.bulk.emptyOpenFolder());
     $("#btn-close-folder").innerHTML = App.icon("close", 18);
     $("#btn-close-folder").addEventListener("click", closeFolder);
     $("#folder-modal").addEventListener("click", (e) => {
@@ -852,7 +930,7 @@ App.shell = (function () {
 
   return { boot, currentMailboxId, mailboxesFor, accounts, reloadList, goto,
            openSettings, closeSettings, settingsOpen,
-           closeFolder, folderOpen, listSelector, currentTitle, currentRole,
+           closeFolder, folderOpen, listSelector, currentTitle, currentRole, paintPaneAction,
            listTotal: () => listTotal,
            moveFolder, moveFolderAndOpen, openFocusedFolder, setFolderKeyFocus };
 })();

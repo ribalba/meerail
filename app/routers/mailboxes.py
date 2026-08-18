@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session as DBSession
 from core import ingest, outbox as outbox_core
 from core.database import get_db
 from core.ingest import FOLDER_SEP
-from .. import mailops
+from .. import events, mailops
 from ..deps import require_ui_auth
 from core.models import (
     Account, Mailbox, MessageLocation, Outbound, PendingAction, Reminder, utcnow,
@@ -304,3 +304,121 @@ def set_favorite(mailbox_id: int, favorite: bool, db: DBSession = Depends(get_db
     mb.favorite = favorite
     db.commit()
     return {"id": mb.id, "favorite": mb.favorite}
+
+
+# How many placements one delete-a-folder request takes out at a time. The same
+# number the bulk routes chunk on, and for the same reason: a mis-aimed import
+# is tens of thousands of rows, and the IN list of a single DELETE over all of
+# them is not a statement anybody wants to see in a log.
+PURGE_CHUNK = 2000
+
+# What deleting a folder is refused with off an account something syncs, and
+# why. The folder is the server's, not ours: dropping the row here would delete
+# this app's copy of the mail in it and the next LIST would put the folder
+# straight back, empty, having achieved nothing except losing the local copy of
+# everything that was in it. Same shape as the refusal on permanently deleting
+# mail (app/routers/actions.py::NOT_LOCAL) and for the same reason — a delete
+# that the next sync undoes is a delete that silently failed.
+NOT_LOCAL_FOLDER = (
+    "This folder lives on a mail server, so it has to be deleted there — meerail "
+    "would only drop its own copy and the next sync would list the folder straight "
+    "back. Delete it in your mail provider's client and it goes from here on the "
+    "next pass.")
+
+
+def _subtree(account: Account, mailboxes: list[Mailbox], root: Mailbox) -> list[Mailbox]:
+    """The folder, and every folder filed underneath it.
+
+    Deleting "old" is deleting the twenty folders inside it: a child left behind
+    would be a row whose parent is gone, which the sidebar draws at the top
+    level under a name that no longer says where it came from. Resolved through
+    _chains rather than by matching name prefixes, so it means the same thing
+    the sidebar's indentation does — a folder is only a child where the parent
+    is itself a folder that exists.
+    """
+    chains = _chains(account, mailboxes)
+    return [m for m in mailboxes if any(a.id == root.id for a in chains[m.id])]
+
+
+@router.delete("/{mailbox_id}")
+def delete_mailbox(mailbox_id: int, confirm: bool = False, db: DBSession = Depends(get_db)):
+    """Delete a folder, with what is filed in it. Imported accounts only.
+
+    The other half of the ``+`` button, and the question a mis-aimed import
+    actually asks: an mbox that went in under the wrong name is twenty folders
+    somebody never meant to have, several of them empty, and until now there was
+    no button anywhere in meerail that removed one. Emptying them one by one
+    left the folders themselves standing.
+
+    Children go with it (see _subtree), and so does the mail, through
+    mailops.purge: dropping the Mailbox row alone would take every placement
+    with it down the foreign key's ON DELETE CASCADE and leave the messages
+    behind, filed in no folder at all — invisible, unreachable and still holding
+    their raw MIME and every attachment byte. That is the bug purge was written
+    for, arriving by a different door. A message that is also filed somewhere
+    else keeps that copy; only mail this folder was the last home of is
+    destroyed.
+
+    ``confirm`` is the caller saying out loud that it means it, and it is asked
+    for only when there is something to lose — a folder holding neither mail nor
+    other folders is deleted on the first request, because "are you sure" about
+    an empty folder is a dialog that teaches people to click through dialogs.
+    Anything else answers 409 with the counts in it, which is the sentence the
+    browser then puts in front of the user rather than a number it worked out
+    for itself.
+    """
+    mb = db.get(Mailbox, mailbox_id)
+    if mb is None:
+        raise HTTPException(status_code=404, detail="Mailbox not found")
+    account = db.get(Account, mb.account_id)
+    if account is None or not account.local:
+        raise HTTPException(status_code=400, detail=NOT_LOCAL_FOLDER)
+
+    mbs = db.execute(select(Mailbox).where(Mailbox.account_id == account.id)).scalars().all()
+    doomed = _subtree(account, mbs, mb)
+    ids = [m.id for m in doomed]
+
+    held = db.scalar(select(func.count()).select_from(MessageLocation)
+                     .where(MessageLocation.mailbox_id.in_(ids))) or 0
+    if not confirm and (held or len(doomed) > 1):
+        raise HTTPException(status_code=409, detail=_what_goes(mb, doomed, held))
+
+    # Chunked, and re-queried each pass rather than walked once: purge expires
+    # the session as it goes, and the next chunk is simply "whatever is still
+    # filed here".
+    touched: set[int] = set()
+    destroyed = 0
+    while True:
+        loc_ids = list(db.execute(
+            select(MessageLocation.id).where(MessageLocation.mailbox_id.in_(ids))
+            .limit(PURGE_CHUNK)).scalars().all())
+        if not loc_ids:
+            break
+        destroyed += mailops.purge(db, loc_ids, touched)
+
+    for row in doomed:
+        db.delete(row)
+    db.commit()
+    events.publish({"type": "folders", "account": account.email, "removed": len(doomed)})
+    return {"ok": True, "folders": len(doomed), "deleted": destroyed, "held": held}
+
+
+def _what_goes(mb: Mailbox, doomed: list[Mailbox], held: int) -> str:
+    """The sentence a folder delete has to be confirmed against.
+
+    Written here because only this side knows what is actually in the subtree —
+    the sidebar has a count per folder and no idea which of the others hang off
+    this one — and because the two numbers mean different things: folders is how
+    much of the tree disappears, and messages is what stops existing.
+    """
+    name = mb.display_name or mb.imap_name
+    parts = []
+    if held:
+        parts.append(f"{held} message{'' if held == 1 else 's'}")
+    kids = len(doomed) - 1
+    if kids:
+        parts.append(f"{kids} folder{'' if kids == 1 else 's'} inside it")
+    what = " and ".join(parts)
+    return (f"{name} holds {what}. Deleting the folder deletes {'them' if held else 'those'} "
+            f"— this mail was imported, so meerail holds the only copy of it, and mail that "
+            f"is not also filed somewhere else is gone for good.")

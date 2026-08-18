@@ -113,6 +113,9 @@ App.search = (function () {
       e.status.textContent = data.total === 0 ? "No results"
         : `${data.total}${more} result${data.total === 1 && !more ? "" : "s"}`;
       $("#list-title").textContent = e.rx.checked ? "Regex search" : "Search";
+      // The folder's own verb goes with its name: what is on screen is no
+      // longer the folder. See App.shell.paintPaneAction.
+      App.shell.paintPaneAction();
       return true;
     } catch (ex) {
       if (request !== requestSeq) return false;

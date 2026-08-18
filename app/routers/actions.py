@@ -495,12 +495,14 @@ class BulkPurgeAllRequest(BulkTrashAllRequest):
     confirm: bool = False
 
 
-# What permanent delete is refused with off an imported account, and why. Named
-# because both routes below say it and it is the whole reason they are limited
-# that way: this operation deletes rows, and on an account with a server behind
+# What a whole-folder permanent delete is refused with off an imported account,
+# and why: this operation deletes rows, and on an account with a server behind
 # it the rows are a copy. Deleting the copy achieves nothing except making the
 # message vanish until the next pass fetches it again — which looks exactly like
-# a delete that silently failed, hours later, with no button to blame.
+# a delete that silently failed, hours later, with no button to blame. The
+# per-conversation route has a second path for those accounts instead, because
+# there the server can be told (see _expunge_from_trash); a folder-wide one has
+# a name already, and it is Empty Trash.
 NOT_LOCAL = ("Permanently deleting mail is for imported accounts, where this app holds "
              "the only copy. This account has a mail server behind it, which still has "
              "the message — delete it, then empty the Trash.")
@@ -521,9 +523,59 @@ def _require_confirmed(confirm: bool) -> None:
                                    "be confirmed explicitly")
 
 
+# What a permanent delete aimed at mail that is not in Trash is refused with on
+# an account with a server behind it. Deleting the rows there would only hide a
+# message the server still has, until the next pass fetched it again; what *can*
+# be destroyed is what the server has already been told is rubbish, and this is
+# the sentence that says which half of that a caller has hit.
+NOT_IN_TRASH = ("This account has a mail server behind it, so mail can only be deleted "
+                "for good once it is in Trash. Delete it first — that files it there — "
+                "and then delete it again.")
+
+# The gap between the app asking for a move to Trash and the agent having made
+# it: there is no UID to expunge yet, and refusing for a moment is the honest
+# answer. Same wording as the one move_to gives a re-aimed move mid-flight.
+STILL_MOVING = "This message is still being moved to Trash — try again in a moment"
+
+
+def _expunge_from_trash(db: DBSession, message_pks: set[int], touched: set[int],
+                        op_id: str) -> int:
+    """Tell the server to destroy these, for the accounts that have one.
+
+    The single-conversation counterpart of Empty Trash, and it does exactly what
+    that does to one message: \\Deleted plus a UID EXPUNGE against the placement
+    sitting in Trash. Only that placement — a label server files the same message
+    under \\All and whatever else it wears, and "delete this out of the Trash" is
+    not permission to strip labels off mail elsewhere, any more than emptying the
+    folder is.
+
+    Mail that is not in Trash is refused rather than trashed-then-expunged. Two
+    keypresses is what makes the destructive one deliberate, and inferring the
+    first from the second is how a Delete on an inbox row would quietly become a
+    delete nothing comes back from.
+    """
+    trash = mailops.trash_ids(db)
+    msgs = db.execute(
+        select(Message).where(Message.id.in_(message_pks))
+        .options(selectinload(Message.locations))
+    ).scalars().all()
+    done = 0
+    for msg in msgs:
+        here = [loc for loc in msg.locations if loc.mailbox_id in trash]
+        locs = [loc for loc in here if loc.imap_uid > 0]
+        if not locs:
+            raise HTTPException(status_code=409 if here else 400,
+                                detail=STILL_MOVING if here else NOT_IN_TRASH)
+        for loc in locs:
+            mailops.move_to(db, msg, loc.mailbox_id, None, touched,
+                            op_id=op_id, op_kind="delete")
+        done += 1
+    return done
+
+
 @router.post("/bulk/purge")
 def bulk_purge(req: BulkPurgeRequest, db: DBSession = Depends(get_db)):
-    """Destroy the selected conversations. Imported accounts only.
+    """Destroy the selected conversations.
 
     The answer to the question an imported mailbox actually asks — "I do not
     want a Trash, I want this gone" — and it is a separate route with a separate
@@ -532,14 +584,25 @@ def bulk_purge(req: BulkPurgeRequest, db: DBSession = Depends(get_db)):
     the Trash it means is made on the spot (mailops.trash_mailbox), so nothing
     that was recoverable before stops being.
 
-    Every placement of every message goes, not just the one the folder on screen
-    shows. Someone ticking a conversation and asking for it to be gone has not
-    said anything about which folder they were standing in, and a copy left
-    behind under another folder's name is the delete not having worked.
+    On an imported account every placement of every message goes, not just the
+    one the folder on screen shows. Someone ticking a conversation and asking
+    for it to be gone has not said anything about which folder they were
+    standing in, and a copy left behind under another folder's name is the
+    delete not having worked.
 
-    There is no op_id and no Undo. The rows are the mail; once they are gone
-    there is nothing for an undo to put back, and offering one that could not is
-    worse than not offering it. See mailops.purge.
+    An account with a server behind it takes the other path, and only from Trash
+    (_expunge_from_trash). Deleting its rows here would achieve nothing — the
+    server still has the message and the next pass fetches it back — which is
+    why this route used to refuse those accounts outright. But refusing was the
+    whole answer, and the folder that answer left broken was Trash itself:
+    Delete on a message already in it moved it to where it already was, said
+    "This is already in Trash", and offered nothing else. Emptying the whole
+    folder was the only way to remove one message from it.
+
+    There is no Undo either way. On an imported account the rows are the mail;
+    on a server one the expunge is on its way out. The op_id is for the panel,
+    so that "6 messages deleted" is something a person can see they did — see
+    move_to's delete branch and mailops.purge.
     """
     _require_confirmed(req.confirm)
 
@@ -554,9 +617,9 @@ def bulk_purge(req: BulkPurgeRequest, db: DBSession = Depends(get_db)):
             loose.add(item.message_id)
 
     accounts: set[int] = set()
-    message_pks: set[int] = set()
+    imported: set[int] = set()          # message pks whose rows are the mail
+    served: dict[int, set[int]] = {}    # account -> message pks a server holds
     for account_id, (threads, loose) in by_account.items():
-        _require_local(db, account_id)
         match = []
         if threads:
             match.append(Message.thread_id.in_(threads))
@@ -564,13 +627,25 @@ def bulk_purge(req: BulkPurgeRequest, db: DBSession = Depends(get_db)):
             match.append(Message.id.in_(loose))
         if not match:
             continue
-        message_pks.update(db.execute(
+        pks = set(db.execute(
             select(Message.id).where(Message.account_id == account_id, or_(*match))
         ).scalars().all())
+        if not pks:
+            continue
         accounts.add(account_id)
+        if mailops.is_local(db, account_id):
+            imported.update(pks)
+        else:
+            served[account_id] = pks
 
     touched: set[int] = set()
-    deleted = mailops.purge_messages(db, message_pks, touched)
+    op_id = undo.new_op_id()      # for the panel only; see move_to's delete branch
+    deleted = 0
+    for pks in served.values():
+        deleted += _expunge_from_trash(db, pks, touched, op_id)
+    # Last, and after every expunge: purge expires the session, which would pull
+    # the Message rows out from under a walk still to come.
+    deleted += mailops.purge_messages(db, imported, touched)
     mailops.recompute(db, touched)
     db.commit()
     mailops.announce(db, accounts, deleted)
