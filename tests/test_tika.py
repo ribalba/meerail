@@ -48,6 +48,34 @@ def test_rejected_bytes_are_permanent(monkeypatch):
     assert tika.extract_text(b"document", "text/plain") is tika.UNPROCESSABLE
 
 
+def test_a_heap_exhaustion_is_the_file_not_the_service(monkeypatch):
+    """Tika answers an OOM with a 500 whose body names it.
+
+    It is the one 5xx that must not be retried: rendering a PDF page for OCR
+    allocates from the decoded size of the images inside it, so the same file
+    takes the same heap every pass, and this server does not recover from an OOM
+    — it answers 503 to everything afterwards. Handing it back is a queue that
+    never moves again.
+    """
+    _capture(monkeypatch, Response(500, "java.lang.OutOfMemoryError: Java heap space"))
+    assert tika.extract_text(b"document", "application/pdf") is tika.UNPROCESSABLE
+
+
+def test_an_ordinary_server_error_is_still_retryable(monkeypatch):
+    _capture(monkeypatch, Response(500, "something else went wrong"))
+    assert tika.extract_text(b"document", "application/pdf") is None
+
+
+def test_a_dropped_connection_is_blamed_on_the_payload(monkeypatch):
+    """Distinct from ConnectError: the request was accepted and then the far end
+    went away, which is what a JVM exiting under this very file looks like."""
+    def died(*_args, **_kwargs):
+        raise httpx.RemoteProtocolError("server disconnected")
+
+    monkeypatch.setattr(tika.httpx, "put", died)
+    assert tika.extract_text(b"document", "application/pdf") is tika.CRASHED
+
+
 def test_back_pressure_stays_retryable(monkeypatch):
     _capture(monkeypatch, Response(429))
     assert tika.extract_text(b"document", "text/plain") is None

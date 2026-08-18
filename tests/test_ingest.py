@@ -1075,6 +1075,45 @@ def test_attached_images_are_still_queued_for_ocr(account):
     assert png["extract_status"] == "pending"
 
 
+def _tika_answers(monkeypatch, *answers):
+    """Stub tika.extract_text to give these answers in order."""
+    from core.mail import tika
+
+    queue = list(answers)
+    monkeypatch.setattr(tika, "extract_text", lambda *a, **k: queue.pop(0))
+    return queue
+
+
+def test_a_crash_that_repeats_burns_the_file(monkeypatch):
+    """A payload that takes Tika down does it again on the way back.
+
+    Left pending it would be handed to every future pass, killing the service
+    each time, and nothing behind it in the queue would ever be reached.
+    """
+    from core.mail import tika
+
+    _tika_answers(monkeypatch, tika.CRASHED, tika.CRASHED)
+    monkeypatch.setattr(tika, "wait_for_health", lambda *a, **k: True)
+    assert ingest._extract_one(b"pdf", "application/pdf") == (None, "reject")
+
+
+def test_a_bystander_of_someone_elses_crash_is_retried(monkeypatch):
+    """Two drains share the queue, so a crash takes an innocent request with it."""
+    from core.mail import tika
+
+    _tika_answers(monkeypatch, tika.CRASHED, "the text")
+    monkeypatch.setattr(tika, "wait_for_health", lambda *a, **k: True)
+    assert ingest._extract_one(b"pdf", "application/pdf") == ("the text", "keep")
+
+
+def test_a_crash_it_never_comes_back_from_leaves_the_queue_alone(monkeypatch):
+    from core.mail import tika
+
+    _tika_answers(monkeypatch, tika.CRASHED)
+    monkeypatch.setattr(tika, "wait_for_health", lambda *a, **k: False)
+    assert ingest._extract_one(b"pdf", "application/pdf") == (None, "stop")
+
+
 def test_sync_marks_backfill_complete(account):
     """The agent's end-of-pass report lands on the account row the UI reads."""
     email, aid = account["email"], account["id"]

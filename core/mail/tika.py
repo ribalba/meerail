@@ -13,6 +13,8 @@ a file that can never succeed. See ``extract_text``.
 
 from __future__ import annotations
 
+import time
+
 import httpx
 
 from ..config import get_settings
@@ -61,6 +63,24 @@ class _Unprocessable:
 UNPROCESSABLE = _Unprocessable()
 
 
+class _Crashed:
+    """Singleton marker: the JVM went away with this payload inside it.
+
+    Distinct from ``None``: nothing answered, but the connection was accepted
+    and the request was in flight, and Tika does not drop requests it is merely
+    busy with. What does drop them is the process dying — which for a payload
+    this client chose is the payload's doing, not the service's. See
+    core/ingest.py, which waits for Tika to come back and then burns the file
+    rather than handing it the same one forever.
+    """
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid only
+        return "CRASHED"
+
+
+CRASHED = _Crashed()
+
+
 class _Timeout:
     """Singleton marker: Tika accepted the bytes and never answered in time.
 
@@ -93,6 +113,11 @@ _MAGIC = (
 # 4xx means Tika understood the request, so retrying changes nothing — except
 # for these two, which are back-pressure and genuinely worth another pass.
 _TRANSIENT_STATUSES = {408, 429}
+
+# What a heap exhaustion looks like from this side: a 500 whose body carries the
+# JVM's own words for it. Worth matching on, because it is the one 5xx that is a
+# property of the file rather than of the service — see extract_text.
+_OOM_MARKERS = ("OutOfMemoryError", "Java heap space")
 
 
 def should_extract(content_type: str, filename: str = "") -> bool:
@@ -174,9 +199,27 @@ def extract_text(payload: bytes, content_type: str, timeout: float = 60.0):
         resp = httpx.put(url, content=payload, headers=headers, timeout=timeout)
     except httpx.TimeoutException:
         return TIMEOUT
+    except httpx.ConnectError:
+        # Refused or unreachable: this payload never got in, so it cannot be
+        # what is wrong. Temporary, like the None below.
+        return None
+    except httpx.HTTPError:
+        # Connected, sent, and then the far end vanished. See CRASHED.
+        return CRASHED
     except Exception:
         return None
-    if resp.status_code >= 500 or resp.status_code in _TRANSIENT_STATUSES:
+    if resp.status_code >= 500:
+        # A heap exhaustion is a 500, and it is entirely a property of this
+        # file: rendering a PDF page for OCR allocates from the *decoded* size
+        # of the images inside it, so a 2MB PDF holding one 9000x12000 scan
+        # takes ~300MB every time it is parsed. Handing it back to Tika only
+        # kills Tika again — and this server does not recover from that, it
+        # answers 503 to everything until the container is restarted. So it is
+        # burned like any other file Tika cannot read.
+        if any(m in (resp.text or "") for m in _OOM_MARKERS):
+            return UNPROCESSABLE
+        return None
+    if resp.status_code in _TRANSIENT_STATUSES:
         return None
     if resp.status_code >= 400:
         return UNPROCESSABLE
@@ -189,3 +232,21 @@ def health() -> bool:
         return resp.status_code == 200
     except Exception:
         return False
+
+
+def wait_for_health(timeout: float = 60.0, interval: float = 2.0) -> bool:
+    """Whether Tika answers within ``timeout``, polling until it does.
+
+    Only used after a crash, to tell "the file killed it and it came back" from
+    "the service is gone". A container restarting is seconds; waiting a minute
+    for it costs one pause on a path that should almost never be taken, and
+    getting the answer wrong costs either a permanently wedged queue or a file
+    burned for something that was not its fault.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        if health():
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(interval)

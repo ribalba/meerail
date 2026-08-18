@@ -1026,6 +1026,51 @@ def pending_attachment_count(db, queue: str) -> int:
     ) or 0
 
 
+def _extract_one(content, content_type) -> tuple[str | None, str]:
+    """Tika's answer for one attachment, resolved to what to do with the row.
+
+    Returns (text, "keep"), (None, "reject") to burn the row, or (None, "stop")
+    to leave it — and everything queued behind it — for a later pass. Every
+    branch here is the same question: is what went wrong a property of this
+    file, or of the service? Getting it backwards either wedges the queue behind
+    a file that can never succeed, or throws away an attachment because Tika
+    happened to be restarting.
+    """
+    body = tika.extract_text(content or b"", content_type)
+    if isinstance(body, str):
+        return body, "keep"
+    if body is tika.UNPROCESSABLE:
+        # Tika read the bytes and refused them — a truncated or mislabelled
+        # file, or one that exhausted its heap. Retrying is guaranteed to fail
+        # again, and leaving it pending parks it at the head of every future
+        # batch and stalls the whole queue behind it, so burn it and keep going.
+        return None, "reject"
+    if body is tika.TIMEOUT:
+        # Tika took the bytes and never came back. Ask whether the service is
+        # still answering at all: if it is, this file is the problem and burning
+        # it is the same call as UNPROCESSABLE — a payload that times out once
+        # times out every pass. If Tika is genuinely down, it is not this file's
+        # fault, so leave the queue alone and let a later pass retry it.
+        return (None, "reject") if tika.health() else (None, "stop")
+    if body is tika.CRASHED:
+        # The service died with this attachment inside it. Wait for it to come
+        # back — under a restart policy that is seconds — and then hand it the
+        # same file once more. Twice is what tells a poison pill from a
+        # bystander: a drain running alongside another one loses its in-flight
+        # request too when the JVM goes, and that payload did nothing wrong,
+        # while a file that exhausts the heap does it again on the way back.
+        if not tika.wait_for_health():
+            return None, "stop"
+        second = tika.extract_text(content or b"", content_type)
+        if isinstance(second, str):
+            return second, "keep"
+        if second is tika.CRASHED or second is tika.UNPROCESSABLE:
+            return None, "reject"
+        return None, "stop"
+    # None: Tika is unreachable. Leave this and the remainder pending.
+    return None, "stop"
+
+
 def extract_pending(db, limit: int = EXTRACT_BATCH) -> int:
     """Run Tika over a batch of pending attachments and refresh search text.
 
@@ -1054,28 +1099,10 @@ def extract_pending(db, limit: int = EXTRACT_BATCH) -> int:
     extracted: list[tuple[int, int, str]] = []
     rejected: list[tuple[int, int]] = []
     for att_id, message_pk, content, content_type in pending:
-        body = tika.extract_text(content or b"", content_type)
-        if body is tika.TIMEOUT:
-            # Tika took the bytes and never came back. Ask whether the service
-            # is still answering at all: if it is, this file is the problem and
-            # burning it is the same call as UNPROCESSABLE below — a payload
-            # that times out once times out every pass, and leaving it pending
-            # parks it at the head of every future batch forever. If Tika is
-            # genuinely down, it is not this file's fault, so leave the queue
-            # alone and let a later pass retry it.
-            if tika.health():
-                rejected.append((att_id, message_pk))
-                continue
+        body, verdict = _extract_one(content, content_type)
+        if verdict == "stop":
             break
-        if body is None:
-            # Tika is unavailable. Leave this and the remainder pending so the
-            # next sync pass can retry them.
-            break
-        if body is tika.UNPROCESSABLE:
-            # Tika read the bytes and refused them — a truncated or mislabelled
-            # file. Retrying is guaranteed to fail again, and leaving it pending
-            # parks it at the head of every future batch and stalls the whole
-            # queue behind it, so burn it and keep going.
+        if verdict == "reject":
             rejected.append((att_id, message_pk))
             continue
         extracted.append((att_id, message_pk, body))

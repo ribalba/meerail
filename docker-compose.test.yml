@@ -56,12 +56,34 @@ services:
     build: ./tika
     ports:
       - "127.0.0.1:59998:9998"
+    # Single-process mode, deliberately. Tika's default is a watchdog parent
+    # plus a forked child, so that a parse which exhausts the heap kills only
+    # the child — except that the service does not come back from it: the child
+    # is restarted, and every request afterwards is answered 503, for every
+    # file, until somebody restarts the container by hand. Reproduced with a
+    # 1.7MB PDF holding one 9000x12000 scan, which is enough to exhaust the heap
+    # while PDFBox renders the page for OCR. In one process that OOM ends the
+    # process instead, and `restart` below has Tika serving again about two
+    # seconds later. -XX:+ExitOnOutOfMemoryError is what makes that prompt: the
+    # JVM leaves rather than limping on with a half-collected heap.
+    command: ["-h", "0.0.0.0", "-noFork"]
     environment:
-      JAVA_TOOL_OPTIONS: "-XX:MaxRAMPercentage=60"
+      JAVA_TOOL_OPTIONS: "-XX:MaxRAMPercentage=60 -XX:+ExitOnOutOfMemoryError"
     deploy:
       resources:
         limits:
           memory: 2g
+    # Same as production: a parse that exhausts the heap ends the process, and
+    # nothing brings it back without this.
+    restart: unless-stopped
+    healthcheck:
+      # So a Tika that has stopped answering shows up as unhealthy rather than
+      # as an indexing queue that quietly stops moving.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:9998/version || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   server:
     build: .
