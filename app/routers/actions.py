@@ -419,6 +419,12 @@ def bulk_empty_trash(req: EmptyTrashRequest, db: DBSession = Depends(get_db)):
     as far as any mail server knows, still sitting in the folder it came from,
     and "empty the Trash" is not permission to delete it there. It stays in Trash
     until the move lands, and the next empty takes it.
+
+    On an imported account there is no server to expunge from and the row is the
+    mail, so the same button deletes the rows — see mailops.purge, which is also
+    what the `bulk/purge` routes below run. Emptying it through the queue path
+    dropped the placement and left the message in the database in no folder at
+    all: a Trash that reported itself emptied while every byte of it stayed.
     """
     if not req.confirm:
         raise HTTPException(status_code=400,
@@ -452,6 +458,10 @@ def bulk_empty_trash(req: EmptyTrashRequest, db: DBSession = Depends(get_db)):
     touched: set[int] = set()
     accounts: set[int] = set()
     deleted = 0
+    # Collected and run in one statement after the loop rather than per message:
+    # mailops.purge expires the session to keep the identity map honest, which
+    # would pull `msg` out from under the rows still to be walked.
+    purge_ids: list[int] = []
     op_id = undo.new_op_id()      # for the panel only; see move_to's delete branch
     for loc in locs:
         msg = by_id.get(loc.message_pk)
@@ -459,15 +469,168 @@ def bulk_empty_trash(req: EmptyTrashRequest, db: DBSession = Depends(get_db)):
             db.delete(loc)
             touched.add(loc.mailbox_id)
             continue
-        # IMAP \Deleted + UID EXPUNGE
-        mailops.move_to(db, msg, loc.mailbox_id, None, touched, op_id=op_id, op_kind="delete")
+        if mailops.is_local(db, msg.account_id):
+            purge_ids.append(loc.id)
+        else:
+            # IMAP \Deleted + UID EXPUNGE
+            mailops.move_to(db, msg, loc.mailbox_id, None, touched,
+                            op_id=op_id, op_kind="delete")
         accounts.add(msg.account_id)
         deleted += 1
+    mailops.purge(db, purge_ids, touched)
 
     mailops.recompute(db, touched)
     db.commit()
     mailops.announce(db, accounts, deleted)
     return {"ok": True, "deleted": deleted, "done": remaining <= len(locs)}
+
+
+class BulkPurgeRequest(BulkTrashRequest):
+    """The ticked rows, and the caller saying out loud that it means it."""
+    confirm: bool = False
+
+
+class BulkPurgeAllRequest(BulkTrashAllRequest):
+    """Everything matching the list selector, and the same confirmation."""
+    confirm: bool = False
+
+
+# What permanent delete is refused with off an imported account, and why. Named
+# because both routes below say it and it is the whole reason they are limited
+# that way: this operation deletes rows, and on an account with a server behind
+# it the rows are a copy. Deleting the copy achieves nothing except making the
+# message vanish until the next pass fetches it again — which looks exactly like
+# a delete that silently failed, hours later, with no button to blame.
+NOT_LOCAL = ("Permanently deleting mail is for imported accounts, where this app holds "
+             "the only copy. This account has a mail server behind it, which still has "
+             "the message — delete it, then empty the Trash.")
+
+
+def _require_local(db: DBSession, account_id: int) -> None:
+    if not mailops.is_local(db, account_id):
+        raise HTTPException(status_code=400, detail=NOT_LOCAL)
+
+
+def _require_confirmed(confirm: bool) -> None:
+    """`confirm` defaults to false, so a client that forgets it gets an error
+    rather than a deletion — the same contract as Empty Trash, for the same
+    reason."""
+    if not confirm:
+        raise HTTPException(status_code=400,
+                            detail="Permanently deleting mail cannot be undone and has to "
+                                   "be confirmed explicitly")
+
+
+@router.post("/bulk/purge")
+def bulk_purge(req: BulkPurgeRequest, db: DBSession = Depends(get_db)):
+    """Destroy the selected conversations. Imported accounts only.
+
+    The answer to the question an imported mailbox actually asks — "I do not
+    want a Trash, I want this gone" — and it is a separate route with a separate
+    name for the same reason Empty Trash is: mail is only ever destroyed by
+    something that says destroy in its name. Delete still means Trash here, and
+    the Trash it means is made on the spot (mailops.trash_mailbox), so nothing
+    that was recoverable before stops being.
+
+    Every placement of every message goes, not just the one the folder on screen
+    shows. Someone ticking a conversation and asking for it to be gone has not
+    said anything about which folder they were standing in, and a copy left
+    behind under another folder's name is the delete not having worked.
+
+    There is no op_id and no Undo. The rows are the mail; once they are gone
+    there is nothing for an undo to put back, and offering one that could not is
+    worse than not offering it. See mailops.purge.
+    """
+    _require_confirmed(req.confirm)
+
+    # Grouped per account exactly like bulk_trash: one query per account rather
+    # than a thread lookup per ticked row.
+    by_account: dict[int, tuple[set[str], set[int]]] = {}
+    for item in req.items:
+        threads, loose = by_account.setdefault(item.account_id, (set(), set()))
+        if item.thread_id:
+            threads.add(item.thread_id)
+        elif item.message_id:
+            loose.add(item.message_id)
+
+    accounts: set[int] = set()
+    message_pks: set[int] = set()
+    for account_id, (threads, loose) in by_account.items():
+        _require_local(db, account_id)
+        match = []
+        if threads:
+            match.append(Message.thread_id.in_(threads))
+        if loose:
+            match.append(Message.id.in_(loose))
+        if not match:
+            continue
+        message_pks.update(db.execute(
+            select(Message.id).where(Message.account_id == account_id, or_(*match))
+        ).scalars().all())
+        accounts.add(account_id)
+
+    touched: set[int] = set()
+    deleted = mailops.purge_messages(db, message_pks, touched)
+    mailops.recompute(db, touched)
+    db.commit()
+    mailops.announce(db, accounts, deleted)
+    return {"ok": True, "deleted": deleted}
+
+
+@router.post("/bulk/purge-all")
+def bulk_purge_all(req: BulkPurgeAllRequest, db: DBSession = Depends(get_db)):
+    """Destroy everything a folder selector matches, a chunk at a time.
+
+    The whole-folder version of bulk_purge — "this import went in the wrong
+    place, take all of it back out" — chunked and looped by the client like
+    bulk_trash_all, because forty thousand rows is not one request. `done` is
+    reported against the count *before* the chunk, and every placement in the
+    chunk is deleted, so the loop cannot fail to terminate the way a selector
+    that keeps re-matching its own output can.
+
+    `flagged` is refused rather than supported. That selector spans every
+    account, which is how a flagged message sitting in someone's Trash was once
+    destroyed by a button that never said so; a permanent delete aimed at a
+    filter rather than a folder is that mistake with the safety catch removed.
+    A folder is a place a person is standing in and can see the size of.
+
+    `deleted` counts messages that stopped existing and `removed` counts
+    placements taken out, and they differ: an mbox imported twice into two
+    folders is one message wearing two placements, and emptying one of those
+    folders removes a placement without destroying anything. The client loops on
+    `removed`, because that is the number that says whether the chunk moved.
+    """
+    _require_confirmed(req.confirm)
+    if req.scope == "flagged":
+        raise HTTPException(
+            status_code=400,
+            detail="Permanently deleting everything flagged is not offered — flagged mail "
+                   "spans every folder and account. Open a folder and delete that.")
+
+    ids = _resolve_mailbox_ids(db, req.mailbox_id, req.scope)
+    if not ids:
+        raise HTTPException(status_code=400, detail="No mailbox selected")
+    accounts = set(db.execute(
+        select(Mailbox.account_id).where(Mailbox.id.in_(ids))
+    ).scalars().all())
+    for account_id in accounts:
+        _require_local(db, account_id)
+
+    conds = [MessageLocation.mailbox_id.in_(ids)]
+    if req.unread_only:
+        conds.append(MessageLocation.seen.is_(False))
+    remaining = db.scalar(
+        select(func.count()).select_from(MessageLocation).where(*conds)) or 0
+    loc_ids = list(db.execute(
+        select(MessageLocation.id).where(*conds).limit(BULK_ALL_CHUNK)).scalars().all())
+
+    touched: set[int] = set()
+    deleted = mailops.purge(db, loc_ids, touched)
+    mailops.recompute(db, touched)
+    db.commit()
+    mailops.announce(db, accounts, deleted)
+    return {"ok": True, "deleted": deleted, "removed": len(loc_ids),
+            "done": remaining <= len(loc_ids)}
 
 
 @router.post("/{message_id}/mark")

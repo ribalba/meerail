@@ -37,7 +37,7 @@ from .parse import (
 )
 from .threading import assign_thread
 from .thumbs import should_thumb
-from .tika import should_extract
+from .tika import is_ocr_type, should_extract
 
 
 def build_search_text(parsed: ParsedEmail, attachment_texts: list[str] | None = None) -> str:
@@ -493,13 +493,11 @@ def _store_content(db: Session, msg: Message, parsed: ParsedEmail, raw: bytes) -
     # meerail.toml, or STORE_RAW_MIME) leaves the column NULL instead.
     msg.raw_mime = raw if get_settings().store_raw_mime else None
 
-    needs_extract = any(
-        should_extract(a.content_type, a.filename) and a.payload for a in parsed.attachments
-    )
+    needs_extract = any(_extractable(a) for a in parsed.attachments)
     msg.extract_status = "pending" if needs_extract else "none"
 
     for att in parsed.attachments:
-        extractable = should_extract(att.content_type, att.filename) and bool(att.payload)
+        extractable = _extractable(att)
         # Inline parts are the signature logos and tracking pixels embedded in
         # the body; they are never listed as attachments, so a preview of one
         # would only ever be rendering nobody looks at.
@@ -519,6 +517,28 @@ def _store_content(db: Session, msg: Message, parsed: ParsedEmail, raw: bytes) -
                 thumb_status="pending" if thumbable else "skipped",
             )
         )
+
+
+def _extractable(att) -> bool:
+    """Whether this part is worth queueing for Tika.
+
+    Everything ``should_extract`` takes, minus inline images. Those are the
+    signature logos, footers and tracking pixels embedded in the body — and
+    each one is an OCR round trip, seconds of Tesseract in the Tika container,
+    over a picture nobody will ever search for. A mailbox's worth of them
+    (twenty thousand imported messages is tens of thousands of logos) buries
+    the queue for hours behind work with no result in it, which is why previews
+    already skip inline parts.
+
+    Inline *documents* stay queued: Apple Mail sends genuine attachments with
+    Content-Disposition: inline, and the text of an attached PDF is exactly
+    what search wants. Only the OCR types are declined.
+    """
+    if not att.payload:
+        return False
+    if att.is_inline and is_ocr_type(att.content_type):
+        return False
+    return should_extract(att.content_type, att.filename)
 
 
 def replace_content(db: Session, msg: Message, raw: bytes) -> None:

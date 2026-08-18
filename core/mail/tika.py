@@ -102,6 +102,27 @@ def should_extract(content_type: str, filename: str = "") -> bool:
     return any(ct.startswith(p) for p in _EXTRACTABLE_PREFIXES)
 
 
+def ocr_types() -> frozenset[str]:
+    """The image types extraction sends through OCR.
+
+    Exposed so callers that have to express the set as a query rather than a
+    per-row predicate — core/database.py's one-time retire of inline images
+    already queued — cannot drift from the predicate below.
+    """
+    return frozenset(_OCR_TYPES)
+
+
+def is_ocr_type(content_type: str) -> bool:
+    """Whether extracting this type means OCR rather than reading text out.
+
+    Callers use it to weigh the cost: OCR is seconds of CPU in the Tika
+    container per file, where a PDF or a .docx is a parse. See
+    core/mail/store.py, which declines to queue inline images on the strength
+    of it.
+    """
+    return (content_type or "").split(";")[0].strip().lower() in _OCR_TYPES
+
+
 def _sniff(payload: bytes) -> str | None:
     """Identify raster bytes by their signature, or None if unrecognised."""
     for prefix, ctype in _MAGIC:

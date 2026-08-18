@@ -101,6 +101,25 @@ def import_raw_message(email: str, raw: bytes, folder: str = "INBOX",
         ingest.advance_cursor(db, mailbox, uid)
 
 
+def message_survives(message_pk: int) -> dict:
+    """What is left of a message row, and of everything hanging off it.
+
+    A different question from ``placements``, and the one a permanent delete has
+    to answer: a message filed in no folder at all is invisible in every list
+    and still holds its raw MIME, its attachment bytes and its extracted text.
+    That is the state Empty Trash used to leave imported mail in.
+    """
+    with session() as db:
+        msg = db.get(Message, message_pk)
+        return {
+            "message": msg is not None,
+            "attachments": db.query(Attachment).filter(
+                Attachment.message_pk == message_pk).count(),
+            "locations": db.query(MessageLocation).filter(
+                MessageLocation.message_pk == message_pk).count(),
+        }
+
+
 def placements(email: str, message_pk: int) -> list[dict]:
     """Where a message is filed, and under what UID in each folder."""
     with session() as db:

@@ -39,12 +39,12 @@ and it is a bigger change than moving the code was.
 from __future__ import annotations
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session as DBSession
 
 from core import undo
 from core.events import publish_command
-from core.ingest import derive_role
+from core.ingest import derive_role, ensure_local_folder
 from core.mail.store import (
     is_pending, move_in_flight, place_local, place_pending, recompute_counts,
 )
@@ -193,7 +193,7 @@ def trash_ids(db: DBSession) -> set[int]:
 
 
 def trash_mailbox(db: DBSession, account_id: int) -> Mailbox:
-    """Where "trash" files mail. There is no second place to look.
+    """Where "trash" files mail, making it first if this account owns its own folders.
 
     Unlike archive_mailbox, a missing \\Trash has no equivalent that still
     means "put this somewhere I can get it back from": the only other thing the
@@ -203,17 +203,30 @@ def trash_mailbox(db: DBSession, account_id: int) -> Mailbox:
     the server into every trashed message being gone for good, with the UI
     showing exactly what it shows for a normal trash.
 
-    So it fails instead, and says why. The account is one folder away from
-    working; the mail it would otherwise have eaten is not recoverable at all.
+    So on an account with a server behind it this fails, and says why. The
+    account is one folder away from working; the mail it would otherwise have
+    eaten is not recoverable at all.
+
+    An imported account has no server to be one folder away from, and no way for
+    a person to go and make the folder on: the refusal was simply Delete not
+    working, on every message in every folder of every mbox anyone imported,
+    with a sentence about syncing again underneath it. Here the missing folder
+    is a folder this app owns and can write — the same thing the ``+`` button
+    does — so it is made on the spot and the keypress goes through. See
+    ``core.ingest.ensure_local_folder`` and, for destroying imported mail rather
+    than filing it, ``purge``.
     """
     target = role_mailbox(db, account_id, "trash")
-    if target is None:
-        raise HTTPException(
-            status_code=400,
-            detail="This account has no Trash folder, so there is nowhere to trash to. "
-                   "Create one on the server (or mark an existing folder \\Trash) and "
-                   "sync again.")
-    return target
+    if target is not None:
+        return target
+    account = db.get(Account, account_id)
+    if account is not None and account.local:
+        return ensure_local_folder(db, account, "Trash")
+    raise HTTPException(
+        status_code=400,
+        detail="This account has no Trash folder, so there is nowhere to trash to. "
+               "Create one on the server (or mark an existing folder \\Trash) and "
+               "sync again.")
 
 
 def _named_archive(db: DBSession, account_id: int) -> Mailbox | None:
@@ -679,6 +692,85 @@ def move_to(db: DBSession, msg: Message, source_mailbox_id: int, target: Mailbox
         if target is not None:
             touched.add(target.id)
     return True
+
+
+# --- destroying mail that exists nowhere else ---------------------------------
+
+
+def purge(db: DBSession, location_ids: list[int], touched: set[int]) -> int:
+    """Delete placements outright, and the mail behind any left filed nowhere.
+
+    What "delete" has to mean for an account nothing syncs. Everywhere else the
+    destructive operation is an instruction — \\Deleted plus a UID EXPUNGE, sent
+    to the server that holds the mail — and this app's own copy going away is a
+    consequence of the next sync finding the message gone. An imported account
+    has no such server: the row *is* the mail, so there is nothing to instruct
+    and nothing that would ever come back to confirm it. Emptying its Trash
+    through the queue path wrote a "delete" nobody would read and dropped the
+    placement, which left the message sitting in the database in no folder at
+    all — invisible, undeletable, and still holding its raw MIME and every
+    attachment byte. On a mis-aimed 770-message import that is the whole import,
+    kept forever, in exchange for a folder that merely looks empty.
+
+    Placements go first and the message only follows if that was its last one.
+    An mbox imported twice into two folders is one Message row wearing two
+    placements, and emptying one folder's Trash is not permission to destroy the
+    copy filed in the other. When every placement has gone there is nothing left
+    to reach the message by, and it is the message that gets deleted — which
+    takes its raw MIME, attachments, extracted text, previews, recipients,
+    reminders and queue rows with it through the foreign keys' ON DELETE
+    CASCADE, rather than leaving them to be paid for by a mailbox that no longer
+    shows the mail.
+
+    Returns the number of messages destroyed, which is not the number of
+    placements passed in and is the count worth reporting: it is what has
+    actually stopped existing.
+
+    Deleted in two statements rather than through ``db.delete(msg)`` per row.
+    The ORM cascade would load every collection it is emptying to do it, and
+    ``Attachment.content`` is not deferred, so a chunk of two thousand messages
+    would be two thousand messages' worth of attachment bytes pulled into Python
+    purely to be thrown away. Postgres does the same cascade without reading any
+    of it. ``expire_all`` afterwards is what keeps the identity map from handing
+    a caller a Message that no longer has a row.
+    """
+    if not location_ids:
+        return 0
+    rows = db.execute(
+        select(MessageLocation.message_pk, MessageLocation.mailbox_id)
+        .where(MessageLocation.id.in_(location_ids))
+    ).all()
+    if not rows:
+        return 0
+    message_pks = {pk for pk, _ in rows}
+    touched.update(mailbox_id for _, mailbox_id in rows)
+
+    db.execute(delete(MessageLocation).where(MessageLocation.id.in_(location_ids)))
+    db.flush()
+    still_filed = set(db.execute(
+        select(MessageLocation.message_pk)
+        .where(MessageLocation.message_pk.in_(message_pks))
+    ).scalars().all())
+    orphaned = message_pks - still_filed
+    if orphaned:
+        db.execute(delete(Message).where(Message.id.in_(orphaned)))
+    db.expire_all()
+    return len(orphaned)
+
+
+def purge_messages(db: DBSession, message_pks: set[int], touched: set[int]) -> int:
+    """Destroy whole messages, wherever they are filed. See ``purge``.
+
+    The selection version: someone ticked conversations and asked for them to be
+    gone, which is every placement of every message in them and not just the one
+    the folder on screen happens to show.
+    """
+    if not message_pks:
+        return 0
+    location_ids = list(db.execute(
+        select(MessageLocation.id).where(MessageLocation.message_pk.in_(message_pks))
+    ).scalars().all())
+    return purge(db, location_ids, touched)
 
 
 def move_messages(db: DBSession, msgs: list[Message], target: Mailbox | None,

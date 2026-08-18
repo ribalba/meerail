@@ -211,6 +211,18 @@ App.api = {
     return this.request("POST", "/api/messages/bulk/empty-trash",
                         { mailbox_id: mailboxId, confirm: true });
   },
+  // Destroying imported mail outright: the ticked rows, or everything the
+  // selector matches a chunk per call. Offered only for accounts nothing syncs,
+  // where this app holds the only copy and "delete" can have no other meaning —
+  // the server refuses either of these aimed anywhere else. `confirm` is its
+  // requirement, like Empty Trash's. See app/routers/actions.py::bulk_purge.
+  bulkPurge(items) {
+    return this.request("POST", "/api/messages/bulk/purge", { items, confirm: true });
+  },
+  bulkPurgeAll(selector) {
+    return this.request("POST", "/api/messages/bulk/purge-all",
+                        { ...selector, confirm: true });
+  },
   // "Remind me": the conversation is filed away now and comes back at `due`.
   // The instant is computed here rather than asked for by name because "next
   // Monday, nine o'clock" is a question about this browser's calendar and

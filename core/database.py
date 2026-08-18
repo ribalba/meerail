@@ -154,6 +154,7 @@ def init_db() -> None:
     # Idempotent column fixups so an existing volume upgrades in place instead of
     # needing a wipe. create_all never alters existing tables.
     if settings.database_url.startswith("postgresql"):
+        from .mail.tika import ocr_types as tika_ocr_types
         from .models import DEFAULT_FOOTER
 
         # Asked before the ALTER below adds it: on an existing volume the answer
@@ -192,6 +193,13 @@ def init_db() -> None:
             "thumb_status VARCHAR(16) NOT NULL DEFAULT 'skipped'",
             "CREATE INDEX IF NOT EXISTS ix_attachments_thumb_pending "
             "ON attachments (id) WHERE thumb_status = 'pending'",
+            # The same shape for the text queue, which never had one: every
+            # extract batch, and every "how much is left" the indexer or the
+            # importer asks, was a seq scan over a table whose rows are the
+            # attachment payloads themselves. Partial and self-erasing, so it
+            # costs nothing once the backlog is drained.
+            "CREATE INDEX IF NOT EXISTS ix_attachments_extract_pending "
+            "ON attachments (id) WHERE extract_status = 'pending'",
             # What a message's bytes hash to, which is what tells two messages
             # sharing a Message-ID apart. NULL on every existing row, and read as
             # "cannot say" — those fall back to comparing headers until the next
@@ -431,6 +439,32 @@ def init_db() -> None:
             _run_migration(
                 "DELETE FROM pending_actions WHERE type <> 'send' AND account_id IN "
                 "(SELECT id FROM accounts WHERE local)"
+            )
+
+        # Inline images queued for OCR before core/mail/store.py::_extractable
+        # stopped queueing them. Every signature logo and tracking pixel in the
+        # mailbox is a Tesseract round trip in the Tika container, and an import
+        # of a large archive leaves tens of thousands of them queued — a backlog
+        # measured in hours, ahead of every document actually worth reading, and
+        # one that comes back the next time anything drains the queue. Retiring
+        # them is the same call the ingest path now makes; what has already been
+        # extracted is left alone.
+        #
+        # No matching rollup on messages.extract_status: nothing reads it (the
+        # queue is the attachment column), and the alternative is a scan of the
+        # whole message table on every startup.
+        # Guarded: create_all never alters an existing table, so a volume old
+        # enough to predate the column would meet a ProgrammingError here — and
+        # a tidy-up is not allowed to be the thing that stops the server.
+        _ocr_types = sorted(tika_ocr_types())
+        if _column_exists("attachments", "is_inline"):
+            _run_migration(
+                "UPDATE attachments SET extract_status = 'skipped' "
+                "WHERE extract_status = 'pending' AND is_inline "
+                "AND btrim(lower(split_part(content_type, ';', 1))) IN ("
+                + ", ".join(f":ct{i}" for i in range(len(_ocr_types)))
+                + ")",
+                {f"ct{i}": ct for i, ct in enumerate(_ocr_types)},
             )
 
         # Give accounts predating the default footer one — but only those the

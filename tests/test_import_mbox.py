@@ -267,6 +267,33 @@ def test_import_indexes_attachment_text_into_search(tmp_path, email):
         assert token in search_text
 
 
+def test_a_drain_that_stops_early_says_what_is_still_queued(
+        tmp_path, email, monkeypatch, capsys):
+    """extract_pending returns 0 both for "queue empty" and for "Tika stopped
+    answering", so a run that gave up half way through a backlog printed the
+    same "Indexed N attachment(s)" as one that finished. The leftovers then came
+    out during the *next* import — which is why importing a single message
+    looked like it was re-indexing an archive imported an hour earlier."""
+    box = write_mbox(tmp_path / "withpdf.mbox", [
+        make_message(f"<{uuid.uuid4().hex}@t>", "Has a PDF", "x@y.com", email,
+                     "see attached", T0, pdf_text="STOPPEDEARLY"),
+    ])
+
+    from core import ingest
+
+    # Tika is up as far as the tool can tell, and the queue still does not move:
+    # exactly what a container that starts refusing connections mid-drain looks
+    # like from here.
+    monkeypatch.setattr(tika, "health", lambda: True)
+    monkeypatch.setattr(ingest, "extract_pending", lambda db, *a, **k: 0)
+
+    assert import_mbox.main([str(box), "--account", email]) == 0
+
+    out = capsys.readouterr().out
+    assert "Indexed 0 attachment(s)" in out
+    assert "still queued for text extraction" in out
+
+
 def test_refuses_an_account_the_agent_syncs(tmp_path, email, monkeypatch, capsys):
     box = write_mbox(tmp_path / "x.mbox", [
         make_message(f"<{uuid.uuid4().hex}@t>", "Subject", "x@y.com", email, "b", T0),

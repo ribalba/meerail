@@ -156,8 +156,25 @@ App.keys = (function () {
         // Backspace too: the Mac "delete" key reports Backspace, not Delete.
         // With rows ticked this deletes the selection rather than the open
         // thread — that is the whole point of having ticked them.
+        //
+        // Holding Shift is the permanent version, and only on the two Delete
+        // keys: "#" is typed *with* Shift on most layouts, so reading shiftKey
+        // alone would quietly turn the ordinary trash shortcut into one that
+        // destroys mail. It also only applies where App.bulk offers it at all —
+        // ticked rows, every one of them in an imported account — and falls
+        // back to the plain trash everywhere else, which is what the unmodified
+        // key would have done anyway.
         { keys: ["#", "Delete", "Backspace"], show: "# / Del", label: "Move to trash",
-          run: () => (App.bulk.isActive() ? App.bulk.trash() : App.reader.action("trash")) },
+          run: (e) => {
+            if (!App.bulk.isActive()) return App.reader.action("trash");
+            const forever = e.shiftKey && (e.key === "Delete" || e.key === "Backspace");
+            return forever && App.bulk.canPurge() ? App.bulk.purge() : App.bulk.trash();
+          } },
+        // Display-only, like the other modified keys: the row above is what
+        // runs it. Listed because it is the one shortcut here that mail does
+        // not come back from, and an undocumented destructive key is worse than
+        // no key at all.
+        { show: "⇧ Del", label: "Delete permanently (imported)" },
         { keys: ["s"], show: "s", label: "Toggle flag",
           run: () => App.reader.action("flag") },
         { keys: ["u"], show: "u", label: "Mark unread",

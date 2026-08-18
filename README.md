@@ -662,8 +662,9 @@ removes one because a connection failed.
 
 | What | When | |
 | --- | --- | --- |
-| A message you trash or archive | You pressed it | Leaves the folder locally at once and is applied to IMAP on the next pass. It is a move, never a deletion: with no Trash folder on the account the action is refused rather than turned into an expunge. |
-| Everything in Trash | You pressed **Empty Trash**, in Trash, and confirmed | The only thing in meerail that destroys mail: `\Deleted` plus a UID `EXPUNGE`, aimed one message at a time. It cannot be reached from any other button — no ordinary delete, however many messages it covers, is ever re-read as this one. |
+| A message you trash or archive | You pressed it | Leaves the folder locally at once and is applied to IMAP on the next pass. It is a move, never a deletion: with no Trash folder on the account the action is refused rather than turned into an expunge. An imported account is the exception — there the Trash folder is meerail's own to make, so it is made and the move goes through. |
+| Everything in Trash | You pressed **Empty Trash**, in Trash, and confirmed | The thing that destroys mail: `\Deleted` plus a UID `EXPUNGE`, aimed one message at a time. It cannot be reached from any other button — no ordinary delete, however many messages it covers, is ever re-read as this one. On an imported account there is no server to expunge from, so it deletes the rows instead: the message, its raw copy and its attachments. |
+| Imported mail you delete permanently | You pressed **Delete permanently** (or Shift+Delete) and confirmed | Imported accounts only, where this app holds the only copy and Trash is a folder in this database and nothing else. The message and everything hanging off it is deleted outright, from every folder it was filed in, with no Undo. Refused on any account a mail server stands behind: there the message here is a copy, and deleting a copy is a delete that undoes itself on the next pass. See [Tidying up after an import](#tidying-up-after-an-import-folders-moving-deleting). |
 | Mail deleted on your phone or in webmail | The server no longer lists its UID | meerail mirrors the server; a message deleted elsewhere goes here too. Only ever on a UID list the server has confirmed in full — see below. |
 | A folder | It has been gone from the server's `LIST` for an hour | Its messages go with it, unless they are also filed elsewhere. Never on an empty `LIST`, and never on one absence: a Bridge that is still loading answers with part of the mailbox, so a folder that disappears is marked and kept — with all its mail — until it stays gone. Never for a folder meerail made itself — an imported account's folders, and any you add to one — which is absent from `LIST` by definition. |
 | A message no folder holds any more | At the end of a completed pass, hours after the last placement went | Almost always a reused UID after a `UIDVALIDITY` reset: the walk binds the number to the message that has it now, and the one it used to mean is left with no folder, invisible and still on disk. Never asked mid-pass, when a message is legitimately between folders, and never about one a queued action still names. |
@@ -901,29 +902,56 @@ without `--force`. The agent deletes folders its IMAP server does not list ([Wha
 deletes, and when](#what-meerail-deletes-and-when)), and an imported folder exists nowhere
 but here, so its next pass would take the imported mail with it.
 
-#### Rearranging what you imported
+#### Tidying up after an import: folders, moving, deleting
 
-An imported account is marked as one nothing syncs, and that changes what the UI does with
-it rather than what it offers. Everywhere else, making a folder or filing a message is an
-*instruction*: the app writes it down and an agent applies it to your mail server. Here
-there is no agent and never will be, so the same buttons do the work themselves and the
-result is on screen on the way back from the click.
+An import rarely lands right the first time. Here is how to fix it from the app — the
+folder you meant, the mail in the folder you did not mean, and the mail you want gone.
 
-- **New folders are made, not requested.** The `+` on the account heading creates the
-  folder immediately. (It used to answer "queued — appears once the agent syncs", about an
-  agent that does not exist, and nothing ever appeared.)
-- **Folders nest.** Type `Archive/2024` and you get `2024` inside `Archive`, with `Archive`
-  created if it is not there yet — up to eight levels. This is not special to imported
-  accounts; see [Nested folders](#nested-folders) for the accounts that do have a server.
-- **Moving mail is just moving mail.** Filing an imported message — one, a selection, or a
-  whole folder with **Select all** — writes the placement and is finished. It still shows
-  in Recent actions with a working **Undo**, which matters more here than anywhere else:
-  no mail server is holding a second copy of where things were.
+Everything below happens **immediately**. Imported mail exists only in meerail, so there is
+no mail server to tell and nothing to wait for: you click, and the result is there when the
+page comes back. On an account an agent syncs, the same buttons write down what you asked
+for and the agent applies it to the server minutes later.
 
-The flag corrects itself if the address stops being imported-only. Configure an agent for
-it and the first sync pass takes ownership back — from then on the folders come from the
-server and the buttons go back to queueing. Folders you made in the meantime are marked as
-local and are the one thing that pass will *not* delete for being missing from `LIST`.
+**Make a folder.** Press the `+` on the account heading in the sidebar, type a name and
+press **Create**; the box closes onto a sidebar that already has the folder in it. Type a
+path to nest — `Archive/2024` puts `2024` inside `Archive`, creating `Archive` if it is not
+there — up to eight levels.
+
+**Move mail into it.** Tick the rows you want and press **Move to…** in the bar that
+appears above the list, then pick the folder.
+
+**Move a whole folder's worth.** Tick any row, then press **Select all N** in that same bar
+— it appears once every loaded row is ticked and the folder holds more. **Move to…** now
+means all N, including the pages you never scrolled to; it runs in chunks with a count so a
+folder of forty thousand is progress rather than a request that times out. This is the
+"imported into the wrong folder" fix.
+
+**Undo a move.** **Recent actions** in the sidebar lists the last dozen operations, one
+entry per click however many messages it covered, each with an **Undo**. Worth knowing here
+more than anywhere else: no mail server is holding a second copy of where things were.
+
+**Delete, keeping a way back.** Press Delete (or `#`) as usual. The message goes to
+**Trash** — and if the account has no Trash folder, because the mbox you imported had none,
+meerail makes one for it on the spot. It sits there until you empty it, exactly like mail
+you deleted anywhere else.
+
+**Delete for good.** Tick the rows and press **Delete permanently**, the second red button
+in the bar; **Shift+Delete** does the same thing. It asks once and then the mail is gone
+from the database — the message, its raw copy, its attachments, its extracted text. There
+is no Undo, because there is nothing left to put back. With **Select all N** it means the
+whole folder, in chunks like the move. Emptying the Trash of an imported account does the
+same thing to everything in it.
+
+That button only exists on imported accounts. On an account with a mail server behind it
+the message here is a copy, and deleting the copy would only make it vanish until the next
+sync fetched it back; there, deleting for good is **Empty Trash**, which tells the server
+to expunge. See [What meerail deletes, and when](#what-meerail-deletes-and-when).
+
+One thing to know if the address is ever configured for real. The "nothing syncs this"
+flag corrects itself: the first sync pass takes ownership back, and from then on the folders
+come from the server and the buttons go back to queueing. Folders you made in the meantime
+are marked as local and are the one thing that pass will *not* delete for being missing from
+`LIST`.
 
 ### Putting back mail whose move never landed
 

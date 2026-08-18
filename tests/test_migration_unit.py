@@ -12,10 +12,16 @@ an install that had been serving attachments the day before started answering
 that loses somebody's mail.
 """
 
+import uuid
+from datetime import datetime, timezone
+
 from sqlalchemy import text
 
 import dbfixture
-from core.database import engine, _retire_disk_columns
+from core.database import engine, init_db, _retire_disk_columns
+from helpers import make_message
+
+T0 = datetime(2026, 4, 1, 9, 0, tzinfo=timezone.utc)
 
 
 def _column_exists(name: str) -> bool:
@@ -60,3 +66,46 @@ def test_the_migration_does_nothing_when_the_column_was_never_there(account):
     assert not _column_exists("raw_path")
     _retire_disk_columns()
     assert not _column_exists("raw_path")
+
+
+def _att_status(subject: str) -> str:
+    with engine.connect() as conn:
+        return conn.execute(text(
+            "SELECT a.extract_status FROM attachments a "
+            "JOIN messages m ON m.id = a.message_pk "
+            "WHERE m.subject = :s AND a.filename = 'photo.png'"
+        ), {"s": subject}).scalar()
+
+
+def test_inline_images_already_queued_for_ocr_are_retired(account):
+    """The rows the old ingest path left behind, which nothing else clears.
+
+    Extraction OCRs images, and it used to queue the inline ones — every
+    signature logo and tracking pixel in the mailbox. An archive import left
+    tens of thousands of them pending, and because the queue is global they came
+    out during whatever ran next: importing a single message spent a quarter of
+    an hour OCRing logos from mail imported an hour earlier. New mail no longer
+    queues them (core/mail/store.py::_extractable); this is the backlog.
+    """
+    email = account["email"]
+    inline, attached = (f"Logo {uuid.uuid4().hex[:8]}", f"Photo {uuid.uuid4().hex[:8]}")
+    for n, subject in enumerate((inline, attached), start=1):
+        dbfixture.ingest_raw_message(email, make_message(
+            f"<{uuid.uuid4().hex}@t>", subject, "x@y.com", email, "body", T0,
+            png=True), uid=900 + n)
+
+    # What an old row looks like: inline, and queued for OCR anyway.
+    with engine.begin() as conn:
+        conn.execute(text(
+            "UPDATE attachments SET is_inline = TRUE, extract_status = 'pending' "
+            "WHERE message_pk IN (SELECT id FROM messages WHERE subject = :s)"
+        ), {"s": inline})
+    assert _att_status(inline) == "pending"
+
+    init_db()
+
+    assert _att_status(inline) == "skipped"
+    # And the attached one is untouched: it is listed as an attachment, somebody
+    # may well search for what the photo says, and it is one file rather than a
+    # mailbox's worth of decoration.
+    assert _att_status(attached) == "pending"

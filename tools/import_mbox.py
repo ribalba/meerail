@@ -556,22 +556,46 @@ def import_messages(db, account, folder: str, box, *, keep_unread: bool,
     return imported, skipped
 
 
-def drain(db, fn, label: str) -> int:
-    """Run one of the indexer's queues to empty. Returns how many it processed.
+# What each queue is for, in words, so the count printed before a drain says
+# what the wait is about rather than repeating the progress label.
+_QUEUE_WORK = {"extract": "text extraction", "thumb": "preview rendering"}
+
+
+def drain(db, fn, queue: str, label: str) -> tuple[int, int]:
+    """Run one of the indexer's queues to empty. Returns (processed, left).
 
     Both queues are global rather than per-account: the import is what filled
     them, but a running agent's backlog drains here too, which is a bonus rather
-    than a problem.
+    than a problem. It is also why the queue is measured and announced — an
+    import of a single message can have thousands of attachments to work
+    through, and without a number in front of it that reads as the tool having
+    hung on one message.
+
+    ``left`` is what is still queued when the loop stops, and it is not
+    necessarily zero: extract_pending returns 0 both for "nothing queued" and
+    for "Tika stopped answering", so a drain that gives up mid-backlog is
+    indistinguishable from a finished one unless the count is asked for
+    afterwards. It used to be reported as "Indexed 18 attachment(s)" with
+    thousands still pending and no hint that anything had gone wrong — and the
+    next import then appeared to be indexing mail it had never touched.
     """
+    from core import ingest
+
     total = 0
+    queued = ingest.pending_attachment_count(db, queue)
+    if queued:
+        print(f"  {queued} attachment(s) queued for {_QUEUE_WORK[queue]} — that is "
+              f"everything pending in the database, not only what this import added.",
+              flush=True)
     progress = Progress()
     while True:
         n = fn(db)
         db.commit()
         if not n:
-            return total
+            break
         total += n
-        progress.maybe(f"{label}: {total} so far")
+        progress.maybe(f"{label}: {total} of {queued} so far")
+    return total, ingest.pending_attachment_count(db, queue)
 
 
 def run(mbox_path: Path, email: str, folder: str | None, *, keep_unread: bool,
@@ -645,19 +669,35 @@ def run(mbox_path: Path, email: str, folder: str | None, *, keep_unread: bool,
             print(f"! Tika is not answering at {cfg.tika_url} — attachment text cannot "
                   "be extracted. The attachments stay queued; run this again (or start "
                   "the agent) once Tika is up.", flush=True)
-            extracted = 0
+            extracted = left_extract = 0
         else:
-            extracted = drain(db, ingest.extract_pending, "attachments indexed")
+            extracted, left_extract = drain(
+                db, ingest.extract_pending, "extract", "attachments indexed"
+            )
         if not thumbs.available():
             # thumb_pending returns 0 rather than burning the queue to 'error',
             # so this would otherwise read as "nothing to render".
             print("! the preview renderer (PyMuPDF, Pillow) is not installed here — "
                   "previews stay queued for the agent.", flush=True)
-            thumbed = 0
+            thumbed = left_thumb = 0
         else:
-            thumbed = drain(db, ingest.thumb_pending, "previews rendered")
+            thumbed, left_thumb = drain(
+                db, ingest.thumb_pending, "thumb", "previews rendered"
+            )
         print(f"Indexed {extracted} attachment(s) and rendered {thumbed} preview(s).",
               flush=True)
+        # Said out loud, because the line above otherwise reads as "done" over a
+        # backlog that the next import silently works through instead.
+        if left_extract:
+            print(f"! {left_extract} attachment(s) are still queued for text "
+                  "extraction — the drain stopped with work left, which means Tika "
+                  "stopped answering part way through. They stay queued: a running "
+                  "agent picks them up, or run this again once Tika is healthy.",
+                  flush=True)
+        if left_thumb:
+            print(f"! {left_thumb} attachment(s) are still queued for previews. They "
+                  "stay queued for the agent, or for the next run of this tool.",
+                  flush=True)
 
         contacts = _rebuild_contacts(db, cfg)
         if contacts is not None:

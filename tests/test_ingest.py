@@ -1033,6 +1033,48 @@ def test_inline_attachments_are_not_previewed(account):
     assert dbfixture.thumb_all() == 0
 
 
+def test_inline_images_are_not_queued_for_ocr(account):
+    """The same logos and pixels, and the same reason: extraction OCRs images.
+
+    Every inline image is a Tesseract round trip in the Tika container, seconds
+    apiece, over a picture nobody searches for — and a mailbox holds tens of
+    thousands of them. Queueing them buried real documents behind hours of
+    signature logos, on a queue that is shared by every account.
+    """
+    email = account["email"]
+    mid = f"ocr-{uuid.uuid4().hex}@t"
+    # A PDF *and* a PNG, both re-labelled inline the way Apple Mail sends them.
+    raw = make_message(f"<{mid}>", "Inline both", "x@y.com", email, "body", T0,
+                       pdf_text="INLINEDOC", png=True)
+    raw = raw.replace(b'Content-Disposition: attachment; filename="photo.png"',
+                      b'Content-Disposition: inline; filename="photo.png"')
+    raw = raw.replace(b'Content-Disposition: attachment; filename="report.pdf"',
+                      b'Content-Disposition: inline; filename="report.pdf"')
+    dbfixture.ingest_raw_message(email, raw, uid=1)
+
+    rows = {r["filename"]: r for r in dbfixture.attachment_rows(email)}
+    assert rows["photo.png"]["is_inline"] is True
+    assert rows["photo.png"]["extract_status"] == "skipped"
+    # The document is inline too, and stays queued: Apple Mail sends genuine
+    # attachments with Content-Disposition: inline, and a PDF's text is exactly
+    # what search wants. Only the OCR types are declined.
+    assert rows["report.pdf"]["is_inline"] is True
+    assert rows["report.pdf"]["extract_status"] == "pending"
+
+
+def test_attached_images_are_still_queued_for_ocr(account):
+    """The opposite case, so the rule above cannot quietly become "no images"."""
+    email = account["email"]
+    mid = f"ocr2-{uuid.uuid4().hex}@t"
+    raw = make_message(f"<{mid}>", "Attached photo", "x@y.com", email, "body", T0,
+                       png=True)
+    dbfixture.ingest_raw_message(email, raw, uid=1)
+
+    png = next(r for r in dbfixture.attachment_rows(email) if r["filename"] == "photo.png")
+    assert png["is_inline"] is False
+    assert png["extract_status"] == "pending"
+
+
 def test_sync_marks_backfill_complete(account):
     """The agent's end-of-pass report lands on the account row the UI reads."""
     email, aid = account["email"], account["id"]
