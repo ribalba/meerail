@@ -71,6 +71,11 @@ def test_defaults_fill_the_gaps(config):
     # Not mentioned anywhere in CONFIG.
     assert load().poll_interval == 30
     assert load().contacts_scan_years == 1
+    # A year, not everything. A search costs what it has to look at, so the
+    # install that never touches this setting is the one that most needs it to
+    # be narrow — see app/routers/search.py, where a request that names no
+    # window gets this one rather than twenty years of mail.
+    assert load().default_search_years == 1
 
 
 def test_environment_overrides_the_file(config, monkeypatch):

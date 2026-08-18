@@ -78,7 +78,13 @@ services:
       SECRET_KEY: test-insecure
       DATA_DIR: /data
       TIKA_URL: http://tika:9998
-      # 0 = no window, so seeded fixtures dated in the past stay findable.
+      # 0 = no window, so seeded fixtures dated in the past stay findable. The
+      # shipped default is a year (server.default_search_years), and the suite
+      # dates its fixtures from a fixed T0 — so leaving that default in place
+      # would quietly turn the whole of test_search.py red one year after T0,
+      # on a calendar rather than on a change. What the default *is* belongs to
+      # tests/test_config_unit.py, which can assert it without depending on
+      # today's date.
       DEFAULT_SEARCH_YEARS: 0
       CONTACTS_SCAN_YEARS: 0
       # The reminder worker's poll interval. A minute in production, because

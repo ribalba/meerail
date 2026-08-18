@@ -1,10 +1,17 @@
 """Regex + keyword search over the whole corpus (subject + participants + body +
-extracted attachment text), accelerated by the pg_trgm GIN index on search_text.
+extracted attachment text).
 
-- mode=regex   -> Postgres ~* (real POSIX regex). The date-window filter
-  bounds patterns that can't use the trigram index (no literal >=3 chars).
+- mode=regex   -> Postgres ~* (real POSIX regex), over the pg_trgm GIN index on
+  search_text. The date-window filter bounds patterns that can't use that index
+  (no literal >=3 chars).
 - mode=keyword -> AND of substrings; "quoted runs" stay one term so spaces
-  inside them are matched literally.
+  inside them are matched literally. Answered from the GIN index on search_tsv,
+  which holds every suffix of every word in the message: a substring of a word
+  is a prefix of one of its suffixes, so this is the same answer ILIKE gave
+  without reading the text to get it. A term that spans the separators the
+  index splits on ("50% off", an address) uses the tsquery as a prefilter and
+  rechecks with ILIKE, which by then costs a handful of rows. See
+  core/database.py for the index and app/searchquery.py for the split.
 
 Both modes are case-insensitive: mail is not typed consistently enough for
 case to be a useful filter, and a miss looks identical to "no such mail".
@@ -22,15 +29,19 @@ import re
 from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import and_, exists, func, or_, select, tuple_
+from sqlalchemy import and_, cast, exists, func, literal, or_, select, text, tuple_
+from sqlalchemy.dialects.postgresql import TSQUERY
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session as DBSession
 
+from core.config import get_settings
 from core.database import get_db
 from .messages import _not_deleted
 from .. import searchquery
 from ..deps import require_ui_auth
 from core.models import Account, Message, MessageLocation, Recipient, utcnow
+
+settings = get_settings()
 
 router = APIRouter(prefix="/api", tags=["search"], dependencies=[Depends(require_ui_auth)])
 
@@ -49,6 +60,59 @@ def _check_regex(pattern: str, where: str) -> str:
     return pattern
 
 
+# Postgres' code for "cancelled because it ran past statement_timeout", which is
+# the one DBAPIError here that is not the user's pattern being wrong.
+_QUERY_CANCELED = "57014"
+
+# A ceiling on a single search. The browser drops a search the next keystroke
+# has superseded and aborts its fetch, but this endpoint is synchronous and
+# never learns that the client hung up, so without a limit an abandoned query
+# goes on holding a pooled connection until it finishes. Deliberately generous:
+# keyword search is milliseconds, so anything near this is a regex doing
+# something pathological, and cutting it off is the only way it ends.
+SEARCH_TIMEOUT_MS = 20_000
+
+# How many matching messages a page is allowed to look at before it stops
+# counting conversations. Deliberately far more than the sixty a page shows,
+# because carrying ids is nearly free next to finding the rows in the first
+# place: measured on a 113k-message mailbox, raising this from 15k to 80k moved
+# an ordinary search by a millisecond or two and the widest one by nothing at
+# all. Every match that fits inside the budget is one the "N results" line can
+# count exactly rather than rounding up to "N+", and at this size only a term
+# matching most of the mailbox falls outside it.
+SCAN_BUDGET = 80_000
+
+# The ceiling on the widening pass below. Past here the answer is "a lot", and
+# spending longer to say how many of a lot helps nobody.
+MAX_SCAN = 400_000
+
+
+def _bound_runtime(db: DBSession) -> None:
+    if db.get_bind().dialect.name == "postgresql":
+        # LOCAL, so it lasts exactly as long as this request's transaction and
+        # cannot leak onto the next thing to borrow the connection.
+        db.execute(text(f"SET LOCAL statement_timeout = {SEARCH_TIMEOUT_MS}"))
+
+
+# Whether every message has its search_tsv yet. False only between the upgrade
+# that adds the column and the moment core.searchindex finishes filling it in,
+# and during that window keyword search stays on the ILIKE path — slower, but a
+# search that quietly skipped the mail not yet indexed would be worse than a
+# slow one. Latched, because a row that has the value can never lose it again:
+# the trigger fills it on the way in, so once there are none missing there never
+# will be. See ix_messages_search_tsv_missing for why asking is one index probe.
+_index_ready = False
+
+
+def _index_built(db: DBSession) -> bool:
+    global _index_ready
+    if not _index_ready:
+        _index_ready = db.scalar(
+            select(Message.id).where(Message.search_tsv.is_(None)).limit(1)
+        ) is None
+    return _index_ready
+
+
 @router.get("/search")
 def search(
     db: DBSession = Depends(get_db),
@@ -60,16 +124,26 @@ def search(
     # into a date, and a big enough number overflows the arithmetic long before
     # it means anything — a 500 for a query that only asked for everything, which
     # is what 0 already says. See list_messages for the bounds on the other two.
-    years: int = Query(0, ge=0, le=200),
+    #
+    # Absent is not the same as 0. 0 is "search everything", asked for on
+    # purpose; leaving it out is not asking, and gets `server.default_search_years`
+    # — a year, out of the box. A search costs what it has to look at, and the
+    # caller who names no window is the one most likely not to have thought about
+    # what that means on twenty years of mail.
+    years: int | None = Query(None, ge=0, le=200),
     limit: int = Query(60, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
     q = q.strip()
     if not q:
-        return {"query": q, "mode": mode, "total": 0, "rows": []}
+        return {"query": q, "mode": mode, "total": 0, "total_capped": False, "rows": []}
+    _bound_runtime(db)
+
+    if years is None:
+        years = settings.default_search_years
 
     parsed = searchquery.parse(q)
-    empty = {"query": q, "mode": mode, "total": 0, "rows": []}
+    empty = {"query": q, "mode": mode, "total": 0, "total_capped": False, "rows": []}
 
     clauses = []
     if parsed.text:
@@ -80,12 +154,27 @@ def search(
             terms = searchquery.keyword_terms(parsed.text)
             if not terms:
                 return empty
-            # A term is a literal, so % and _ in it are characters the user typed
-            # ("50% off"), not LIKE wildcards.
-            clauses.extend(
-                Message.search_text.ilike(f"%{searchquery.like_escape(t)}%", escape="\\")
-                for t in terms
-            )
+            indexed = _index_built(db)
+            for t in terms:
+                tsq, exact = searchquery.tsquery(t)
+                if indexed and tsq:
+                    # Cast, not to_tsquery: searchquery.tsquery already hands
+                    # back tsquery syntax, and running the text-search parser
+                    # over it is what used to lose hex ids and order numbers.
+                    clauses.append(
+                        Message.search_tsv.op("@@")(cast(literal(tsq), TSQUERY))
+                    )
+                    if exact:
+                        # The index answers this term outright; going to the
+                        # text as well would undo the point of having it.
+                        continue
+                # Either there is no index to ask yet, or the term spans the
+                # separators it splits on and the tsquery above is only a
+                # prefilter. A term is a literal, so % and _ in it are
+                # characters the user typed ("50% off"), not LIKE wildcards.
+                clauses.append(
+                    Message.search_text.ilike(f"%{searchquery.like_escape(t)}%", escape="\\")
+                )
     elif not parsed.filtered:
         # The whole query was a filter still being typed (`:from `).
         return empty
@@ -123,17 +212,12 @@ def search(
 
     match = and_(*clauses)
 
-    # Messages that never got threaded stand alone rather than collapsing into
-    # one "no thread" pile — same key the folder list builds.
-    thread_key = func.coalesce(Message.thread_id, func.concat("msg:", Message.id)).label("thread_key")
-
+    # Three columns, not the ten the page needs: this reads tens of thousands of
+    # rows to find sixty conversations, and carrying the subject and the snippet
+    # of every one of them is most of what that would cost. The page's own
+    # columns are fetched below, for the sixty ids that survive.
     base = (
-        select(
-            Message.id, Message.thread_id, Message.subject, Message.from_name,
-            Message.from_addr, Message.date_sent, Message.snippet,
-            Message.has_attachments, Message.account_id, Account.color, thread_key,
-        )
-        .join(Account, Account.id == Message.account_id)
+        select(Message.id, Message.thread_id, Message.account_id)
         # Only mail that is still filed somewhere. A search across the whole
         # account is the one read path with no folder in it, so without this it
         # was the way a message the user had emptied out of Trash went on
@@ -155,27 +239,83 @@ def search(
     elif account_id is not None:
         base = base.where(Message.account_id == account_id)
 
-    # One row per conversation, not per message: a term that appears in a mail
-    # and again in every reply quoting it would otherwise fill the list with the
-    # same thread. DISTINCT ON keeps the first row per (account, thread) under
-    # this ORDER BY — the newest *matching* message, so the snippet and sender
-    # on the row belong to a real hit rather than to an unrelated later reply.
-    # Opening it loads the whole thread, with every hit in it marked.
-    reps = base.distinct(Message.account_id, thread_key).order_by(
-        Message.account_id, thread_key, Message.date_sent.desc().nulls_last(), Message.id.desc()
-    ).subquery()
+    # Newest matching message first, and one row per conversation — a term that
+    # appears in a mail and again in every reply quoting it would otherwise fill
+    # the list with the same thread.
+    #
+    # The conversations are picked out here rather than by a SQL DISTINCT ON,
+    # which is what this used to be. DISTINCT ON cannot hand back a single row
+    # until it has sorted *every* match, so a term like "de" — which is in 107k
+    # of a 113k-message mailbox, and which nobody meant to search for because it
+    # is a word half typed — spent a second arranging 67k conversations in order
+    # to show sixty of them. Scanning in date order and keeping the first
+    # message of each conversation is the same answer for a fraction of the
+    # work: measured there, 1143ms to 331ms on that term, and 50ms to 24ms on an
+    # ordinary one.
+    #
+    # The same answer literally, not approximately: under this ORDER BY the
+    # first message seen for a conversation is its newest matching one, which is
+    # exactly the row DISTINCT ON was choosing, and they come out in the order
+    # the page wants. Only the count changes — see `total_capped`.
+    base = base.order_by(Message.date_sent.desc().nulls_last(), Message.id.desc())
 
     try:
-        # Counts conversations, so the "N results" line agrees with the rows.
-        total = db.scalar(select(func.count()).select_from(reps))
-        rows = db.execute(
-            select(reps).order_by(reps.c.date_sent.desc().nulls_last()).limit(limit).offset(offset)
-        ).all()
+        scan = min(MAX_SCAN, max(SCAN_BUDGET, (offset + limit) * 40))
+        while True:
+            found = db.execute(base.limit(scan)).all()
+            threads: dict[tuple[int, str], int] = {}
+            for mid, thread_id, acct in found:
+                # Mail that never got threaded stands alone rather than
+                # collapsing into one "no thread" pile — same key the folder
+                # list builds.
+                threads.setdefault((acct, thread_id or f"msg:{mid}"), mid)
+            # Fewer messages back than we asked for means there are no more:
+            # every match was seen, so the conversation count is exact.
+            exhausted = len(found) < scan
+            if exhausted or len(threads) > offset + limit or scan >= MAX_SCAN:
+                break
+            # A page that came up short against a saturated scan means the
+            # matches are piled into very few conversations — a mailing list,
+            # typically. Rare enough to be worth a second, wider pass rather
+            # than a budget large enough to cover it every time.
+            scan = min(scan * 8, MAX_SCAN)
+
+        page_ids = list(threads.values())[offset:offset + limit]
+        by_id = {}
+        if page_ids:
+            by_id = {
+                r.id: r for r in db.execute(
+                    select(
+                        Message.id, Message.thread_id, Message.subject, Message.from_name,
+                        Message.from_addr, Message.date_sent, Message.snippet,
+                        Message.has_attachments, Message.account_id, Account.color,
+                    )
+                    .join(Account, Account.id == Message.account_id)
+                    .where(Message.id.in_(page_ids))
+                ).all()
+            }
     except DBAPIError as e:
         db.rollback()
+        if getattr(e.orig, "sqlstate", None) == _QUERY_CANCELED:
+            # Said as what it is. "The engine rejected that pattern" sends
+            # someone off to fix a query that is perfectly valid and merely
+            # slow, which is the opposite of the advice they need.
+            raise HTTPException(
+                status_code=400,
+                detail="Search took too long — narrow the time window or the pattern.") from e
         raise HTTPException(
             status_code=400,
             detail="Search failed — the engine rejected that pattern.") from e
+
+    # Back into the order the scan found them in — `IN` returns rows in whatever
+    # order suits the plan, and the page is sorted by date, which is the one
+    # thing about a result list a reader relies on.
+    rows = [by_id[i] for i in page_ids if i in by_id]
+    # Exact whenever the scan reached the end of the matches, which is every
+    # search but the ones that match a large fraction of the mailbox. Where it
+    # is not, it is a floor rather than a guess, and the UI says so with a "+".
+    total = len(threads)
+    total_capped = not exhausted
 
     ids = [r.id for r in rows]
     flags: dict[int, tuple[bool, bool]] = {}
@@ -209,6 +349,7 @@ def search(
 
     return {
         "query": q, "mode": mode, "total": int(total or 0),
+        "total_capped": total_capped,
         "rows": [
             {
                 "id": r.id, "thread_id": r.thread_id, "subject": r.subject or "(no subject)",

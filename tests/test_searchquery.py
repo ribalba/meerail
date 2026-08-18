@@ -70,3 +70,68 @@ def test_the_last_of_a_repeated_filter_wins():
     p = searchquery.parse(":unread :read")
     assert p.unread is False
     assert searchquery.parse(":from a@x :from b@x").from_pat == "b@x"
+
+
+def test_a_plain_word_is_answered_by_the_index_alone():
+    """The case that has to be exact, because nothing rechecks it.
+
+    `search_tsv` holds every suffix of every word, so a run of letters and
+    digits is a prefix of one of them wherever it occurs — including in the
+    middle of a German compound, which is the whole reason the index is built
+    that way.
+    """
+    assert searchquery.tsquery("rechnung") == ("'rechnung':*", True)
+    assert searchquery.tsquery("RECHNUNG") == ("'rechnung':*", True)
+    assert searchquery.tsquery("Rechnungsprüfung") == ("'rechnungsprüfung':*", True)
+    # Two characters is the shortest word the SQL function indexes, so it is
+    # also the shortest term that can be asked for through the index.
+    assert searchquery.tsquery("ab") == ("'ab':*", True)
+
+
+def test_a_term_spanning_separators_is_only_a_prefilter():
+    """Anything with a space or a symbol in it is ANDed, and flagged inexact.
+
+    The index splits on those characters, so it cannot tell "how to build" from
+    "build to how" — the caller has to recheck against the text. What matters
+    here is that the second half of the pair says so.
+    """
+    assert searchquery.tsquery("how to build") == ("'how':* & 'to':* & 'build':*", False)
+    assert searchquery.tsquery("50% off") == ("'50':* & 'off':*", False)
+    assert searchquery.tsquery("ada@example.com") == ("'ada':* & 'example':* & 'com':*", False)
+    # Underscore separates on both sides of the fence — see the SQL function.
+    assert searchquery.tsquery("foo_bar") == ("'foo':* & 'bar':*", False)
+
+
+def test_a_term_with_nothing_indexable_falls_back_entirely():
+    """No lexemes to ask for: the caller has to use ILIKE and nothing else.
+
+    A one-character term contributes no lexeme (the function skips words below
+    two), and punctuation contributes none at all. Returning an empty query
+    rather than a partial one is what keeps the fallback from being wrong.
+    """
+    assert searchquery.tsquery("a") == ("", False)
+    assert searchquery.tsquery("$$$") == ("", False)
+    assert searchquery.tsquery("") == ("", False)
+    # One indexable piece, but the term is more than that piece, so it still
+    # needs the recheck.
+    assert searchquery.tsquery("x-ray") == ("'ray':*", False)
+
+
+def test_lexemes_are_quoted_so_nothing_reparses_them():
+    """The query is tsquery syntax, not something to hand the text parser.
+
+    `to_tsquery` runs Postgres' text-search parser over its argument, and that
+    parser reads `845e33d9` as a number in scientific notation and cuts it into
+    `845e33 <-> d9` — a phrase query. `search_tsv` is built by splitting on
+    non-alphanumerics, with no parser and no positions, so a phrase query
+    against it matches nothing at all: 4.8% of random hex ids came back empty,
+    which is exactly the shape of thing (an order number, an invoice, a tracking
+    code) that people search their mail for. Quoting the lexeme is what stops
+    anything reading it twice.
+    """
+    assert searchquery.tsquery("845e33d9") == ("'845e33d9':*", True)
+    assert searchquery.tsquery("3e5d599f") == ("'3e5d599f':*", True)
+    assert searchquery.tsquery("1e5") == ("'1e5':*", True)
+    # A piece cannot contain a quote — it is letters and digits — but the
+    # doubling that tsquery syntax asks for stays true anyway.
+    assert "''" not in searchquery.tsquery("abc")[0]

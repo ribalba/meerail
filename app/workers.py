@@ -4,10 +4,11 @@ Mail ingest and attachment text extraction belong to the agent now, so what is
 left here is what the app owes on its own account: the contacts rollup — pure
 derived data, rebuilt from rows the agent has already written — the reminder
 tick, which is the only thing in meerail that has to happen at a particular
-moment rather than in response to a request, and the journal loop, which is what
-keeps several installs of this app agreeing about the things IMAP has nowhere to
-put. The journal loop only exists on an install that has one configured; see
-app/journal.py.
+moment rather than in response to a request, the search-index backfill, which is
+a one-off debt the upgrade that added the index left behind, and the journal
+loop, which is what keeps several installs of this app agreeing about the things
+IMAP has nowhere to put. The journal loop only exists on an install that has one
+configured; see app/journal.py.
 """
 
 from __future__ import annotations
@@ -17,6 +18,8 @@ import os
 
 from core.config import get_settings
 from core.database import SessionLocal
+
+from core import searchindex
 
 from . import journal, reminders
 from .contacts import rebuild_contact_pairs, rebuild_contacts
@@ -108,6 +111,102 @@ async def reminders_loop() -> None:
             # exactly like "reminders don't work".
             print(f"reminder tick failed: {e!r}", flush=True)
         await asyncio.sleep(REMINDER_TICK)
+
+
+# How long to wait after a batch that had work in it. Not a rate limit so much
+# as room to breathe: the agent is usually mid-import when this runs, and the
+# backfill has nobody waiting on it — finishing a large mailbox a minute later
+# costs nothing, while holding the write path up does.
+SEARCH_INDEX_PAUSE = 0.2
+
+# How much progress goes by between log lines. The backfill is the one thing
+# that happens on an upgrade which the user can neither see nor hurry, and it
+# takes minutes on a large mailbox — during which keyword search is still on the
+# old slow path. Saying so beats leaving them to wonder whether `docker compose
+# up --build` did anything.
+SEARCH_INDEX_REPORT_EVERY = 20_000
+
+
+def _search_index_debt() -> int:
+    db = SessionLocal()
+    try:
+        return searchindex.pending(db)
+    finally:
+        db.close()
+
+
+def _build_search_index_batch() -> int:
+    db = SessionLocal()
+    try:
+        return searchindex.build_batch(db)
+    finally:
+        db.close()
+
+
+def _analyze_after_search_index() -> None:
+    db = SessionLocal()
+    try:
+        searchindex.analyze(db)
+    finally:
+        db.close()
+
+
+async def search_index_loop() -> None:
+    """Give mail that predates ``messages.search_tsv`` its search index.
+
+    Nothing to do on a volume created after the column existed — the trigger
+    fills it in on the way in — so the ordinary case is one empty batch at
+    startup and then an hourly probe that costs an index lookup. The probe stays
+    rather than the loop ending on its first zero: a batch that fails leaves
+    rows behind, and the difference between "finished" and "gave up" is not one
+    this can tell from the inside.
+
+    The whole thing is driven from here rather than from ``init_db`` because the
+    work is proportional to the mailbox. A server that would not answer until it
+    had indexed 113k messages is a server that looks broken for five minutes;
+    this way it serves from the first second and merely searches the old way
+    until the last batch lands.
+    """
+    owed = 0
+    try:
+        owed = await asyncio.to_thread(_search_index_debt)
+    except Exception as e:  # noqa: BLE001
+        print(f"search index: could not size the backfill: {e!r}", flush=True)
+    if owed:
+        print(f"search index: {owed} message(s) predate it — building; "
+              f"keyword search stays on the slower path until this finishes",
+              flush=True)
+
+    built = 0
+    reported = 0
+    while True:
+        done = 0
+        try:
+            done = await asyncio.to_thread(_build_search_index_batch)
+        except Exception as e:  # noqa: BLE001
+            # Same reasoning as the contacts loop: never let one bad batch end
+            # the loop, but never let it be silent either — search staying on
+            # the slow path forever is exactly what this failing looks like.
+            print(f"search index backfill failed: {e!r}", flush=True)
+        if done:
+            built += done
+            if built - reported >= SEARCH_INDEX_REPORT_EVERY:
+                reported = built
+                print(f"search index: {built}/{owed or built} message(s)", flush=True)
+        elif built:
+            # Said once, on the edge from work to none: this is the moment
+            # search gets fast, and it is worth being able to point at it.
+            try:
+                await asyncio.to_thread(_analyze_after_search_index)
+            except Exception as e:  # noqa: BLE001
+                # Not worth failing over — autoanalyze will get there — but
+                # worth saying, because until it does the planner is costing
+                # this query from statistics that predate the column.
+                print(f"search index: ANALYZE after backfill failed: {e!r}", flush=True)
+            print(f"search index: built for {built} message(s) — "
+                  f"keyword search is on the index now", flush=True)
+            built = reported = owed = 0
+        await asyncio.sleep(SEARCH_INDEX_PAUSE if done else 3600)
 
 
 # How often a snapshot is posted: the record that restates this install's whole

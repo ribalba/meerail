@@ -56,8 +56,8 @@ App.api = {
     });
     return this._loginPromise;
   },
-  async request(method, path, body) {
-    const opts = { method, headers: {} };
+  async request(method, path, body, signal) {
+    const opts = { method, headers: {}, signal };
     if (body instanceof FormData) {
       // No Content-Type of ours: a multipart body needs the browser to write
       // the header, boundary and all. Everything else about the request — the
@@ -76,6 +76,11 @@ App.api = {
     try {
       res = await fetch(path, opts);
     } catch (err) {
+      // An abort is this app hanging up on itself — the caller no longer wants
+      // the answer — so it says nothing about the network. Reporting it would
+      // raise the offline bar every time somebody typed a second character into
+      // the search box.
+      if (err.name === "AbortError") throw err;
       App.conn.fail();
       throw err;
     }
@@ -86,7 +91,7 @@ App.api = {
     // the login form rather than re-opening it forever.
     if (res.status === 401 && !path.startsWith("/api/auth/")) {
       await this.promptLogin();
-      return this.request(method, path, body);
+      return this.request(method, path, body, signal);
     }
     if (!res.ok) {
       let detail = res.statusText;
@@ -107,7 +112,7 @@ App.api = {
     if (answer && answer.op_id && App.undo) App.undo.record(path, answer);
     return answer;
   },
-  get(p) { return this.request("GET", p); },
+  get(p, signal) { return this.request("GET", p, undefined, signal); },
   post(p, b) { return this.request("POST", p, b); },
   patch(p, b) { return this.request("PATCH", p, b); },
   put(p, b) { return this.request("PUT", p, b); },
@@ -132,7 +137,13 @@ App.api = {
     if (search && search.q) { p.set("q", search.q); p.set("mode", search.mode); }
     return this.get(`/api/threads/${encodeURIComponent(id)}?${p}`);
   },
-  search(params) { return this.get("/api/search?" + new URLSearchParams(params).toString()); },
+  // `signal` aborts the request when the next keystroke has already made this
+  // one's answer irrelevant. Search runs as you type, so without it every
+  // abandoned prefix still occupies a connection until the server is done with
+  // a question nobody is waiting for the answer to.
+  search(params, signal) {
+    return this.get("/api/search?" + new URLSearchParams(params).toString(), signal);
+  },
   accounts() { return this.get("/api/accounts"); },
   contacts(q) { return this.get("/api/contacts?q=" + encodeURIComponent(q)); },
   relatedContacts(addresses) {

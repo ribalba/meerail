@@ -289,6 +289,118 @@ def init_db() -> None:
             "folder_delimiter VARCHAR(8) NOT NULL DEFAULT ''",
             "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS "
             "folder_nesting BOOLEAN NOT NULL DEFAULT FALSE",
+            # --- Keyword search (app/routers/search.py) ---
+            #
+            # What keyword search used to be: `search_text ILIKE '%term%'` over
+            # the pg_trgm index. The index finds candidates, but ILIKE is then
+            # *rechecked* against the text, and search_text is TOASTed — so
+            # answering one query meant detoasting every candidate row. Measured
+            # on a 113k-message mailbox: 543ms and 21031 buffers for a single
+            # term, 2230ms and 180494 buffers for three; and because those pages
+            # are scattered through the same 21GB TOAST as raw_mime, they do not
+            # stay cached, so a cold search cost seconds rather than the tenths
+            # of a second a warm one did.
+            #
+            # What replaces it: a tsvector holding every *suffix* of every word
+            # in the text. A substring of a word is a prefix of one of that
+            # word's suffixes, so `to_tsquery('rechnung:*')` matches the lexeme
+            # "rechnung" that "Stromrechnung" contributed — German compounds
+            # included, which is what a plain word index would have lost. `@@`
+            # against a GIN tsvector index is answered from the index alone: no
+            # recheck, so the text is never read. Same query, 3.3ms/432 buffers
+            # and 9.7ms/1640 — and, checked term by term against ILIKE over the
+            # whole mailbox, the same rows.
+            #
+            # `meerail_search_lexemes` is the split; `meerail_search_tsv` is the
+            # wrapper that survives it. A tsvector cannot exceed 1MB, and this
+            # mailbox holds single messages with 8MB of extracted attachment
+            # text, so the wrapper retries on shorter and shorter prefixes
+            # rather than letting one enormous message fail an ingest. Words
+            # over 100 characters get no suffixes — those are hashes, tracking
+            # ids and base64, never something a person searches the middle of,
+            # and expanding them is index bloat for nothing.
+            r"""
+            CREATE OR REPLACE FUNCTION meerail_search_lexemes(txt text, cap int)
+            RETURNS tsvector LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $fn$
+              SELECT coalesce(array_to_tsvector(ARRAY(
+                SELECT DISTINCT
+                       CASE WHEN length(w) <= 100 THEN substr(w, i)
+                            ELSE left(w, 2047) END
+                  FROM unnest(
+                         regexp_split_to_array(lower(left(txt, cap)), '[^[\:alnum\:]]+')
+                       ) AS w,
+                       LATERAL generate_series(
+                         1, CASE WHEN length(w) <= 100
+                                 THEN greatest(length(w) - 2, 1) ELSE 1 END) AS i
+                 WHERE length(w) >= 2
+                 ORDER BY 1
+              )), ''::tsvector)
+            $fn$
+            """,
+            r"""
+            CREATE OR REPLACE FUNCTION meerail_search_tsv(txt text)
+            RETURNS tsvector LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE AS $fn$
+            DECLARE cap int;
+            BEGIN
+              IF txt IS NULL OR txt = '' THEN RETURN ''::tsvector; END IF;
+              FOREACH cap IN ARRAY ARRAY[1000000, 200000, 40000, 8000] LOOP
+                BEGIN
+                  RETURN meerail_search_lexemes(txt, cap);
+                EXCEPTION WHEN OTHERS THEN
+                  NULL;
+                END;
+              END LOOP;
+              RETURN ''::tsvector;
+            END
+            $fn$
+            """,
+            # NULL on every row already in the volume, which is what
+            # core.searchindex works through in the background; until it is
+            # done, search falls back to the ILIKE path so results stay correct
+            # rather than merely fast.
+            "ALTER TABLE messages ADD COLUMN IF NOT EXISTS search_tsv tsvector",
+            # A trigger rather than a write in ingest, because both the app and
+            # the agent store messages and a column only one of them maintained
+            # would be an index that silently missed half the mailbox. `UPDATE
+            # OF search_text` is load-bearing twice over: it keeps the rebuild
+            # off every unrelated write to the row, and it is what lets the
+            # backfill below set search_tsv directly without the trigger
+            # immediately recomputing what it just wrote.
+            r"""
+            CREATE OR REPLACE FUNCTION meerail_messages_search_tsv() RETURNS trigger
+            LANGUAGE plpgsql AS $fn$
+            BEGIN
+              NEW.search_tsv := meerail_search_tsv(NEW.search_text);
+              RETURN NEW;
+            END
+            $fn$
+            """,
+            # Guarded by hand rather than by DROP/CREATE: creating a trigger
+            # takes ACCESS EXCLUSIVE on messages, and doing that on every
+            # startup is the race _already_applied exists to avoid.
+            r"""
+            DO $do$
+            BEGIN
+              IF NOT EXISTS (
+                SELECT 1 FROM pg_trigger
+                 WHERE tgname = 'trg_messages_search_tsv'
+                   AND tgrelid = 'messages'::regclass AND NOT tgisinternal
+              ) THEN
+                CREATE TRIGGER trg_messages_search_tsv
+                  BEFORE INSERT OR UPDATE OF search_text ON messages
+                  FOR EACH ROW EXECUTE FUNCTION meerail_messages_search_tsv();
+              END IF;
+            END
+            $do$
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_messages_search_tsv "
+            "ON messages USING gin (search_tsv)",
+            # Partial, and self-erasing: it covers exactly the rows the backfill
+            # still owes and is empty the moment it is finished, so asking "is
+            # the search index built yet" — which every search does — costs one
+            # index probe rather than a scan of the mailbox.
+            "CREATE INDEX IF NOT EXISTS ix_messages_search_tsv_missing "
+            "ON messages (id) WHERE search_tsv IS NULL",
         ):
             _run_migration(stmt)
 

@@ -4,6 +4,11 @@ App.search = (function () {
   let active = false;
   let timer = null;
   let requestSeq = 0;
+  // The fetch belonging to `requestSeq`. Superseding a search has always
+  // dropped its answer; this also stops asking for it, so a query the user has
+  // already typed past is not still being computed when the one they meant
+  // arrives.
+  let inflight = null;
   const $ = (s) => document.querySelector(s);
 
   // The time window sticks across reloads. Someone who searches their mail a
@@ -85,8 +90,12 @@ App.search = (function () {
     const params = { q, mode: e.rx.checked ? "regex" : "keyword", years: e.years.value };
     if (e.scope.value !== "all") params.mailbox_id = Number(e.scope.value);
 
+    if (inflight) inflight.abort();
+    const ctrl = new AbortController();
+    inflight = ctrl;
+
     try {
-      const data = await App.api.search(params);
+      const data = await App.api.search(params, ctrl.signal);
       if (request !== requestSeq) return false;
       if (!refresh) {
         App.list.reset();
@@ -95,15 +104,26 @@ App.search = (function () {
       // render() prunes ticks whose rows are gone and keeps the keyboard cursor
       // on the slot a deleted row vacated, so a refresh needs nothing further.
       App.list.render(data.rows, true);
+      // A "+" where the server stopped counting. It reads the newest matches
+      // and stops once it has enough conversations to fill the page, so the
+      // count is exact for every search but the ones that match a large slice
+      // of the mailbox — and for those the honest answer is a floor, not a
+      // number the user waited an extra second for.
+      const more = data.total_capped ? "+" : "";
       e.status.textContent = data.total === 0 ? "No results"
-        : `${data.total} result${data.total === 1 ? "" : "s"}`;
+        : `${data.total}${more} result${data.total === 1 && !more ? "" : "s"}`;
       $("#list-title").textContent = e.rx.checked ? "Regex search" : "Search";
       return true;
     } catch (ex) {
       if (request !== requestSeq) return false;
+      // Our own abort, not a failure: the search that replaced this one owns
+      // the status line now and is about to write to it.
+      if (ex.name === "AbortError") return false;
       e.status.classList.add("error");
       e.status.textContent = ex.message || "Search failed";
       return false;
+    } finally {
+      if (inflight === ctrl) inflight = null;
     }
   }
 
@@ -116,10 +136,28 @@ App.search = (function () {
     await run(undefined, true);
   }
 
+  // How long the box waits before asking, and why it is not one number.
+  //
+  // A search used to cost the better part of a second, so waiting 280ms before
+  // starting one was cheap next to running it. It is now answered from the
+  // search index in tens of milliseconds, which makes that wait almost the
+  // whole of what a search feels like — so it comes down to where a keystroke
+  // and its answer still read as one action.
+  //
+  // Except at the very start of a word. One or two characters match most of a
+  // mailbox, and no index helps with that: `de` alone is a second of work
+  // against 100k messages. It is also the least likely thing anyone meant to
+  // search for — it is a word being typed — so a short query waits for the rest
+  // of it instead of costing a second to answer a question nobody asked.
+  const DEBOUNCE = 120;
+  const DEBOUNCE_SHORT = 450;
+  const SHORT = 2;
+
   function debouncedRun() {
     clearTimeout(timer);
     const request = ++requestSeq;
-    timer = setTimeout(() => run(request), 280);
+    const typed = textOf(els().input.value.trim());
+    timer = setTimeout(() => run(request), typed.length <= SHORT ? DEBOUNCE_SHORT : DEBOUNCE);
   }
 
   // Enter commits the search: open the top hit and hand the keyboard to the
@@ -156,7 +194,9 @@ App.search = (function () {
   }
 
   // A stored value that no longer names an option leaves the select empty, so
-  // it is checked against the menu rather than assigned on trust.
+  // it is checked against the menu rather than assigned on trust. Nothing
+  // stored leaves the markup's own choice standing, which is the narrow window
+  // the server would have applied anyway had the box not sent one.
   function restoreYears() {
     const years = els().years;
     if (!years) return;

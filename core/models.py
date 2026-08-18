@@ -12,6 +12,10 @@ Design notes
   text) carries a GIN pg_trgm index so real regex (``~*``) can use the index when
   the pattern contains a literal substring; a btree on ``date_sent`` bounds the
   time-window scans.
+* ``messages.search_tsv`` is that same text as a tsvector of word *suffixes*,
+  under a second GIN index. Keyword search reads only this: a substring of a
+  word is a prefix of one of its suffixes, so ``rechnung:*`` finds
+  "Stromrechnung" — the same answers ILIKE gives, without reading the text.
 """
 
 from datetime import datetime, timezone
@@ -30,7 +34,7 @@ from sqlalchemy import (
     select,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -262,12 +266,23 @@ class Message(Base):
         Index("ix_messages_message_id", "message_id"),
         # GIN trigram index: lets Postgres use the index for ~*/LIKE when the
         # regex/pattern contains an extractable literal substring (>=3 chars).
+        # Regex search still runs through this; keyword search does not, because
+        # ~*/ILIKE can only ever use it as a *prefilter* — the match itself is
+        # rechecked against search_text, and detoasting a few thousand candidate
+        # rows is most of a second on a real mailbox no matter how good the
+        # index is. See ix_messages_search_tsv.
         Index(
             "ix_messages_search_trgm",
             "search_text",
             postgresql_using="gin",
             postgresql_ops={"search_text": "gin_trgm_ops"},
         ),
+        # What keyword search actually reads. `@@` against a GIN tsvector index
+        # is answered from the index alone — no recheck, so the text is never
+        # detoasted — which is the whole difference: measured on a 113k-message
+        # mailbox, one term went from 543ms/21031 buffers to 3.3ms/432, and
+        # three ANDed terms from 2230ms/180494 to 9.7ms/1640.
+        Index("ix_messages_search_tsv", "search_tsv", postgresql_using="gin"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -340,6 +355,15 @@ class Message(Base):
     body_html: Mapped[str] = mapped_column(Text, default="", nullable=False)
     # Concatenation indexed for regex/keyword search.
     search_text: Mapped[str] = mapped_column(Text, default="", nullable=False, deferred=True)
+    # The same text, pre-split into every suffix of every word it contains, so a
+    # keyword search is an index lookup instead of a read of the text itself.
+    # Written by a database trigger rather than by hand: both the app and the
+    # agent store messages, and a column that only one of them maintained would
+    # be a search index that silently missed half the mailbox. NULL means "not
+    # built yet" — the state every row is in on the upgrade that adds this, and
+    # what core.searchindex works through in the background. See
+    # core/database.py for the trigger and the function behind it.
+    search_tsv: Mapped[str | None] = mapped_column(TSVECTOR, nullable=True, deferred=True)
 
     # Rollup of attachment text extraction: none | pending | done | error
     extract_status: Mapped[str] = mapped_column(String(16), default="none", nullable=False)

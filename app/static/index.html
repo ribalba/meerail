@@ -83,9 +83,14 @@
             <option value="all">All Mailboxes</option>
           </select>
           <select id="years-select" class="search-select" title="Time window">
+            <!-- `selected` on the narrowest, matching server.default_search_years:
+                 a search costs what it has to look at, and on a mailbox with two
+                 decades in it starting at "All time" is the difference between a
+                 tenth of a second and a whole one. Widening is one click, and
+                 app.search.js remembers where it was left. -->
             <option value="0">All time</option>
             <option value="2">Last 2 years</option>
-            <option value="1">Last year</option>
+            <option value="1" selected>Last year</option>
           </select>
           <!-- Last, so the short time window and this pair up on the second line
                when the folder name is long enough to wrap the row. -->

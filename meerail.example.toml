@@ -162,9 +162,12 @@ llm_max_image_bytes = 3500000
 # words; the dialog says when the file was cut.
 llm_max_attachment_chars = 120000
 
-# Default search window in years (0 = search everything). The UI can override
-# it per query.
-default_search_years = 0
+# Default search window in years (0 = search everything), applied to any search
+# that does not name one of its own. A search costs what it has to look at, and
+# on a mailbox with two decades in it the broadest terms are the difference
+# between a tenth of a second and a whole one. The search bar can widen it per
+# query and remembers where you left it.
+default_search_years = 1
 
 # How many years back to scan from/to/cc/bcc addresses when building the
 # compose autocomplete list (0 = all time).

@@ -19,7 +19,7 @@ from .routers import (
 )
 from .deps import is_secure_request, require_ui_auth, ui_password
 from .routers.compose import sweep_outbox_staging
-from .workers import contacts_loop, journal_loop, reminders_loop
+from .workers import contacts_loop, journal_loop, reminders_loop, search_index_loop
 
 settings = get_settings()
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -69,6 +69,7 @@ async def lifespan(_app: FastAPI):
     # The only clock in the app: mail parked on a reminder comes back from here,
     # including the reminders that fell due while this server was not running.
     _spawn(reminders_loop())
+    _spawn(search_index_loop())
     # Only where one is configured, which is deliberately not the default: an
     # install that has not been told about a journal makes no outbound request
     # and runs no extra loop. See app/journal.py.

@@ -520,8 +520,13 @@ class Settings(BaseSettings):
     # when it was cut.
     llm_max_attachment_chars: int = 120_000
 
-    # Default search window in years (0 = everything). The UI can override per query.
-    default_search_years: int = 0
+    # Default search window in years (0 = everything), applied to any search that
+    # does not name one of its own. A year rather than everything, because the
+    # cost of a search is what it has to look at: on a mailbox with two decades
+    # in it, the widest terms are the ones that go from tens of milliseconds to
+    # about a second, and almost nobody meant to ask about 2009. The UI has the
+    # control to widen it, and remembers where it was left.
+    default_search_years: int = 1
 
     # How many years back to scan from/to/cc/bcc addresses when building the
     # contacts autocomplete list (0 = all time).

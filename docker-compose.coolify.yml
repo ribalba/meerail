@@ -225,7 +225,7 @@ services:
       # the composer are exempt and get max_attachment_bytes instead. Traefik
       # should have a limit of its own as well; see COOLIFY.md.
       MAX_REQUEST_BYTES: ${MAX_REQUEST_BYTES:-8388608}
-      DEFAULT_SEARCH_YEARS: ${DEFAULT_SEARCH_YEARS:-0}
+      DEFAULT_SEARCH_YEARS: ${DEFAULT_SEARCH_YEARS:-1}
       CONTACTS_SCAN_YEARS: ${CONTACTS_SCAN_YEARS:-1}
     volumes:
       # Staging for outgoing attachments only; mail bytes live in Postgres.

@@ -336,3 +336,153 @@ def test_filters_apply_in_regex_mode_and_leave_the_pattern_alone(account):
     assert r["total"] == 1
     _, r = _search(aid, f"{token} \\d+ :unread apples", mode="regex")
     assert r["total"] == 1
+
+
+def test_a_term_inside_a_word_is_found(account):
+    """Keyword search matches inside words, not just at their start.
+
+    This is what `search_tsv` is built to preserve. It is a word index, and a
+    plain word index would answer "no" to every one of these — which on German
+    mail means "Rechnung" not finding the Stromrechnung, the single most
+    ordinary search there is. Storing every *suffix* of every word is what makes
+    a substring of a word a prefix of something indexed.
+    """
+    email, aid = account["email"], account["id"]
+    tag = uuid.uuid4().hex[:8]
+    _ingest(email, [
+        (1, make_message(f"<comp-{tag}@t>", f"betreff {tag}", "x@y.com", email,
+                         f"{tag} Ihre Stromrechnung liegt bei, Videokonferenz am Montag", T0)),
+    ])
+
+    # The compound, from its tail: the reason this index exists.
+    _, r = _search(aid, f"{tag} rechnung")
+    assert r["total"] == 1
+    _, r = _search(aid, f"{tag} konferenz")
+    assert r["total"] == 1
+    # From the middle of a word, with nothing but letters around it.
+    _, r = _search(aid, f"{tag} omrechn")
+    assert r["total"] == 1
+    # And still from the front, which is the case a word index would have got right.
+    _, r = _search(aid, f"{tag} strom")
+    assert r["total"] == 1
+    # A word that is not in the message stays not in the message: the suffix
+    # expansion widens what matches, and this is the check that it did not
+    # widen it into matching anything at all.
+    _, r = _search(aid, f"{tag} gasrechnung")
+    assert r["total"] == 0
+
+
+def test_case_and_umlauts_survive_the_index(account):
+    """Folding is the database's, so it has to hold for non-ASCII too.
+
+    Postgres lower()s and splits on its own notion of alphanumeric, and Python
+    has to cut the query the same way. An umlaut is where those two definitions
+    would part company if either got it wrong — and on German mail that is not
+    an edge case.
+    """
+    email, aid = account["email"], account["id"]
+    tag = uuid.uuid4().hex[:8]
+    _ingest(email, [
+        (1, make_message(f"<uml-{tag}@t>", f"betreff {tag}", "x@y.com", email,
+                         f"{tag} die Rechnungsprüfung für Straße und Größe", T0)),
+    ])
+
+    for term in ("prüfung", "PRÜFUNG", "ungsprüf", "straße", "größe"):
+        _, r = _search(aid, f"{tag} {term}")
+        assert r["total"] == 1, f"{term!r} did not find the message"
+
+
+def test_a_term_with_punctuation_is_still_exact(account):
+    """The prefilter widens; the recheck has to narrow it back.
+
+    A term that spans the characters the index splits on comes back from
+    `searchquery.tsquery` as an AND of the pieces, which matches messages the
+    user did not ask for. Those are meant to be dropped by an ILIKE against the
+    text — so this asserts the answer, not the mechanism.
+    """
+    email, aid = account["email"], account["id"]
+    tag = uuid.uuid4().hex[:8]
+    _ingest(email, [
+        (1, make_message(f"<hit-{tag}@t>", f"deal {tag}", "x@y.com", email,
+                         f"{tag} take 50% off everything", T0)),
+        (2, make_message(f"<mis-{tag}@t>", f"notes {tag}", "x@y.com", email,
+                         f"{tag} 50 items, and off we go", T0)),
+    ])
+
+    # Both messages contain "50" and "off"; only one contains "50% off".
+    _, r = _search(aid, f'{tag} "50% off"')
+    assert r["total"] == 1
+    assert r["rows"][0]["subject"] == f"deal {tag}"
+
+
+def test_results_page_without_gaps_or_repeats(account):
+    """Paging walks the conversations once, in order, whole.
+
+    The page used to come out of a SQL DISTINCT ON with LIMIT/OFFSET over it.
+    It is now assembled by reading matching messages newest-first and keeping
+    the first one of each conversation, which is the same answer for a fraction
+    of the work — but only if the ordering and the slicing agree. A page that
+    repeated a conversation, or skipped one at a page boundary, would look like
+    ordinary search results and be wrong.
+    """
+    email, aid = account["email"], account["id"]
+    token = "PAGETOK" + uuid.uuid4().hex[:6]
+    msgs = []
+    # Five conversations, newest last, each with a reply so the dedupe has
+    # something to collapse.
+    for i in range(5):
+        root = f"pr{i}-{uuid.uuid4().hex}@t"
+        when = T0.replace(hour=9 + i)
+        msgs.append((2 * i + 1, make_message(f"<{root}>", f"thread {i}", "a@y.com", email,
+                                             f"{token} opening {i}", when)))
+        msgs.append((2 * i + 2, make_message(f"<pq{i}-{uuid.uuid4().hex}@t>", f"Re: thread {i}",
+                                             "b@y.com", email, f"> {token} opening {i}\nreply",
+                                             when.replace(minute=30),
+                                             in_reply_to=f"<{root}>", refs=[f"<{root}>"])))
+    _ingest(email, msgs)
+
+    _, whole = _search(aid, token)
+    assert whole["total"] == 5, whole
+    # Every match was seen, so the count is the count and not a floor.
+    assert whole["total_capped"] is False
+    order = [row["subject"] for row in whole["rows"]]
+    assert order == [f"Re: thread {i}" for i in (4, 3, 2, 1, 0)], order
+
+    # The same five, two at a time. Each page reports the same total.
+    walked = []
+    for offset in (0, 2, 4):
+        _, page = _search(aid, token, limit=2, offset=offset)
+        assert page["total"] == 5
+        walked += [row["subject"] for row in page["rows"]]
+    assert walked == order                    # no gaps, no repeats, same order
+    assert len(walked) == len(set(walked))
+
+    # Past the end is empty, not a search that suddenly found nothing.
+    _, past = _search(aid, token, limit=2, offset=5)
+    assert past["rows"] == [] and past["total"] == 5
+
+
+def test_an_id_the_text_parser_would_split_is_still_found(account):
+    """A hex id survives the trip from the search box to the index.
+
+    `845e33d9` is a number in scientific notation as far as Postgres' text-search
+    parser is concerned, and it used to arrive at the index as the phrase
+    `845e33 <-> d9` — which a positionless index cannot match, so the message
+    was simply not there. Order numbers, invoice numbers, tracking codes and
+    commit hashes all look like this, and finding one is most of what a search
+    box in a mail client is for.
+    """
+    email, aid = account["email"], account["id"]
+    tag = uuid.uuid4().hex[:8]
+    _ingest(email, [
+        (1, make_message(f"<hex-{tag}@t>", f"Vorgang {tag}", "x@y.com", email,
+                         f"{tag} Ihre Bestellung 845e33d9 ist unterwegs, Beleg 3e5d599f", T0)),
+    ])
+
+    for term in ("845e33d9", "3e5d599f", "845e33", "5e33d9"):
+        _, r = _search(aid, f"{tag} {term}")
+        assert r["total"] == 1, f"{term!r} did not find the message"
+
+    # And an id that is not in the message still is not.
+    _, r = _search(aid, f"{tag} 845e33da")
+    assert r["total"] == 0
