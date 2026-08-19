@@ -279,17 +279,25 @@ App.status = (function () {
   // answers this per account, because the advice these refusals used to carry —
   // go and make an Archive folder — is only true for an account that has not got
   // one, and was being printed at accounts that had. See sync._dropped_fix.
+  //
+  // The lead sentence used to name the folder as the fault — "your mail server
+  // will not file mail into that folder" — which is one of the two refusals and
+  // not the other. A move between the inbox and Sent is refused for the route it
+  // takes, on a server that files mail into both of them all day long, so the
+  // sentence has to survive not knowing which of the two this is; the reason
+  // line under the notice is where the specifics are.
   function droppedSub(kind, fix) {
     if (kind === "refused") {
-      return `Your mail server will not file mail into that folder, so the change
-              was not made. Nothing on the server changed and no mail is lost —
+      return `Your mail server refused that change rather than failing at it, so it
+              was not made. Nothing on the server changed and no mail is lost — the
+              message is still where the server has always had it —
               ${fix
                 ? `but this will happen again every time, because it is the
                    folder that is the problem, not this attempt. The fix is
                    below.`
-                : `and this account already has somewhere to archive to, so there
-                   is nothing to create. The change simply could not be made;
-                   doing it again is all it needs.`}`;
+                : `and there is nothing to set up: some changes are simply ones
+                   this server has no equivalent for. The reason below says which,
+                   and everything else you do with the message works normally.`}`;
     }
     if (kind === "stale") {
       return `Filing or flagging that meerail could no longer match to a message
