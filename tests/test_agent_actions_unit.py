@@ -760,14 +760,24 @@ class FoldersDB(DB):
         return super().execute(stmt)
 
 
-def _archive_to(to_folder, roles, client, message_pk=55):
-    """Drain one queued archive — a move out of the inbox into `to_folder`."""
-    action = Action("move", {"uid": 7, "from_folder": "INBOX", "to_folder": to_folder,
-                             "uidvalidity": EPOCH})
+def _drain_move(from_folder, to_folder, roles, client, message_pk=55):
+    """Drain one queued move, out of `from_folder` and into `to_folder`.
+
+    Both folders are named because which refusals are permanent is a question
+    about the *route*: the same "operation not allowed" that ends a move is one
+    to keep retrying on a route the server has no quarrel with.
+    """
+    action = Action("move", {"uid": 7, "from_folder": from_folder,
+                             "to_folder": to_folder, "uidvalidity": EPOCH})
     action.message_pk = message_pk
     db = FoldersDB([action], roles, ids={to_folder: 9})
     bridge = type("B", (), {"acc": Account(), "ops": lambda _self: client})()
     return action, db, agent_actions.drain_actions(db, bridge, AccountRow())
+
+
+def _archive_to(to_folder, roles, client, message_pk=55):
+    """Drain one queued archive — a move out of the inbox into `to_folder`."""
+    return _drain_move("INBOX", to_folder, roles, client, message_pk)
 
 
 def test_a_move_into_all_mail_the_server_refuses_is_dropped_not_retried_forever(
@@ -823,11 +833,68 @@ def test_a_move_into_all_mail_that_the_connection_broke_on_is_still_retried():
     assert action.attempts == 1
 
 
+def test_a_move_between_sent_and_the_inbox_is_dropped_rather_than_retried_forever(
+        monkeypatch, capsys):
+    """The other route with nothing to wait for, and the one that was found in a
+    log: 82 attempts of `move uid 876 from Sent to INBOX failed`, a quarter of an
+    hour apart, for a command Proton Bridge rejects before it reaches the API at
+    all (both directions, see agent/actions._UNCROSSABLE). A message is in the
+    inbox because it arrived and in Sent because it was sent; there is no mailbox
+    to empty or create that makes the eighty-third attempt land.
+    """
+    dropped = []
+    monkeypatch.setattr(agent_actions.store, "drop_pending_placement",
+                        lambda _db, pk, mailbox_id: dropped.append((pk, mailbox_id)))
+    client = Client(capabilities=("MOVE", "UIDPLUS"), refuses=("INBOX",))
+
+    action, db, counts = _drain_move(
+        "Sent", "INBOX", {"Sent": "sent", "INBOX": "inbox"}, client)
+
+    assert counts == (0, 0, 0)              # neither applied nor waiting to be
+    assert action.status == "refused"
+    assert dropped == [(55, 9)]             # and the copy the UI filed goes back
+    # The inbox is *not* condemned. This refusal is about the route, and mail
+    # reaches the inbox from every other folder — marking it would refuse an
+    # ordinary "put it back" at the keypress for every message on the account.
+    assert not [p for p in db.updates if p.get("writes_refused_at")]
+    out = capsys.readouterr().out
+    assert "dropped" in out and "Sent" in out and "INBOX" in out
+
+
+def test_a_move_from_the_inbox_into_sent_is_dropped_the_same_way(monkeypatch):
+    """Bridge refuses the pair by name, in either direction — filing a received
+    message into Sent is the same rejected label change read backwards."""
+    monkeypatch.setattr(agent_actions.store, "drop_pending_placement",
+                        lambda _db, _pk, _mailbox_id: None)
+    client = Client(capabilities=("MOVE", "UIDPLUS"), refuses=("Sent",))
+
+    action, _db, counts = _drain_move(
+        "INBOX", "Sent", {"INBOX": "inbox", "Sent": "sent"}, client)
+
+    assert counts == (0, 0, 0)
+    assert action.status == "refused"
+
+
+def test_a_refusal_moving_out_of_sent_to_somewhere_else_is_still_retried():
+    """Sent is not a folder mail cannot leave — only the inbox is closed to it.
+    Archiving a sent message is ordinary, and a refusal on that route is a
+    condition (a full mailbox, a folder mid-repair) rather than a verdict about
+    the two mailboxes involved."""
+    client = Client(capabilities=("MOVE", "UIDPLUS"), refuses=("Archive",))
+
+    action, db, (applied, failed, _sent) = _drain_move(
+        "Sent", "Archive", {"Sent": "sent", "Archive": "archive"}, client)
+
+    assert (applied, failed) == (0, 1)
+    assert action.status == "pending"
+    assert not [p for p in db.updates if p.get("writes_refused_at")]
+
+
 def test_a_refusal_from_an_ordinary_folder_is_still_retried():
-    """Only \\All is a destination with nothing to wait for. Over quota, a
-    folder that has not been created yet, a mailbox somebody is repairing: those
-    are refusals too, and they all stop being refusals when the condition behind
-    them clears — which is the case this module's patience is for."""
+    """Over quota, a folder that has not been created yet, a mailbox somebody is
+    repairing: those are refusals too, and every one of them stops being a
+    refusal when the condition behind it clears — which is the case this module's
+    patience is for. Only the routes _permanent_refusal names end here."""
     client = Client(capabilities=("MOVE", "UIDPLUS"), refuses=("Archive",))
 
     action, _db, (applied, failed, _sent) = _archive_to(

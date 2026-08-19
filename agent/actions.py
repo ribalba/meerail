@@ -155,17 +155,49 @@ class Refused(RuntimeError):
     on insisting the app is right about where a message is while the server has
     it somewhere else. Refusing once, out loud, and letting the next sweep read
     the truth back is the honest end. See _settle_refused.
+
+    ``unwritable`` names a folder the server takes no mail into at all, for the
+    refusals that are about the destination itself — \\All is the one. It is left
+    None for a refusal that is only true of one *route*, because the two are
+    written down very differently: _mark_write_refused stops the app ever
+    choosing an unwritable folder again, and doing that to a folder mail reaches
+    perfectly well from anywhere else would take an ordinary move away from every
+    other message on the account. See _permanent_refusal.
     """
+
+    def __init__(self, message: str, unwritable: str | None = None):
+        super().__init__(message)
+        self.unwritable = unwritable
+
+
+def _role(db, account_id: int, imap_name: str) -> str | None:
+    """What this folder is *for*, as the sync pass read it off SPECIAL-USE.
+
+    Everything here reasons about mailboxes by role rather than by name, because
+    the names are the server's own and no two agree: \\All is "All Mail" on one
+    account and "[Gmail]/All Mail" on the next, \\Sent is "Sent" or "Sent Mail"
+    or "Gesendet". An action's payload can only carry the name, so this is the
+    step from the one to the other.
+    """
+    return db.scalar(
+        select(Mailbox.role).where(Mailbox.account_id == account_id,
+                                   Mailbox.imap_name == imap_name))
 
 
 def _is_all_mail(db, account_id: int, imap_name: str) -> bool:
-    """Is this folder the account's \\All mailbox? Names differ per server
-    ("All Mail", "[Gmail]/All Mail"), so it is the role the sync pass recorded
-    from the SPECIAL-USE flag that decides, not the name."""
-    return db.scalar(
-        select(Mailbox.role).where(Mailbox.account_id == account_id,
-                                   Mailbox.imap_name == imap_name)
-    ) == "all"
+    return _role(db, account_id, imap_name) == "all"
+
+
+# Mailbox roles no move may cross on Proton, in either direction. Bridge rejects
+# the pair by name before the request reaches the API at all
+# (moveMessages{With,Without}UnlabelCallOnFolders in
+# internal/services/imapservice/connector.go), because on Proton neither mailbox
+# is somewhere a message is *put*: it is in the inbox because it was received and
+# in Sent because it was sent, and no label change turns one into the other. The
+# server answers "move failed: operation not allowed", which is a sentence about
+# the route rather than about either folder — every other way out of Sent, and
+# every other way into the inbox, works normally.
+_UNCROSSABLE = {("sent", "inbox"), ("inbox", "sent")}
 
 
 def _write_into(db, action: PendingAction, to_folder: str, fn, *args) -> None:
@@ -188,21 +220,61 @@ def _write_into(db, action: PendingAction, to_folder: str, fn, *args) -> None:
     "no such mailbox" are also answers that will not change on their own, but
     they change when someone empties a mailbox or the folder is created — and
     this module's whole disposition is that an action outlives the condition that
-    stopped it. \\All is the one destination where there is nothing to wait for:
-    the folder is not a folder.
+    stopped it. \\All is one of the two destinations where there is nothing to
+    wait for — the folder is not a folder — and _permanent_refusal, which decides
+    this, holds the other.
     """
     try:
         fn(*args)
     except Exception as e:
-        if imap.refused(e) and _is_all_mail(db, action.account_id, to_folder):
-            raise Refused(
-                f"{to_folder} is this account's All Mail, and the server will not accept "
-                f"mail into it — it is the union of everything the account holds, not a "
-                f"folder a message can be filed in ({e}). Archiving on this account needs "
-                f"a real Archive folder: create one on the server, or mark an existing "
-                f"one \\Archive, and sync again."
-            ) from e
+        if imap.refused(e):
+            verdict = _permanent_refusal(db, action, to_folder, e)
+            if verdict is not None:
+                raise verdict from e
         raise
+
+
+def _permanent_refusal(db, action: PendingAction, to_folder: str,
+                       exc: Exception) -> Refused | None:
+    """The refusals that will still be refusals next week, told apart from the
+    ones that are a condition someone can clear.
+
+    Both of these are the shape of a server where folders are labels answering a
+    command that only makes sense where they are folders, and neither is waiting
+    on anything: no mailbox can be emptied, created or repaired to make Proton
+    accept mail into \\All, or move a sent message into the inbox. Everything else
+    a server refuses — over quota, no such mailbox, a mailbox somebody is
+    rebuilding — is left to the retry loop, which is what this module's patience
+    is for.
+
+    None means "keep trying", which is this file's default and has to stay the
+    default: the cost of being wrong here is a filing the user has to do a second
+    time, having been told it was done.
+    """
+    if _is_all_mail(db, action.account_id, to_folder):
+        return Refused(
+            f"{to_folder} is this account's All Mail, and the server will not accept "
+            f"mail into it — it is the union of everything the account holds, not a "
+            f"folder a message can be filed in ({exc}). Archiving on this account needs "
+            f"a real Archive folder: create one on the server, or mark an existing "
+            f"one \\Archive, and sync again.",
+            unwritable=to_folder)
+
+    from_folder = (action.payload or {}).get("from_folder")
+    route = (_role(db, action.account_id, from_folder) if from_folder else None,
+             _role(db, action.account_id, to_folder))
+    if route in _UNCROSSABLE:
+        # Not unwritable, deliberately: the destination here is the inbox or
+        # Sent, and mail reaches both of those from other folders perfectly well.
+        # Only this one route is closed. See _UNCROSSABLE.
+        return Refused(
+            f"The server will not move mail between {from_folder} and {to_folder} in "
+            f"either direction ({exc}). On this account they are not folders a message "
+            f"can be filed into — a message is in the inbox because it arrived and in "
+            f"Sent because it was sent, and no client can hand it from one to the other. "
+            f"Nothing was moved: the message is still in {from_folder}, and filing it "
+            f"into Archive or a folder of your own works normally.")
+    return None
 
 
 def _copy_then_remove(db, c, action: PendingAction, uid: int, from_folder: str,
@@ -706,7 +778,7 @@ def _settle_stale(db, account, action: PendingAction, exc: StaleUid) -> None:
              "be made again from there.", getattr(account, "email", None))
 
 
-def _mark_write_refused(db, action: PendingAction) -> None:
+def _mark_write_refused(db, action: PendingAction, folder: str | None) -> None:
     """Write down that this account's server will not take mail into that folder.
 
     So that the next archive does not queue the same doomed move. The app picks
@@ -719,8 +791,13 @@ def _mark_write_refused(db, action: PendingAction) -> None:
     Cleared by nothing. A server that starts accepting mail into its \\All
     folder is not a thing that happens; a folder that is deleted and re-listed
     gets a new row anyway.
+
+    ``folder`` comes from the refusal rather than from the action's destination,
+    and only the refusals that condemn a folder outright name one (Refused.
+    unwritable). A move Proton turned down because of the *route* it took — Sent
+    to the inbox — must not leave the inbox marked: every ordinary move back into
+    it would then be refused at the keypress, and undo would offer nothing.
     """
-    folder = (action.payload or {}).get("to_folder")
     if not folder:
         return
     # One statement rather than a read and a write: the column is written here
@@ -762,7 +839,7 @@ def _settle_refused(db, account, action: PendingAction, exc: Refused) -> None:
     # retryable failures below keep repr(): those are diagnostics for a log.
     action.error = str(exc)
     action.updated_at = utcnow()
-    _mark_write_refused(db, action)
+    _mark_write_refused(db, action, exc.unwritable)
     _undo_optimistic_placement(db, action)
     log.warn(f"{_describe(action)} was NOT done and has been dropped: {exc} "
              f"Nothing on the server was changed — the message is still where it "

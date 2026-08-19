@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Tika's own log4j2.xml, plus a muzzle on PDFBox.
+
+  PDFBox logs one WARN per glyph it cannot map to Unicode
+  ("No Unicode mapping for (189) in font ABCDEF+Foo"), which for a single PDF
+  built from a subsetted font is hundreds of lines. It is not a failure — the
+  glyph is still extracted, only its Unicode identity is a guess — and at INFO
+  it buries the parse errors that do matter. ERROR keeps anything that actually
+  went wrong while dropping the per-glyph chatter.
+-->
+<Configuration status="WARN">
+  <Appenders>
+    <Console name="Console" target="SYSTEM_ERR">
+      <PatternLayout pattern="%-5p [%t] %d{HH:mm:ss,SSS} %c %m%n"/>
+    </Console>
+  </Appenders>
+  <Loggers>
+    <Logger name="org.apache.pdfbox" level="error"/>
+    <Logger name="org.apache.fontbox" level="error"/>
+    <Root level="info">
+      <AppenderRef ref="Console"/>
+    </Root>
+  </Loggers>
+</Configuration>

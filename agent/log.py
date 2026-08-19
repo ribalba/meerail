@@ -111,4 +111,16 @@ def hint(exc: Exception) -> str:
                 "password and it changes when the account is re-added.")
     if isinstance(exc, ConnectionRefusedError) or "connection refused" in text:
         return "Nothing is listening there — Bridge, Postgres or Tika is not up yet."
+    # A verdict, not a hiccup: Bridge says this to commands the Proton API has no
+    # equivalent for at all, and says nothing further about which. The two routes
+    # meerail knows of are ended rather than retried (agent/actions.
+    # _permanent_refusal), so anything still arriving here is one nobody has
+    # worked out yet — and the only place with more than four words about it is
+    # Bridge's own log.
+    if "operation not allowed" in text:
+        return ("Bridge refused the command outright rather than failing at it — it "
+                "does that to moves Proton has no equivalent for (anything into All "
+                "Mail, and Inbox <-> Sent in either direction). Bridge's own log has "
+                "the detail: Help > Logs in the Bridge window, or "
+                "~/Library/Logs/protonmail/bridge-v3 on macOS.")
     return ""

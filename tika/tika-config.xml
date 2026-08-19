@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  PDF parsing, tuned for mail attachments.
+
+  Two knobs, both about when and how a PDF page is OCR'd. The default answer to
+  "when" is wrong for us in a way that is expensive rather than merely noisy:
+
+  ocrStrategyAuto — with ocrStrategy=auto (the default, and what we want) Tika
+  OCRs a page when its text layer looks untrustworthy. "Untrustworthy" ships as
+  `better` = more than *ten* characters on the page that PDFBox could not map to
+  Unicode. Any PDF built with a subsetted font that carries no usable ToUnicode
+  table clears that bar on its first line — those are the
+  "No Unicode mapping for (189) in font ABCDEF+Foo" warnings — even though the
+  text extracts perfectly well. The result is a full-document OCR of a document
+  that never needed it: minutes of Tesseract per attachment, and if any single
+  page exceeds Tesseract's timeout the parse throws and *the whole PDF* comes
+  back empty (AbstractPDF2XHTML.endPage rethrows a TikaException as a fatal
+  IOException — there is no partial result). "50%, 10" reads instead as: OCR a
+  page only when more than half of its characters are unmapped, i.e. when the
+  text layer really is garbage rather than merely imperfect.
+
+  ocrDPI — the resolution a page is rendered at before it goes to Tesseract.
+  300 is a scanner-quality default; 200 is still comfortably above what
+  Tesseract needs for body text and costs less than half the pixels, which is
+  both half the OCR time and half the render heap. The heap half matters: a
+  render that exhausts it kills the JVM and burns the attachment (see
+  core/mail/tika.py's OOM handling).
+-->
+<properties>
+  <parsers>
+    <!-- Listing a parser here replaces the whole default set, so DefaultParser
+         has to be named explicitly, with the one parser we configure excluded
+         from it — otherwise PDFs would be handled twice, or not at all. -->
+    <parser class="org.apache.tika.parser.DefaultParser">
+      <parser-exclude class="org.apache.tika.parser.pdf.PDFParser"/>
+    </parser>
+    <parser class="org.apache.tika.parser.pdf.PDFParser">
+      <params>
+        <param name="ocrStrategyAuto" type="string">50%, 10</param>
+        <param name="ocrDPI" type="int">200</param>
+      </params>
+    </parser>
+  </parsers>
+</properties>

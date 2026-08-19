@@ -34,3 +34,17 @@ LABEL org.opencontainers.image.title="meerail-tika" \
       org.opencontainers.image.licenses="Apache-2.0"
 
 COPY --from=jars /tika-extras /tika-extras
+
+# Parser and logging config. Both are carried in the image rather than mounted
+# or passed as flags because the compose files that use this image are also the
+# ones a user already has on disk from an earlier install — a fix that only
+# takes effect when they also update their compose file is a fix most people
+# never get.
+COPY tika-config.xml log4j2.xml /meerail/
+
+# The stock entrypoint, with those two files wired in. Copied rather than
+# extended because there is no way to append to an ENTRYPOINT: upstream's is
+# `sh -c "exec java -cp ... TikaServerCli -h 0.0.0.0 $0 $@"`, and the `$0 $@`
+# tail is what passes the compose `command:` through, so it has to stay last.
+# If a future base image changes its classpath, this line is what to check.
+ENTRYPOINT ["/bin/sh", "-c", "exec java -Dlog4j2.configurationFile=/meerail/log4j2.xml -cp \"/tika-server-standard-${TIKA_VERSION}.jar:/tika-extras/*\" org.apache.tika.server.core.TikaServerCli -c /meerail/tika-config.xml -h 0.0.0.0 $0 $@"]
