@@ -363,6 +363,9 @@ def delete_mailbox(mailbox_id: int, confirm: bool = False, db: DBSession = Depen
     for only when there is something to lose — a folder holding neither mail nor
     other folders is deleted on the first request, because "are you sure" about
     an empty folder is a dialog that teaches people to click through dialogs.
+    "Holding mail" means mail the user can still see: an empty folder here has
+    to be the same empty folder the sidebar drew, or the confirmation arrives as
+    a contradiction.
     Anything else answers 409 with the counts in it, which is the sentence the
     browser then puts in front of the user rather than a number it worked out
     for itself.
@@ -378,8 +381,20 @@ def delete_mailbox(mailbox_id: int, confirm: bool = False, db: DBSession = Depen
     doomed = _subtree(account, mbs, mb)
     ids = [m.id for m in doomed]
 
+    # Counted the way every other read path counts — non-deleted placements
+    # only, the same filter the sidebar's own totals use (list_mailboxes) and
+    # the one core.models.still_filed applies everywhere else. A placement
+    # carrying \Deleted is mail the user cannot see in this folder or anywhere
+    # else, and an mbox import makes them by the hundred: the Status letters an
+    # export carries include "D", and tools/import_mbox.py stores that flag as
+    # it finds it. Counting those here asked "delete the 2 messages in Old?"
+    # about a folder the sidebar had just called empty — a dialog contradicting
+    # the screen behind it, over mail that is already gone. They still go with
+    # the folder (the purge below takes every placement, flagged or not); they
+    # are simply not something to warn about losing.
     held = db.scalar(select(func.count()).select_from(MessageLocation)
-                     .where(MessageLocation.mailbox_id.in_(ids))) or 0
+                     .where(MessageLocation.mailbox_id.in_(ids),
+                            MessageLocation.deleted.is_(False))) or 0
     if not confirm and (held or len(doomed) > 1):
         raise HTTPException(status_code=409, detail=_what_goes(mb, doomed, held))
 

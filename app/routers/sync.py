@@ -224,15 +224,30 @@ def _actions_status(db, now) -> dict:
     # at exactly this row — and a mixed window that happened to end on a stale
     # UID printed "the folder was rebuilt" above a button offering to create an
     # Archive folder, which is two unrelated faults reading as one.
-    dropped_error = db.scalar(
-        select(PendingAction.error).where(*was_dropped, PendingAction.error.is_not(None))
+    #
+    # The reason and what kind of refusal it was come off the same row, because
+    # the panel prints one under the other: a code from one refusal above the
+    # sentence from a different one is two faults reading as one, which is the
+    # bug the ordering above already exists to avoid.
+    reason = db.execute(
+        select(PendingAction.error,
+               PendingAction.payload["refused_kind"].astext)
+        .where(*was_dropped, PendingAction.error.is_not(None))
         .order_by((PendingAction.status == "refused").desc(),
                   PendingAction.updated_at.desc())
         .limit(1)
-    ) if dropped else None
+    ).first() if dropped else None
+    dropped_error, dropped_reason = reason if reason else (None, None)
 
     return {"stuck": int(stuck or 0), "dropped": int(dropped),
             "dropped_kind": kind, "error": error, "dropped_error": dropped_error,
+            # Which refusal, for the panel to pick its sentence and its colour by
+            # — "folder" for a destination that takes no mail at all, "route" for
+            # a pair of folders the server will not carry mail between (Proton's
+            # inbox and Sent). None on a row from before the agent recorded it,
+            # and on a stale drop, where the sentence does not branch.
+            # See agent/actions._settle_refused.
+            "dropped_reason": dropped_reason,
             "dropped_fix": _dropped_fix(db, was_dropped) if dropped else None,
             "oldest_at": oldest}
 

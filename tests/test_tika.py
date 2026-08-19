@@ -112,3 +112,79 @@ def test_webp_signature_is_recognised(monkeypatch):
     seen = _capture(monkeypatch)
     tika.extract_text(b"RIFF\x00\x00\x00\x00WEBPvp8", "image/png")
     assert seen["headers"]["Content-Type"] == "image/webp"
+
+
+def test_tika_is_asked_to_give_up_before_we_stop_listening(monkeypatch):
+    """Otherwise the container OCRs on past the point where anyone cares.
+
+    Tesseract's own budget is 120s per image and ours was 60, so an oversized
+    scan was abandoned here, burned in the database, and then worked on for
+    another full minute by a container nobody was waiting for.
+    """
+    seen = _capture(monkeypatch)
+    tika.extract_text(b"document", "image/jpeg", timeout=60.0)
+    assert int(seen["headers"]["X-Tika-Timeout-Millis"]) == 55_000
+
+
+def test_the_asked_for_budget_stays_inside_what_the_server_accepts(monkeypatch):
+    """Out of range is not a slower parse, it is a wrong verdict on the file.
+
+    tika-server answers a budget below its minimum with 400 and one above its
+    maximum with 500 — which this client reads as "burn it" and "Tika is
+    broken". Both would be our doing, so neither is allowed to happen.
+    """
+    assert tika._task_timeout_ms(5.0) == tika._MIN_TASK_TIMEOUT_MS
+    assert tika._task_timeout_ms(3600.0) == tika._MAX_TASK_TIMEOUT_MS
+
+
+def _clock(monkeypatch, spent: float):
+    """Freeze the clock so a stubbed failure can claim to have taken `spent`."""
+    ticks = iter([0.0, spent])
+    monkeypatch.setattr(tika.time, "monotonic", lambda: next(ticks))
+
+
+def test_a_kill_at_our_own_deadline_is_the_file(monkeypatch):
+    """The budget is enforced by killing the forked JVM, not by a status code.
+
+    tika-server's watchdog shuts the parse down when the time we asked for runs
+    out, and the 422 only sometimes beats the closing socket onto the wire. Read
+    as CRASHED, the same oversized scan is handed straight back for a second
+    full budget and a second kill, to arrive at the verdict the first one had
+    already reached.
+    """
+    def died(*_args, **_kwargs):
+        raise httpx.RemoteProtocolError("server disconnected")
+
+    monkeypatch.setattr(tika.httpx, "put", died)
+    _clock(monkeypatch, 55.0)   # the whole budget for a 60s wait
+    assert tika.extract_text(b"scan", "image/jpeg", timeout=60.0) is tika.UNPROCESSABLE
+
+
+def test_a_kill_early_in_the_budget_is_still_the_service(monkeypatch):
+    """A parse cut down long before its own deadline was somebody else's kill.
+
+    Two drains share one Tika, one of them hands it a file the watchdog stops,
+    and the forked process takes every request in flight with it. That payload
+    did nothing wrong and must keep the second attempt CRASHED buys it.
+    """
+    def died(*_args, **_kwargs):
+        raise httpx.RemoteProtocolError("server disconnected")
+
+    monkeypatch.setattr(tika.httpx, "put", died)
+    _clock(monkeypatch, 3.0)
+    assert tika.extract_text(b"scan", "image/jpeg", timeout=60.0) is tika.CRASHED
+
+
+def test_the_default_budget_is_the_most_the_server_will_grant(monkeypatch):
+    """The margin is what keeps the default legal, not just polite.
+
+    tika-server's taskTimeoutMillis is 300s and it answers a request for more
+    with a 500 — which this client reads as "Tika is broken" and retries
+    forever. The default wait is that same 300s, so the two are only ever a
+    margin apart, and the margin is the whole of the safety.
+    """
+    seen = _capture(monkeypatch)
+    tika.extract_text(b"scan", "image/jpeg")
+    asked = int(seen["headers"]["X-Tika-Timeout-Millis"])
+    assert asked <= tika._MAX_TASK_TIMEOUT_MS
+    assert asked == 295_000

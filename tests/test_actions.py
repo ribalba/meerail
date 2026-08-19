@@ -341,6 +341,37 @@ def test_a_dropped_notice_can_be_dismissed_and_a_later_failure_brings_it_back(ac
     assert _status_actions()["dropped"] == 1
 
 
+def test_a_move_the_server_forbids_reaches_the_panel_as_news_not_as_a_fault(account):
+    """The two refusals need opposite sentences, and the panel picks by the code.
+
+    A destination that takes no mail at all is a fault in the account: it recurs
+    until somebody makes an Archive folder, and the notice says so with a button.
+    A move between the inbox and Sent is not a fault anywhere — Proton has no
+    such operation, the mail never left the folder it was in, and there is nothing
+    to repair. Both used to arrive as the same red "could not be made", which is
+    an alarm about mail sitting exactly where its owner last saw it.
+    """
+    email, aid = account["email"], account["id"]
+    _seed_folder(email, "Sent", "\\Sent")
+    mid, _ = ingest_one(email, aid, "ROUTE" + uuid.uuid4().hex[:6])
+    ids = _role_ids(email)
+    assert api("POST", f"/api/messages/{mid}/move?mailbox_id={ids['sent']}"
+                       f"&source_mailbox_id={ids['inbox']}")[0] == 200
+
+    dbfixture.drop_actions(email, "refused", "The server will not move mail between "
+                          "INBOX and Sent in either direction", refused_kind="route")
+
+    ac = _status_actions()
+    assert ac["dropped"] == 1 and ac["dropped_kind"] == "refused"
+    assert ac["dropped_reason"] == "route"
+    # Nothing to build: the button is for an account with nowhere to archive to,
+    # and this refusal has nothing to do with archiving.
+    assert ac["dropped_fix"] is None
+    # The reason still travels, because it names the two folders and quotes the
+    # server — the part the panel's own sentence cannot know.
+    assert "INBOX" in ac["dropped_error"] and "Sent" in ac["dropped_error"]
+
+
 def _role_ids(email):
     _, boxes = api("GET", "/api/mailboxes")
     return {m["role"]: m["id"] for a in boxes["accounts"] if a["email"] == email

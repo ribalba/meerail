@@ -165,3 +165,55 @@ def test_a_folder_a_mail_server_owns_is_refused(account):
     assert code == 400, body
     assert "mail server" in body["detail"]
     assert _folder(aid, name) is not None
+
+
+# --- Mail the user cannot see -------------------------------------------------
+
+
+def test_mail_the_user_cannot_see_does_not_make_a_folder_look_full(local_account):
+    """"Der Ordner ist leer... dann sagt er mir das dort zwei Mails drinne sind."
+
+    An mbox export carries its Status letters, "D" among them, and the importer
+    stores that flag as it finds it (tools/import_mbox.py). A placement wearing
+    \\Deleted is invisible in the list, in search and in the sidebar's count, so
+    the folder is empty to everyone looking at it — and the delete used to count
+    those placements anyway and refuse with a number nothing on screen agreed
+    with. It goes on the first request, like any other empty folder, and the
+    placements go with it.
+    """
+    email, aid = local_account["email"], local_account["id"]
+    token = "FOLDGHOST" + uuid.uuid4().hex[:6]
+    name = "Ghosts" + uuid.uuid4().hex[:6]
+    raw = make_message(f"<m-{uuid.uuid4().hex}@t>", f"Subj {token}", "s@ex.com",
+                       email, f"{token} body", T0)
+    dbfixture.import_raw_message(email, raw, folder=name, flags={"deleted": True})
+    mailbox_id = _folder(aid, name)["id"]
+    assert _folder(aid, name)["total"] == 0          # what the sidebar drew
+
+    code, body = api("DELETE", f"/api/mailboxes/{mailbox_id}")
+    assert code == 200, body
+    assert body["held"] == 0 and body["folders"] == 1
+    assert body["deleted"] == 1                      # the placement's mail still went
+    assert _folder(aid, name) is None
+
+
+def test_visible_mail_beside_hidden_mail_is_still_confirmed(local_account):
+    """The other half of it: \\Deleted placements are not counted, and that is
+    not the same as counting nothing. One readable message in the folder and the
+    refusal is the refusal, naming the one."""
+    email, aid = local_account["email"], local_account["id"]
+    name = "Mixed" + uuid.uuid4().hex[:6]
+    for token, flags in ((f"FOLDSEEN{uuid.uuid4().hex[:6]}", None),
+                         (f"FOLDGONE{uuid.uuid4().hex[:6]}", {"deleted": True})):
+        raw = make_message(f"<m-{uuid.uuid4().hex}@t>", f"Subj {token}", "s@ex.com",
+                           email, f"{token} body", T0)
+        dbfixture.import_raw_message(email, raw, folder=name, flags=flags)
+    mailbox_id = _folder(aid, name)["id"]
+
+    code, body = api("DELETE", f"/api/mailboxes/{mailbox_id}")
+    assert code == 409, body
+    assert "1 message" in body["detail"]
+
+    code, body = api("DELETE", f"/api/mailboxes/{mailbox_id}?confirm=true")
+    assert code == 200, body
+    assert body["held"] == 1 and body["deleted"] == 2   # both placements' mail goes

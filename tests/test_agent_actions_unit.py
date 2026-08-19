@@ -811,6 +811,9 @@ def test_a_move_into_all_mail_the_server_refuses_is_dropped_not_retried_forever(
     # ...and the folder is marked, so the app stops choosing a destination this
     # server has already said no to.
     assert [p for p in db.updates if p.get("writes_refused_at")]
+    # The other kind, which the panel does show as a fault: it will happen again
+    # every time until the account has somewhere else to archive to.
+    assert action.payload["refused_kind"] == "folder"
     out = capsys.readouterr().out
     assert "dropped" in out and "All Mail" in out and "Archive folder" in out
 
@@ -857,6 +860,11 @@ def test_a_move_between_sent_and_the_inbox_is_dropped_rather_than_retried_foreve
     # reaches the inbox from every other folder — marking it would refuse an
     # ordinary "put it back" at the keypress for every message on the account.
     assert not [p for p in db.updates if p.get("writes_refused_at")]
+    # Which refusal it was, for the status panel: nothing is wrong with the
+    # account and nothing is lost, so the notice is a note rather than a day of
+    # red. The payload is what carries that, since prose cannot be branched on.
+    assert action.payload["refused_kind"] == "route"
+    assert action.payload["to_folder"] == "INBOX"   # and the instruction survives
     out = capsys.readouterr().out
     assert "dropped" in out and "Sent" in out and "INBOX" in out
 

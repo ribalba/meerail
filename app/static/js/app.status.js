@@ -245,21 +245,32 @@ App.status = (function () {
     return a && (a.stuck || a.dropped) ? a : null;
   }
 
-  // Three different pieces of news, and only two of them are a problem.
+  // Four different pieces of news, and only two of them are a problem.
   //
   //   stuck    something you did has not reached the server yet and is still
   //            being tried. It will keep failing until the cause is fixed.
-  //   refused  the server said no to the destination. It will say no again, so
-  //            the account needs changing before that key works at all.
+  //   refused, folder
+  //            the server takes no mail into that folder at all. It will say no
+  //            again, so the account needs changing before that key works.
+  //   refused, route
+  //            the server will not carry mail between those two folders — on
+  //            Proton, its inbox and Sent. Nothing about the account is wrong and
+  //            there is nothing to repair: that move is simply not a thing the
+  //            server can be asked for, and the message never left where it was.
   //   stale    the change was skipped because meerail could no longer be sure
   //            which message it named. Nothing is wrong with anything; doing it
   //            again is the whole of the fix, and it does not recur.
   //
   // Only the first two are faults, and this is what says so — a red box for the
-  // third would be warning somebody about a thing they cannot act on and do not
-  // need to. It decides the icon, the colour, and whether the toolbar goes red.
+  // other two would be warning somebody about a thing they cannot act on and do
+  // not need to. It decides the icon, the colour, and whether the toolbar goes
+  // red, which is why the route case is deliberately not one: a notice standing
+  // in red for a day over "that move is not possible here" is an alarm about
+  // mail that is exactly where its owner last saw it.
   function actionsTone(ac) {
-    return ac.stuck || ac.dropped_kind !== "stale" ? "warn" : "note";
+    if (ac.stuck) return "warn";
+    if (ac.dropped_kind === "stale" || ac.dropped_reason === "route") return "note";
+    return "warn";
   }
 
   function actionsLabel(ac) {
@@ -268,8 +279,15 @@ App.status = (function () {
       return `${what} not reaching the server`;
     }
     const n = ac.dropped === 1 ? "1 change" : `${num(ac.dropped)} changes`;
-    return ac.dropped_kind === "stale" ? `${n} were skipped`
-                                       : `${n} could not be made`;
+    if (ac.dropped_kind === "stale") return `${n} were skipped`;
+    // "could not be made" reads as a fault somewhere. For a move the server has
+    // no equivalent for, the honest headline is that it was not possible, which
+    // is a fact about the server rather than about this attempt.
+    if (ac.dropped_reason === "route") {
+      return ac.dropped === 1 ? "1 change your mail server does not allow"
+                              : `${num(ac.dropped)} changes your mail server does not allow`;
+    }
+    return `${n} could not be made`;
   }
 
   // Written for somebody reading their mail, not for somebody reading the
@@ -286,7 +304,24 @@ App.status = (function () {
   // takes, on a server that files mail into both of them all day long, so the
   // sentence has to survive not knowing which of the two this is; the reason
   // line under the notice is where the specifics are.
-  function droppedSub(kind, fix) {
+  function droppedSub(kind, fix, reason) {
+    // Named rather than described, because this one is a question people ask
+    // once and then need answering in full: Proton's inbox and Sent are not
+    // folders mail is put into — a message is in the inbox because it arrived and
+    // in Sent because it was sent — and Bridge rejects a move between them
+    // before it reaches Proton at all. The mail was put straight back where it
+    // was, which is the part somebody looking at this notice wants to read
+    // first. See agent/actions._UNCROSSABLE.
+    if (kind === "refused" && reason === "route") {
+      return `Moving mail between your inbox and Sent is something your mail server
+              does not allow — on Proton those two are not folders a message is
+              filed into: it is in the inbox because it arrived, and in Sent because
+              it was sent, and no mail app can hand it from one to the other.
+              <strong>The message was put back where it was and nothing is
+              lost.</strong> Filing it into Archive or a folder of your own works
+              normally. Nothing is wrong with your account and there is nothing to
+              fix — this notice is only here to say the change did not happen.`;
+    }
     if (kind === "refused") {
       return `Your mail server refused that change rather than failing at it, so it
               was not made. Nothing on the server changed and no mail is lost — the
@@ -359,13 +394,19 @@ App.status = (function () {
          reason is below, and they go through by themselves as soon as it is fixed.
          Nothing is lost. Until then, where your server has this mail is what the
          app falls back to showing.`
-      : droppedSub(ac.dropped_kind, ac.dropped_fix);
+      : droppedSub(ac.dropped_kind, ac.dropped_fix, ac.dropped_reason);
     const oldest = ac.stuck && ac.oldest_at
       ? ` · oldest ${App.esc(App.relTime(ac.oldest_at))}` : "";
     // The raw reason is the actionable part of a fault and clutter on a notice:
     // "the folder was rebuilt" adds nothing to the sentence above it, and a line
     // of exception text is what makes a harmless message look alarming.
-    const why = tone === "warn" ? (ac.error || ac.dropped_error) : null;
+    //
+    // Keyed on the kind of news rather than on the colour, though. A refusal
+    // names the two folders involved and what the server said about them, which
+    // is the whole substance of the notice and the thing somebody asks for next —
+    // and the route case is deliberately not red, so hanging this off the tone
+    // hid exactly the sentence that explains why it is not.
+    const why = ac.error || (ac.dropped_kind === "stale" ? null : ac.dropped_error);
     return `<div class="ag-outbox ${tone === "warn" ? "stuck" : ""}">
       <div class="ob-head">
         ${App.icon(tone === "warn" ? "warning" : "info", 15)}

@@ -267,13 +267,16 @@ def _permanent_refusal(db, action: PendingAction, to_folder: str,
         # Not unwritable, deliberately: the destination here is the inbox or
         # Sent, and mail reaches both of those from other folders perfectly well.
         # Only this one route is closed. See _UNCROSSABLE.
+        # Short, and it has to stay short: this sentence is printed under the
+        # status panel's own explanation of the same refusal (app/static/js/
+        # app.status.js::droppedSub), so what it is for is the part the panel
+        # cannot know — which two folders, and what the server actually said.
         return Refused(
             f"The server will not move mail between {from_folder} and {to_folder} in "
-            f"either direction ({exc}). On this account they are not folders a message "
-            f"can be filed into — a message is in the inbox because it arrived and in "
-            f"Sent because it was sent, and no client can hand it from one to the other. "
-            f"Nothing was moved: the message is still in {from_folder}, and filing it "
-            f"into Archive or a folder of your own works normally.")
+            f"either direction ({exc}) — on this account those two are not folders a "
+            f"message is filed into. Nothing was moved: the message is still in "
+            f"{from_folder}, and filing it into Archive or a folder of your own works "
+            f"normally.")
     return None
 
 
@@ -832,6 +835,18 @@ def _settle_refused(db, account, action: PendingAction, exc: Refused) -> None:
     line in a counter.
     """
     action.status = "refused"
+    # Which of the two refusals this was, for the app rather than for the log.
+    # The sentence below says it in prose, and prose is not something the status
+    # panel can branch on: a folder that takes no mail is a fault in the account's
+    # setup that recurs until somebody fixes it, and a route the server has no
+    # equivalent for is a thing that simply cannot be asked for — nothing lost,
+    # nothing to repair, and a red box for a day is the wrong sentence for it.
+    # See app/routers/sync._actions_status.
+    #
+    # Replaced rather than mutated, like _settle_unknown's flag: payload is plain
+    # JSONB and an edit in place is committed as nothing at all.
+    action.payload = {**(action.payload or {}),
+                      "refused_kind": "folder" if exc.unwritable else "route"}
     # The sentence, not the repr. A dropped action's error is read by a person —
     # the status panel puts it on screen verbatim, because it is the only place
     # the reason for a change that did not happen is ever stated — and

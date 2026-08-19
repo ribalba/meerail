@@ -477,10 +477,18 @@ def refuse_writes(email: str, folder: str) -> None:
         mailbox.writes_refused_at = utcnow()
 
 
-def drop_actions(email: str, status: str, error: str) -> int:
+def drop_actions(email: str, status: str, error: str,
+                 refused_kind: str | None = None) -> int:
     """Take every queued action out of the queue the way the agent does when it
     decides one cannot be carried out — "stale" for a UID that no longer names
-    anything, "refused" for a destination the server will not take."""
+    anything, "refused" for a move the server will not make.
+
+    ``refused_kind`` is what the agent writes down about *which* refusal it was
+    ("folder" for a destination that takes no mail at all, "route" for a pair of
+    folders it will not carry mail between), because the status panel picks both
+    its sentence and its colour off that rather than off the error text. See
+    agent/actions._settle_refused.
+    """
     with session() as db:
         account = db.query(Account).filter(Account.email == email.lower()).one()
         rows = db.query(PendingAction).filter(PendingAction.account_id == account.id,
@@ -489,6 +497,8 @@ def drop_actions(email: str, status: str, error: str) -> int:
             a.status = status
             a.error = error
             a.updated_at = utcnow()
+            if refused_kind:
+                a.payload = {**(a.payload or {}), "refused_kind": refused_kind}
         return len(rows)
 
 
