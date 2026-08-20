@@ -4,7 +4,8 @@ from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.utils import format_datetime
 
-from core.mail.parse import html_to_text, normalize_subject, parse_email
+from core.mail.parse import (header_message_id, html_to_text, normalize_subject,
+                             parse_email)
 from core.mail.threading import _new_thread_id
 from helpers import PNG_1x1, make_message
 
@@ -406,3 +407,34 @@ def test_nul_bytes_stripped_from_attachment_content_type():
     assert "\x00" not in att.content_type, repr(att.content_type)
     assert "\x00" not in att.filename, repr(att.filename)
     assert att.content_type == "text/plain"
+
+
+def test_header_message_id_ignores_the_from_address():
+    # The header block the agent fetches is MESSAGE-ID, DATE, FROM and SUBJECT,
+    # returned in the order the message wrote them — so on mail that puts From
+    # first, the first <...> in the block is the sender's address, not the id.
+    # Reading it as the id is what put deleted messages back in the inbox: the
+    # "is this being moved?" lookup was made against annie@ergo-outlet.co.uk,
+    # matched no stored message, and the sweep restored the placement.
+    block = (
+        b"From: Annie <annie@ergo-outlet.co.uk>\r\n"
+        b"Date: Wed, 20 Aug 2026 10:00:31 +0000\r\n"
+        b"Subject: Custom Ergonomic Chairs\r\n"
+        b"Message-ID: <202620081000.a6gq4x9yqxirj@brevo.net>\r\n\r\n"
+    )
+    assert header_message_id(block) == "202620081000.a6gq4x9yqxirj@brevo.net"
+
+
+def test_header_message_id_matches_what_parse_email_stores():
+    # The whole point of it living here: the agent compares this against a
+    # stored Message.message_id, so the two have to come off the same code.
+    raw = make_message("<a@x>", "Hello there", "Alice <alice@example.com>",
+                       "me@proton.me", "body", WHEN)
+    head = raw.split(b"\r\n\r\n", 1)[0] + b"\r\n\r\n"
+    assert header_message_id(head) == parse_email(raw).message_id
+
+
+def test_header_message_id_none_without_one():
+    assert header_message_id(b"From: <a@b>\r\nSubject: no id\r\n\r\n") is None
+    assert header_message_id(b"") is None
+    assert header_message_id(None) is None

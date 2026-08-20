@@ -317,7 +317,16 @@ App.bulk = (function () {
         `folder is deleted, including messages not currently on screen.`
       : `\n\nThis empties the whole folder on the mail server, including messages ` +
         `not currently on screen.`;
-    return confirm(`Permanently delete everything in ${App.shell.currentTitle()}?${what}` +
+    // Named with its size, because "everything in this folder" gave no sign of
+    // what that was: a Trash nobody has emptied since the account was made is
+    // years of mail nobody has looked at, and the first time its owner learns
+    // the number should not be from the log afterwards. The count is the list's
+    // own — the same one the header shows — so the question is asked about
+    // exactly what the folder says it holds.
+    const n = App.shell.listTotal();
+    const all = n > 1 ? `all ${n} conversations`
+              : n === 1 ? "the conversation" : "everything";
+    return confirm(`Permanently delete ${all} in ${App.shell.currentTitle()}?${what}` +
                    `\n\nIt cannot be undone.`);
   }
 
@@ -348,16 +357,35 @@ App.bulk = (function () {
   // one action in meerail that mail does not come back from.
   async function emptyTrash() {
     const mailboxId = App.shell.currentMailboxId();
-    if (!mailboxId) return 0;
+    if (!mailboxId) return;
     let done = false;
     let deleted = 0;
+    let queued = 0;
     while (!done) {
       const res = await App.api.emptyTrash(mailboxId);
       deleted += res.deleted || 0;
+      queued = res.queued || 0;
       done = res.done;
       if (res.deleted === 0) break;   // nothing shifted — stop rather than spin
     }
-    return deleted;
+    // Mail the empty left behind. It is here because meerail has told the server
+    // to move it to Trash and has not been told it happened, so as far as any
+    // mail server knows it is still filed where it came from — and "empty the
+    // Trash" is not permission to delete it there. bulk_empty_trash leaves it
+    // alone and reports it, and this is where that gets said.
+    //
+    // Whatever was deleted alongside it, not only when nothing was: on a Trash
+    // that emptied all but the last handful, the rows that stay put are the
+    // whole of what the user sees, and they are exactly the ones the button
+    // looks like it failed on.
+    if (queued > 0) {
+      alert(`${deleted ? `Deleted ${plural(deleted, "message", "messages")}. ` : ""}` +
+        `${plural(queued, "message is", "messages are")} still on the way to ` +
+        `Trash on the mail server — meerail has asked for the move and is ` +
+        `waiting to be told it happened, and does not delete mail the server ` +
+        `still has filed somewhere else. Those stay in this folder for now.` +
+        `\n\nEmpty the Trash again once the sync has caught up.`);
+    }
   }
 
   async function trashSelected() {

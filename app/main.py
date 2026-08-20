@@ -14,12 +14,12 @@ from core.database import engine, init_db
 from core.version import VERSION
 from .limits import MaxBodySize
 from .routers import (
-    accounts, actions, ai, analytics, auth, compose, contacts, mailboxes, messages, outbox,
-    reminders, search, stream, sync, tasks, undo, version,
+    accounts, actions, ai, analytics, auth, cleanup, compose, contacts, mailboxes, messages,
+    outbox, reminders, search, stream, sync, tasks, undo, version,
 )
 from .deps import is_secure_request, require_ui_auth, ui_password
 from .routers.compose import sweep_outbox_staging
-from .workers import contacts_loop, journal_loop, reminders_loop, search_index_loop
+from .workers import body_sig_loop, contacts_loop, journal_loop, reminders_loop, search_index_loop
 
 settings = get_settings()
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -70,6 +70,10 @@ async def lifespan(_app: FastAPI):
     # including the reminders that fell due while this server was not running.
     _spawn(reminders_loop())
     _spawn(search_index_loop())
+    # After the search index, on purpose: both are one-off backfills over the
+    # whole mailbox, and search being fast again matters to every keystroke
+    # while Cleanup being ready matters only to a panel nobody has opened yet.
+    _spawn(body_sig_loop())
     # Only where one is configured, which is deliberately not the default: an
     # install that has not been told about a journal makes no outbound request
     # and runs no extra loop. See app/journal.py.
@@ -260,6 +264,7 @@ app.include_router(reminders.router)
 app.include_router(contacts.router)
 app.include_router(search.router)
 app.include_router(analytics.router)
+app.include_router(cleanup.router)
 app.include_router(sync.router)
 app.include_router(tasks.router)
 app.include_router(ai.router)

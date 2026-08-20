@@ -418,7 +418,9 @@ def bulk_empty_trash(req: EmptyTrashRequest, db: DBSession = Depends(get_db)):
     Trash that are still queued (core.mail.store.place_pending): the message is,
     as far as any mail server knows, still sitting in the folder it came from,
     and "empty the Trash" is not permission to delete it there. It stays in Trash
-    until the move lands, and the next empty takes it.
+    until the move lands, and the next empty takes it — and comes back in
+    `queued`, because a Trash where every message is one of those deletes
+    nothing, and "nothing happened" is not an answer a button can give.
 
     On an imported account there is no server to expunge from and the row is the
     mail, so the same button deletes the rows — see mailops.purge, which is also
@@ -447,6 +449,14 @@ def bulk_empty_trash(req: EmptyTrashRequest, db: DBSession = Depends(get_db)):
          .where(MessageLocation.mailbox_id.in_(ids), MessageLocation.imap_uid > 0))
     remaining = db.scalar(select(func.count()).select_from(q.subquery())) or 0
     locs = db.execute(q.limit(BULK_ALL_CHUNK)).scalars().all()
+    # The ones this route leaves alone, counted so the caller can say why it
+    # did. A Trash holding nothing but queued moves deletes nothing and is
+    # entitled to a reason: without this the answer is `deleted: 0, done: true`,
+    # which the client can only render as the button having done nothing at all.
+    queued = db.scalar(select(func.count()).select_from(
+        select(MessageLocation.id)
+        .where(MessageLocation.mailbox_id.in_(ids), MessageLocation.imap_uid <= 0)
+        .subquery())) or 0
 
     by_id = {
         m.id: m for m in db.execute(
@@ -482,7 +492,8 @@ def bulk_empty_trash(req: EmptyTrashRequest, db: DBSession = Depends(get_db)):
     mailops.recompute(db, touched)
     db.commit()
     mailops.announce(db, accounts, deleted)
-    return {"ok": True, "deleted": deleted, "done": remaining <= len(locs)}
+    return {"ok": True, "deleted": deleted, "done": remaining <= len(locs),
+            "queued": queued}
 
 
 class BulkPurgeRequest(BulkTrashRequest):

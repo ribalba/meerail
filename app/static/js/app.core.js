@@ -175,6 +175,16 @@ App.api = {
     return this.get("/api/analytics/overview?" + new URLSearchParams(params).toString());
   },
 
+  // The Cleanup panel: groups of mail that are many copies of one thing, and
+  // filing a whole group. The delete takes the group's *name* rather than the
+  // ids on screen — the server resolves it again under the same protections it
+  // listed it with, so a panel drawn before the last sync cannot talk it into
+  // trashing something that has since been flagged. See app/routers/cleanup.py.
+  cleanupClusters(params) {
+    return this.get("/api/cleanup/clusters?" + new URLSearchParams(params).toString());
+  },
+  trashCluster(body) { return this.post("/api/cleanup/trash", body); },
+
   // The Recent actions panel: what the last few keypresses did to the mail, and
   // taking one back. Operations, not queue rows — one bulk delete is one entry.
   recentActions(limit) { return this.get(`/api/actions/recent?limit=${limit}`); },
@@ -372,6 +382,11 @@ const ICON_PATHS = {
   // Three dots — the actions that did not fit on a toolbar. Drawn filled
   // (App.icon's third argument): as outlines at this size they read as rings.
   more: '<circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/>',
+  // A broom: handle down from the top right into the head, with one bristle
+  // line through it. The Cleanup panel. Drawn rather than borrowed because the
+  // feather set has no icon for "sweep this away" — the nearest is a bin, and
+  // this panel is emphatically not the bin.
+  cleanup: '<line x1="20" y1="4" x2="13" y2="11"/><path d="M10 8 L16 14 L12.5 19.5 L4.5 11.5 Z"/><line x1="13" y1="11" x2="8.5" y2="15.5"/>',
   // Two sheets — copy the answer out.
   copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
 };

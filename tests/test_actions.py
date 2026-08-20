@@ -539,6 +539,48 @@ def test_emptying_the_trash_is_the_one_route_to_a_permanent_delete(account):
     assert any(a["type"] == "delete" for a in _actions(email))
 
 
+def test_empty_trash_says_what_it_could_not_delete_yet(account):
+    """A Trash holding only mail whose move has not landed deletes nothing.
+
+    That much is deliberate: until the server confirms the move, the message is
+    still filed where it came from as far as any mail server knows, and
+    "empty the Trash" is not permission to delete it there. What was missing was
+    the saying so — the route answered `deleted: 0, done: true`, which a client
+    can only render as a button that did nothing at all. That is exactly what a
+    Trash looks like while the agent is working through a backlog of moves.
+    """
+    email, aid = account["email"], account["id"]
+    _seed_trash(email)                       # one the server has, uid and all
+    trash_id = _trash_id(email)
+    tok = "QUEUEDTOK" + uuid.uuid4().hex[:6]
+    mid, _ = ingest_one(email, aid, tok)
+    _, boxes = api("GET", "/api/mailboxes")
+    inbox_id = next(m["id"] for a_ in boxes["accounts"] for m in a_["mailboxes"]
+                    if a_["email"] == email and m["role"] == "inbox")
+    # Trashed here, not on the server: the placement this leaves in Trash is one
+    # the server has never seen.
+    assert api("POST", f"/api/messages/{mid}/trash?source_mailbox_id={inbox_id}")[0] == 200
+
+    code, body = api("POST", "/api/messages/bulk/empty-trash",
+                     {"mailbox_id": trash_id, "confirm": True})
+    assert code == 200, body
+    assert body["deleted"] == 1          # the seeded one, which the server has
+    assert body["queued"] == 1           # the one still on its way there
+
+    # Emptying again is the case that read as broken: nothing left that can be
+    # deleted, and the only thing worth answering is how much is waiting on the
+    # sync rather than on the button.
+    code, body = api("POST", "/api/messages/bulk/empty-trash",
+                     {"mailbox_id": trash_id, "confirm": True})
+    assert code == 200, body
+    assert body["deleted"] == 0 and body["queued"] == 1
+
+    # And it is still mail, not something quietly destroyed on the way past.
+    assert api("GET", f"/api/messages/{mid}")[0] == 200
+    assert not any(a["type"] == "delete" and a["message_pk"] == mid
+                   for a in _actions(email))
+
+
 def test_mail_deleted_for_good_stops_being_readable_at_once(account):
     """"Permanently deleted" has to mean it, in every read path and immediately.
 

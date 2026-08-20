@@ -16,8 +16,8 @@ from imapclient import IMAPClient, SocketTimeout, tls
 
 import log
 from core.config import AccountConfig
+from core.mail.parse import header_message_id
 
-_MSGID_RE = re.compile(rb"<[^>]+>")
 # The Date line out of a header block. Unfolded values only: a Date split across
 # lines is malformed, and _sent_date has INTERNALDATE to fall back on.
 _DATE_RE = re.compile(rb"^Date:[ \t]*(.+?)\r?$", re.IGNORECASE | re.MULTILINE)
@@ -638,8 +638,10 @@ class Bridge:
         out = {}
         for uid, data in resp.items():
             hdr = _body_bytes(data)
-            m = _MSGID_RE.search(hdr or b"")
-            message_id = m.group(0)[1:-1].decode(errors="replace") if m else None
+            # Through core.mail.parse, not a regex over the block: the only
+            # reader of this compares it against a stored Message-ID, and the
+            # two have to be derived by the same code. See header_message_id.
+            message_id = header_message_id(hdr)
             out[uid] = {
                 "message_id": message_id,
                 "flags": flags_to_dict(data.get(b"FLAGS", ())),

@@ -915,3 +915,28 @@ def test_a_server_that_lists_no_folders_removes_no_folders(monkeypatch, capsys):
     # refuses an empty set (see core.ingest) — but it says what happened.
     assert spy.pruned == [set()]
     assert "listed no folders" in capsys.readouterr().out
+
+
+def test_fetched_headers_carry_the_message_id_not_the_sender():
+    """What the repair sweep's move-in-flight guard is looking mail up by.
+
+    The block is fetched as MESSAGE-ID, DATE, FROM and SUBJECT and comes back in
+    whatever order the message wrote those headers. Taking the first <...> in it
+    read the From address as the id on every mail that puts From first — the
+    lookup then matched no stored message, the guard said "nothing is being
+    moved", and _restore_unplaced put the placement back for mail the user had
+    just deleted. Deleting it again did the same thing again.
+    """
+    import imap as agent_imap
+
+    block = (b"From: Annie <annie@ergo-outlet.co.uk>\r\n"
+             b"Date: Wed, 20 Aug 2026 10:00:31 +0000\r\n"
+             b"Subject: Custom Ergonomic Chairs\r\n"
+             b"Message-ID: <202620081000.a6gq@brevo.net>\r\n\r\n")
+    bridge = agent_imap.Bridge(object())
+    bridge._fetch = lambda _uids, _what: {
+        7: {b"FLAGS": (), b"INTERNALDATE": None, b"RFC822.SIZE": 900,
+            b"BODY[HEADER.FIELDS (MESSAGE-ID DATE FROM SUBJECT)]": block},
+    }
+
+    assert bridge.fetch_headers([7])[7]["message_id"] == "202620081000.a6gq@brevo.net"

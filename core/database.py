@@ -1,3 +1,4 @@
+import random
 import re
 import time
 from collections.abc import Generator
@@ -104,7 +105,32 @@ def _already_applied(stmt: str) -> bool:
         return (conn.execute(query, args).scalar() is not None) is want
 
 
-def _run_migration(stmt: str, params: dict | None = None, attempts: int = 6) -> None:
+# How hard a genuinely-new schema statement tries before startup fails.
+#
+# This budget only ever applies to a statement that has real work to do:
+# everything already applied is short-circuited by `_already_applied` without
+# taking a lock at all, so an ordinary boot never spends a millisecond here. It
+# is the *upgrade* boot that has to survive, and what it has to survive is a
+# populated volume with an agent on it.
+#
+# The window used to be ~45s, and that was not enough. Adding messages.body_sig
+# to a 113k-message mailbox failed on every attempt: `docker compose up` starts
+# the new server and the new agent while the *old* agent is still shutting down
+# through a batch of multi-second Tika calls, and every one of those holds
+# ACCESS SHARE on messages. ADD COLUMN needs ACCESS EXCLUSIVE, so it needs a
+# gap — and there was no gap for the better part of a minute. Both processes
+# gave up and the server exited.
+#
+# So the budget is a minute and a half rather than three quarters of one. The
+# lock_timeout stays short on purpose: queueing for the lock would park the
+# request in front of every reader behind it, which turns "the migration is
+# slow" into "the mailbox is frozen". Short grab, back off, try again.
+MIGRATION_ATTEMPTS = 20
+MIGRATION_BACKOFF_MAX = 5.0
+
+
+def _run_migration(stmt: str, params: dict | None = None,
+                   attempts: int = MIGRATION_ATTEMPTS) -> None:
     """Run one schema fixup in its own transaction, retrying if the agent is busy.
 
     One statement per transaction is what makes this deadlock-free: an ALTER only
@@ -115,6 +141,14 @@ def _run_migration(stmt: str, params: dict | None = None, attempts: int = 6) -> 
 
     lock_timeout keeps a long-running agent query from stalling startup forever;
     we back off and retry instead, since the agent's transactions are short.
+
+    The backoff is jittered because the server and the agent both run this, on
+    the same statements, having started within milliseconds of each other. Fixed
+    delays kept them in lockstep — the logs from the failure above show the two
+    processes reaching "retry 3/5" 230ms apart and then "retry 4/5" 232ms apart
+    — so they queued for the same lock in the same instant every time, each
+    making the other's odds worse. A little noise is all it takes to stagger
+    them into taking turns.
     """
     try:
         if _already_applied(stmt):
@@ -130,11 +164,20 @@ def _run_migration(stmt: str, params: dict | None = None, attempts: int = 6) -> 
             return
         except OperationalError:
             if attempt == attempts - 1:
+                # The last thing printed before startup fails, so it says what
+                # to do about it rather than only what happened. Stopping the
+                # agent is the reliable fix: it is the only thing holding
+                # multi-second read locks on these tables.
+                print(f"[init_db] gave up after {attempts} attempts on: {stmt[:80]}\n"
+                      f"[init_db] something is holding a long lock on that table. Stop the "
+                      f"agent (docker compose stop agent), start the server so it can "
+                      f"migrate, then start the agent again.")
                 raise
-            # Say so: a busy agent can push this to ~45s per statement, and a
-            # silent retry loop looks identical to a hung "application startup".
+            # Say so: a busy volume can push this to a minute and a half per
+            # statement, and a silent retry loop looks identical to a hung
+            # "application startup".
             print(f"[init_db] lock contention, retry {attempt + 1}/{attempts - 1}: {stmt[:60]}")
-            time.sleep(1 + attempt)  # 1s, 2s, 3s… ~15s total before giving up
+            time.sleep(min(1 + attempt, MIGRATION_BACKOFF_MAX) + random.uniform(0, 1.5))
 
 
 def init_db() -> None:
@@ -409,6 +452,14 @@ def init_db() -> None:
             # index probe rather than a scan of the mailbox.
             "CREATE INDEX IF NOT EXISTS ix_messages_search_tsv_missing "
             "ON messages (id) WHERE search_tsv IS NULL",
+            # Body fingerprint for the Cleanup panel. NULL on every existing
+            # row, which is exactly the state core/bodysig.py's backfill looks
+            # for — no default, because '' already means something else here
+            # ("computed, nothing to fingerprint") and a default would tell the
+            # backfill the whole mailbox was already done.
+            "ALTER TABLE messages ADD COLUMN IF NOT EXISTS body_sig VARCHAR(64)",
+            "CREATE INDEX IF NOT EXISTS ix_messages_body_sig_missing "
+            "ON messages (id) WHERE body_sig IS NULL",
         ):
             _run_migration(stmt)
 

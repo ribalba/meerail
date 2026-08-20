@@ -387,6 +387,34 @@ def test_mail_waiting_on_purpose_does_not_hold_up_mail_that_is_ready(
         assert dbfixture.send_action_state(oid)["status"] == "pending"
 
 
+def test_a_bulk_delete_does_not_hold_up_the_outbox(account, no_send_delay):
+    """Mail goes out on the next pass however deep the queue is behind it.
+
+    The sibling test above is about work that is not due yet. This is the other
+    half, and the one that was actually reported: work that is due, and there is
+    a great deal of it. Emptying a Trash of a few thousand messages writes one
+    queue row per message in a second or two, all of them due at once and all of
+    them older than anything composed afterwards — so a pass that takes the
+    oldest fifty due rows takes fifty deletes, every pass, for hours, and a
+    message sent in the meantime is not attempted once in all that time. The
+    Outbox could not even explain it: the row had zero attempts and no error,
+    because nothing had got round to trying it.
+    """
+    no_send_delay(0)
+    dbfixture.queue_bulk_deletes(account["email"], agent_actions._PER_PASS + 10,
+                                 minutes_ago=60)
+    oid = queue_one(account, subject="Please go out now")
+
+    queue = dbfixture.drain_order(account["email"])
+
+    assert len(queue) == agent_actions._PER_PASS
+    assert queue[0]["type"] == "send", "the send waits behind the backlog"
+    assert queue[0]["payload"]["outbound_id"] == oid
+    # And the deletes are not dropped or reordered among themselves — they carry
+    # on oldest-first behind it, which is the order the rest of the queue wants.
+    assert {row["type"] for row in queue[1:]} == {"delete"}
+
+
 def test_changing_the_delay_does_not_move_a_deadline_already_running(account, no_send_delay):
     """A message whose author has already watched a countdown start keeps the
     deadline they were shown. The setting decides what the next message gets."""

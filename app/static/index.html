@@ -21,8 +21,18 @@
     <aside class="sidebar" id="sidebar">
       <div class="sidebar-toolbar">
         <span class="brand"><img class="brand-logo" src="/static/img/logo.png" alt="" />meerail</span>
+        <!-- Alone on the brand's line, hard right: it is the one button here
+             that is about the mail rather than about the app, and it is pressed
+             far more often than the four below it. -->
         <button class="icon-btn" id="btn-refresh" title="Refresh — fetch new mail now"></button>
+      </div>
+      <!-- The panels. A second row rather than a longer first one: four icons
+           crowded against the wordmark read as decoration on it, and the
+           sidebar is too narrow to hold five buttons and the name without the
+           name being the thing that gives way. -->
+      <div class="sidebar-tools">
         <button class="icon-btn" id="btn-stats" title="Statistics"></button>
+        <button class="icon-btn" id="btn-cleanup" title="Cleanup — mail you get over and over"></button>
         <button class="icon-btn" id="btn-agent" title="Agent status"></button>
         <button class="icon-btn" id="btn-settings" title="Accounts &amp; settings"></button>
       </div>
@@ -410,6 +420,17 @@
     </div>
   </div>
 
+  <!-- Cleanup modal — groups of near-identical mail, drawn by app.cleanup.js -->
+  <div class="modal-backdrop" id="cleanup-modal" hidden>
+    <div class="modal">
+      <div class="modal-head">
+        <h2>Cleanup</h2>
+        <button class="icon-btn" id="btn-close-cleanup" title="Close"></button>
+      </div>
+      <div class="modal-body" id="cleanup-body"></div>
+    </div>
+  </div>
+
   <!-- Search syntax help — the ⓘ next to the search box -->
   <div class="modal-backdrop" id="search-help-modal" hidden>
     <div class="modal">
@@ -439,12 +460,23 @@
             <td>Only mail that carries an attachment.</td>
           </tr>
           <tr>
+            <td><code>:no-trash</code></td>
+            <td>Leave out mail that is only in Trash. A search reads every folder, so
+              without this the copy you just deleted is still a result.</td>
+          </tr>
+          <tr>
             <td><code>:from <em>pattern</em></code></td>
             <td>Sender address or display name matches.</td>
           </tr>
           <tr>
             <td><code>:to <em>pattern</em></code></td>
             <td>Any recipient matches — To, Cc <em>and</em> Bcc.</td>
+          </tr>
+          <tr>
+            <td><code>:similar <em>fingerprint</em></code></td>
+            <td>Mail whose <em>body</em> says the same thing as this one, however
+              differently the subject is worded. The value is a message id, or one of the
+              fingerprints the Cleanup panel puts in this box for you.</td>
           </tr>
         </table>
         <p class="help-lede">The pattern in <code>:from</code> and <code>:to</code> is always a
@@ -458,6 +490,11 @@
               <td>Everything anyone at Acme sent you with a file attached.</td></tr>
           <tr><td><code>:to (ada|grace)@</code></td><td>Addressed to either of them.</td></tr>
           <tr><td><code>"board meeting" :from ada</code></td><td>That phrase, from Ada.</td></tr>
+          <tr><td><code>:from noreply :no-trash</code></td>
+              <td>Everything from a no-reply address that you have not already binned.</td></tr>
+          <tr><td><code>:similar 8412</code></td>
+              <td>Everything built from the same template as message 8412 — the other
+                ninety property alerts, none of which share a subject with it.</td></tr>
         </table>
 
         <p class="help-lede">The <strong>Regex</strong> switch turns the rest of the query into a
@@ -751,6 +788,7 @@
   <script src="/static/js/app.status.js"></script>
   <script src="/static/js/app.update.js"></script>
   <script src="/static/js/app.stats.js"></script>
+  <script src="/static/js/app.cleanup.js"></script>
   <script src="/static/js/app.undo.js"></script>
   <script src="/static/js/app.keys.js"></script>
   <script src="/static/js/app.split.js"></script>

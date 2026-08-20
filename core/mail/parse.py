@@ -527,6 +527,33 @@ def header_identity(header_bytes: bytes | None) -> tuple[str, str] | None:
     return (from_pairs[0][1] if from_pairs else ""), normalize_subject(subject)[:512]
 
 
+def header_message_id(header_bytes: bytes | None) -> str | None:
+    """The Message-ID out of a header block, read exactly as ``parse_email``
+    reads it out of a whole message.
+
+    Here for the same reason as :func:`header_identity`, and it is the same
+    reason twice: the agent holds a message on the wire up against a row in the
+    database, and unless both sides derive the id by the same code the
+    comparison is between two different things.
+
+    What it replaces was a regex for the first ``<...>`` in the block. A header
+    block is fetched as MESSAGE-ID, DATE, FROM and SUBJECT and the server
+    returns them in the order the *message* wrote them, so on the very common
+    mail that puts From before Message-ID the first angle-bracketed thing in the
+    block is the sender's address. "Is this message being moved?" was then asked
+    about ``annie@ergo-outlet.co.uk``, matched no stored message, and answered
+    no — and the sweep put a placement back for mail the user had just deleted.
+    See agent/sync.py::_restore_unplaced.
+
+    None where the header is absent or carries no bracketed id, which is what
+    ``parse_email`` stores in that case too.
+    """
+    if not header_bytes:
+        return None
+    msg: EmailMessage = message_from_bytes(header_bytes, policy=default_policy)  # type: ignore[assignment]
+    return _first(_msgids(str(msg.get("Message-ID", ""))))
+
+
 def parse_email(raw: bytes) -> ParsedEmail:
     msg: EmailMessage = message_from_bytes(raw, policy=default_policy)  # type: ignore[assignment]
 

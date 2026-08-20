@@ -44,9 +44,9 @@ App.search = (function () {
   // Mirrors app/searchquery.py. The server parses the filters itself — this
   // copy exists so the thread view doesn't highlight `:unread` as if it were a
   // word someone searched for.
-  const FILTER_RE = /(?:(?<=\s)|^):(?:unread|read|has-attachments?)(?:\s+|$)/gi;
-  const ADDR_RE = /(?:(?<=\s)|^):(?:from|to)(?:\s+|=)(?:"[^"]*"|[^\s:]\S*)(?:\s+|$)/gi;
-  const PARTIAL_RE = /(?:(?<=\s)|^):(?:from|to)=?\s*$/i;
+  const FILTER_RE = /(?:(?<=\s)|^):(?:unread|read|has-attachments?|no-trash)(?:\s+|$)/gi;
+  const ADDR_RE = /(?:(?<=\s)|^):(?:from|to|similar)(?:\s+|=)(?:"[^"]*"|[^\s:]\S*)(?:\s+|$)/gi;
+  const PARTIAL_RE = /(?:(?<=\s)|^):(?:from|to|similar)=?\s*$/i;
 
   function textOf(q) {
     return q.replace(ADDR_RE, "").replace(FILTER_RE, "").replace(PARTIAL_RE, "").trim();
@@ -352,6 +352,39 @@ App.search = (function () {
     return Promise.resolve(false);
   }
 
+  /* Put a query in the box, run it, and leave the results on screen — without
+     opening any of them.
+
+     applyQuery's `true` opens the first hit, which is right when the query came
+     from a person describing what they were looking for. It is wrong when the
+     query came from the Cleanup panel: that is somebody about to delete a
+     hundred messages who wants to look at them first, and opening the top one
+     would mark it read on the way past. Reviewing mail must not change it.
+
+     The list still takes the keyboard cursor, so j/k walk the group from the
+     first row the moment it appears.
+
+     `years` is why this takes the window rather than leaving it alone. The box
+     defaults to the last year, which is right for a search somebody is typing
+     and wrong for one handed over by the Cleanup panel: that group was counted
+     over the whole mailbox, so a view of it cut to twelve months would show a
+     third of the rows under a heading that said sixty-four. The control is set
+     rather than bypassed, so what ran is readable off the screen. */
+  async function showQuery(q, mode = "keyword", years = null) {
+    const e = els();
+    clearTimeout(timer);
+    e.input.value = q;
+    if (years !== null) e.years.value = String(years);
+    e.rx.checked = mode === "regex";
+    e.clear.hidden = !q;
+    e.controls.hidden = false;
+    const applied = await run();
+    if (!applied || !App.list.count()) return applied;
+    if (App.keys) App.keys.focus("list");
+    App.list.setFocus(0);
+    return true;
+  }
+
   // What the reader needs to mark up the thread it is about to open. Filters
   // narrowed the results rather than matching text in them, so a query that is
   // only filters has nothing to highlight.
@@ -364,6 +397,6 @@ App.search = (function () {
   function helpOpen() { return !els().helpModal.hidden; }
   function closeHelp() { els().helpModal.hidden = true; }
 
-  return { init, clear, focusInput, query, syncScope, rerun, applyQuery,
+  return { init, clear, focusInput, query, syncScope, rerun, applyQuery, showQuery,
            isActive: () => active, helpOpen, closeHelp };
 })();

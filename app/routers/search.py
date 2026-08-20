@@ -16,7 +16,8 @@ extracted attachment text).
 Both modes are case-insensitive: mail is not typed consistently enough for
 case to be a useful filter, and a miss looks identical to "no such mail".
 
-`:unread`, `:read`, `:has-attachment`, `:from <pattern>` and `:to <pattern>`
+`:unread`, `:read`, `:has-attachment`, `:no-trash`, `:from <pattern>`,
+`:to <pattern>` and `:similar <fingerprint|message id>`
 are lifted out of the query first (see app.searchquery) and applied as SQL
 filters. They narrow rather than search, so a query that is nothing but
 filters is still a search — `:unread :has-attachment` is a perfectly good
@@ -34,12 +35,13 @@ from sqlalchemy.dialects.postgresql import TSQUERY
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session as DBSession
 
+from core import bodysig
 from core.config import get_settings
 from core.database import get_db
 from .messages import _not_deleted
 from .. import searchquery
 from ..deps import require_ui_auth
-from core.models import Account, Message, MessageLocation, Recipient, utcnow
+from core.models import Account, Mailbox, Message, MessageLocation, Recipient, utcnow
 
 settings = get_settings()
 
@@ -85,6 +87,37 @@ SCAN_BUDGET = 80_000
 # The ceiling on the widening pass below. Past here the answer is "a lot", and
 # spending longer to say how many of a lot helps nobody.
 MAX_SCAN = 400_000
+
+
+def _similar_clause(db: DBSession, value: str):
+    """WHERE for `:similar` — mail whose body says what this one says.
+
+    The value is either a body fingerprint token (which is what the Cleanup
+    panel puts in the box) or a message id (which is what "find more like this"
+    means from anywhere else). A message id is resolved to that message's own
+    fingerprint first, so both spellings end up asking the same question.
+
+    "The same" means sharing a band of the banded MinHash in core/bodysig.py —
+    the same test the Cleanup panel groups on, and the reason a hundred property
+    alerts with a hundred different subjects can be pulled up as one search.
+
+    A bare token is matched in *any* band position rather than the one it came
+    from, because the token arrives without its position attached. The looseness
+    is theoretical: the bands are 32-bit, so a token colliding with a different
+    band of an unrelated message is a one-in-four-billion event, and the query
+    would have to be pointed at that message for it to matter.
+
+    Returns None when the filter cannot match anything, which the caller turns
+    into an empty result rather than into no filter at all.
+    """
+    sig = value
+    if value.isdigit():
+        # A message id, which is the spelling the Cleanup panel uses and the one
+        # "more like this" means anywhere else. Resolved without regard to where
+        # the message sits: a group that has just been trashed is exactly the
+        # one somebody re-runs the query for.
+        sig = db.scalar(select(Message.body_sig).where(Message.id == int(value))) or ""
+    return bodysig.shares_band(Message.body_sig, sig)
 
 
 def _bound_runtime(db: DBSession) -> None:
@@ -199,6 +232,30 @@ def search(
         clauses.append(unseen if parsed.unread else ~unseen)
     if parsed.has_attachments:
         clauses.append(Message.has_attachments.is_(True))
+    if parsed.no_trash:
+        # Still filed somewhere that is not Trash. Not "has no placement in
+        # Trash": on a label server a message can sit in Trash and in \All at
+        # once, and the copy that matters is the one you can still get to.
+        clauses.append(
+            exists(
+                select(MessageLocation.id)
+                .join(Mailbox, Mailbox.id == MessageLocation.mailbox_id)
+                .where(
+                    MessageLocation.message_pk == Message.id,
+                    MessageLocation.deleted.is_(False),
+                    Mailbox.role != "trash",
+                )
+            )
+        )
+    if parsed.similar:
+        clause = _similar_clause(db, parsed.similar)
+        if clause is None:
+            # A fingerprint nothing carries, or a message with no body to
+            # fingerprint. An empty result is the honest answer — the alternative
+            # is dropping the filter, which silently widens the search to every
+            # message the rest of the query allows.
+            return empty
+        clauses.append(clause)
     if parsed.from_pat:
         # Address or display name: "who sent this" is a name to the user, and
         # the address is what they reach for when the name is ambiguous.
@@ -326,9 +383,15 @@ def search(
     ids = [r.id for r in rows]
     flags: dict[int, tuple[bool, bool]] = {}
     if ids:
-        for pk, seen_all, flagged_any in db.execute(
+        for pk, seen_all, flagged_any, trashed in db.execute(
             select(MessageLocation.message_pk, func.bool_and(MessageLocation.seen),
-                   func.bool_or(MessageLocation.flagged))
+                   func.bool_or(MessageLocation.flagged),
+                   # Every live placement is in Trash, so this result *is* the
+                   # deleted copy. Results come from the whole mailbox, Trash
+                   # included, and without saying so a search run straight after
+                   # a delete looks exactly like a delete that did nothing.
+                   func.bool_and(Mailbox.role == "trash"))
+            .join(Mailbox, Mailbox.id == MessageLocation.mailbox_id)
             # Live placements only. A deleted one keeps the flags it had when it
             # was deleted, so a result read in Trash and emptied out of it would
             # otherwise come back marked read while the copy the search actually
@@ -336,7 +399,7 @@ def search(
             .where(MessageLocation.message_pk.in_(ids), MessageLocation.deleted.is_(False))
             .group_by(MessageLocation.message_pk)
         ).all():
-            flags[pk] = (bool(seen_all), bool(flagged_any))
+            flags[pk] = (bool(seen_all), bool(flagged_any), bool(trashed))
 
     tids = {r.thread_id for r in rows if r.thread_id}
     sizes: dict[tuple[int, str], int] = {}
@@ -362,8 +425,9 @@ def search(
                 "from_name": r.from_name, "from_addr": r.from_addr,
                 "date": r.date_sent.isoformat() if r.date_sent else None,
                 "snippet": r.snippet, "has_attachments": r.has_attachments,
-                "seen": flags.get(r.id, (True, False))[0],
-                "flagged": flags.get(r.id, (True, False))[1],
+                "seen": flags.get(r.id, (True, False, False))[0],
+                "flagged": flags.get(r.id, (True, False, False))[1],
+                "in_trash": flags.get(r.id, (True, False, False))[2],
                 "account_id": r.account_id, "account_color": r.color,
                 "thread_count": sizes.get((r.account_id, r.thread_id), 1),
             }

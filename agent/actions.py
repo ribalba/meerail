@@ -19,7 +19,7 @@ import threading
 import time
 from datetime import timedelta
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, case, func, or_, select, update
 
 from core import events, outbox
 from core.database import SessionLocal
@@ -44,9 +44,30 @@ retry_delay = outbox.retry_delay
 # hold rows that have been failing for weeks — and, since the send delay landed,
 # rows that are deliberately not due for another day. Both are why the *due*
 # filter runs in SQL (see _due_clause) rather than over a fixed slice of the
-# oldest rows: this limit is applied to what is ready to go, so no depth of
-# waiting mail can crowd out an action queued a second ago.
+# oldest rows: a wall of rows that are not ready cannot crowd out one queued a
+# second ago. A wall of rows that *are* ready still can, which is what
+# _SENDS_FIRST below is about.
 _PER_PASS = 50
+
+# Sends go before everything else in the pass, whatever order they were queued
+# in.
+#
+# _PER_PASS is a window onto a queue ordered oldest-first, and that is the right
+# order for mail that is already filed: a move waiting since Friday should land
+# before one made this morning. It is the wrong order for a send, because the
+# queue is not always short. Emptying a Trash of a few thousand messages writes
+# one row per message in a second or two, and every send composed after that sits
+# behind all of them — fifty applied per pass, a pass every couple of minutes,
+# so mail written at noon leaves at two. That is what "stuck in the outbox" was:
+# not a failure to send, an hours-long wait for a turn, with nothing in the
+# Outbox able to say so because the action had not been attempted even once.
+#
+# A move that waits is a folder that is briefly wrong on the server; a send that
+# waits is a message the user believes they have sent and nobody has received.
+# Only the second one is worth the queue jumping for, and the cost of it is
+# bounded — there is never much in the outbox, because everything in it leaves
+# on the first pass that can reach an SMTP server.
+_SENDS_FIRST = case((PendingAction.type == "send", 0), else_=1)
 
 # Failure number at which a still-queued send says so in its own right, rather
 # than only as one more line in a series. Far enough in that a Bridge restart
@@ -973,6 +994,25 @@ def _lease(db, action_id: int, now) -> PendingAction | None:
     return action
 
 
+def due_queue(db, account_id: int, now) -> list[PendingAction]:
+    """The rows this pass will work through, in the order it will take them.
+
+    Its own function so that the order can be tested against a real queue
+    without a mail server to drain it into: what it returns *is* the pass's
+    decision about what waits and what does not.
+    """
+    return db.execute(
+        select(PendingAction)
+        .where(PendingAction.account_id == account_id,
+               or_(PendingAction.status == "pending",
+                   and_(PendingAction.status == "leased",
+                        PendingAction.updated_at <= now - _LEASE_TTL)),
+               _due_clause(now))
+        .order_by(_SENDS_FIRST, PendingAction.created_at)
+        .limit(_PER_PASS)
+    ).scalars().all()
+
+
 def drain_actions(db, bridge, account) -> tuple[int, int, int]:
     """Apply the queued actions that are due for this account.
 
@@ -990,16 +1030,7 @@ def drain_actions(db, bridge, account) -> tuple[int, int, int]:
     including the "done" on a message that has already been handed to SMTP.
     """
     now = utcnow()
-    queued = db.execute(
-        select(PendingAction)
-        .where(PendingAction.account_id == account.id,
-               or_(PendingAction.status == "pending",
-                   and_(PendingAction.status == "leased",
-                        PendingAction.updated_at <= now - _LEASE_TTL)),
-               _due_clause(now))
-        .order_by(PendingAction.created_at)
-        .limit(_PER_PASS)
-    ).scalars().all()
+    queued = due_queue(db, account.id, now)
 
     applied = failed = 0
     sends = 0       # send actions tried

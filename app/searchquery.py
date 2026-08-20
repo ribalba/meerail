@@ -1,4 +1,5 @@
-"""Filter tokens (`:unread`, `:from <pattern>`) lifted out of a search query,
+"""Filter tokens (`:unread`, `:from <pattern>`, `:similar <fingerprint>`) lifted
+out of a search query,
 and the split of what is left into the terms the search ANDs together.
 
 The search box is a single line, so filters are typed into the query itself
@@ -24,7 +25,7 @@ import re
 from dataclasses import dataclass
 
 _FLAG_RE = re.compile(
-    r"(?:(?<=\s)|\A):(unread|read|has-attachment|has-attachments)(?:\s+|\Z)", re.I
+    r"(?:(?<=\s)|\A):(unread|read|has-attachment|has-attachments|no-trash)(?:\s+|\Z)", re.I
 )
 # `:from a@b`, `:from="Ada Lovelace"`. The value may not start with a colon, so
 # `:from :unread` reads as a filter still being typed rather than as a search
@@ -32,9 +33,17 @@ _FLAG_RE = re.compile(
 _ADDR_RE = re.compile(
     r'(?:(?<=\s)|\A):(from|to)(?:\s+|=)("[^"]*"|[^\s:]\S*)(?:\s+|\Z)', re.I
 )
+# `:similar <token>` / `:similar=<message id>` — mail whose body says the same
+# thing as this one. The value is a body fingerprint token or a message id, not
+# a pattern: the whole point is that it names a *shape* of mail that no wording
+# you could type would pick out. See core/bodysig.py, and the Cleanup panel,
+# which is where these queries usually come from.
+_SIMILAR_RE = re.compile(
+    r'(?:(?<=\s)|\A):(similar)(?:\s+|=)("[^"]*"|[^\s:]\S*)(?:\s+|\Z)', re.I
+)
 # Search runs on every keystroke, so `:from` with the address not yet typed has
 # to mean "no filter yet" rather than "find the literal text :from".
-_PARTIAL_RE = re.compile(r"(?:(?<=\s)|\A):(?:from|to)=?\s*\Z", re.I)
+_PARTIAL_RE = re.compile(r"(?:(?<=\s)|\A):(?:from|to|similar)=?\s*\Z", re.I)
 # A double-quoted run, or a bare run of non-space characters.
 _TERMS_RE = re.compile(r'"([^"]*)"|(\S+)')
 
@@ -48,11 +57,16 @@ class Query:
     has_attachments: bool | None = None
     from_pat: str | None = None
     to_pat: str | None = None
+    similar: str | None = None
+    # True = hide mail that only exists in Trash. Never False: "show me the
+    # deleted ones too" is the default, so the filter has nothing to turn off.
+    no_trash: bool | None = None
 
     @property
     def filtered(self) -> bool:
         return any(v is not None for v in
-                   (self.unread, self.has_attachments, self.from_pat, self.to_pat))
+                   (self.unread, self.has_attachments, self.from_pat, self.to_pat,
+                    self.similar, self.no_trash))
 
 
 def parse(q: str) -> Query:
@@ -77,11 +91,20 @@ def parse(q: str) -> Query:
             parsed.unread = True
         elif name == "read":
             parsed.unread = False
+        elif name == "no-trash":
+            parsed.no_trash = True
         else:
             parsed.has_attachments = True
         return ""
 
-    text = _ADDR_RE.sub(take_addr, q)
+    def take_similar(m: re.Match) -> str:
+        value = m.group(2).strip('"')
+        if value:
+            parsed.similar = value
+        return ""
+
+    text = _SIMILAR_RE.sub(take_similar, q)
+    text = _ADDR_RE.sub(take_addr, text)
     text = _FLAG_RE.sub(take_flag, text)
     text = _PARTIAL_RE.sub("", text)
     parsed.text = text.strip()

@@ -242,6 +242,7 @@ App.keys = (function () {
     if (App.shell.settingsOpen()) return App.shell.closeSettings();
     if (App.status.isOpen()) return App.status.close();
     if (App.stats.isOpen()) return App.stats.close();
+    if (App.cleanup.isOpen()) return App.cleanup.close();
     if (App.search.helpOpen()) return App.search.closeHelp();
     // A pending bulk selection is the most recent thing you set up, so it is
     // the first thing Escape should take back.

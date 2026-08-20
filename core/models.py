@@ -283,6 +283,12 @@ class Message(Base):
         # mailbox, one term went from 543ms/21031 buffers to 3.3ms/432, and
         # three ANDed terms from 2230ms/180494 to 9.7ms/1640.
         Index("ix_messages_search_tsv", "search_tsv", postgresql_using="gin"),
+        # Same shape and the same job as ix_messages_search_tsv_missing: it
+        # covers exactly the rows the body-fingerprint backfill still owes, so
+        # "is Cleanup ready yet" — asked on every open of the panel — is an
+        # index probe, and the index is empty once the answer is yes.
+        Index("ix_messages_body_sig_missing", "id",
+              postgresql_where=text("body_sig IS NULL")),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -364,6 +370,15 @@ class Message(Base):
     # what core.searchindex works through in the background. See
     # core/database.py for the trigger and the function behind it.
     search_tsv: Mapped[str | None] = mapped_column(TSVECTOR, nullable=True, deferred=True)
+
+    # Banded MinHash of the body — what the Cleanup panel groups near-duplicate
+    # bulk mail by when the subjects are all different. Four space-separated
+    # tokens; two messages are the same kind of mail when they share a sender
+    # and any one token. NULL is "not computed yet", which is what the backfill
+    # in core/bodysig.py works through; '' is "computed, and this body is too
+    # short to fingerprint". Not deferred: it is 35 characters and the grouping
+    # query selects nothing else from the row.
+    body_sig: Mapped[str | None] = mapped_column(String(64))
 
     # Rollup of attachment text extraction: none | pending | done | error
     extract_status: Mapped[str] = mapped_column(String(16), default="none", nullable=False)

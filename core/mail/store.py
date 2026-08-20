@@ -21,6 +21,7 @@ from datetime import timedelta
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
+from .. import bodysig
 from ..config import get_settings
 from ..models import (
     Account,
@@ -486,6 +487,10 @@ def _store_content(db: Session, msg: Message, parsed: ParsedEmail, raw: bytes) -
     msg.body_text = parsed.body_text
     msg.body_html = parsed.body_html
     msg.search_text = build_search_text(parsed)
+    # Computed here rather than in the background loop because here is the one
+    # place the body is already in hand and already parsed; the loop in
+    # core/bodysig.py exists only for the mail that predates the column.
+    msg.body_sig = bodysig.sig_for(parsed.body_text, parsed.body_html)
     msg.content_status = "full"
     # size_bytes, the body, the attachments and search_text are all derived
     # above, so the raw copy is purely for future features — and it is the
@@ -640,6 +645,12 @@ def ingest_raw(
             # therefore already correct.
             size_bytes=size_bytes if size_bytes is not None else parsed.size_bytes,
             search_text=build_search_text(parsed),
+            # Right for a headers-only row — there is no body, and '' is how
+            # that is said — and overwritten a few lines below by _store_content
+            # for every row that does have one. What it must not be is NULL,
+            # which would put a message with no body on the backfill queue for
+            # good.
+            body_sig="",
             content_status="skipped" if headers_only else "full",
         )
         db.add(msg)
@@ -684,6 +695,10 @@ def strip_content(db: Session, msg: Message) -> None:
     msg.raw_mime = None
     msg.extract_status = "none"
     msg.content_status = "pruned"
+    # body_sig deliberately survives: it says what kind of mail this was, which
+    # is still true once the bytes are gone, and it is 35 characters. Clearing
+    # it would drop pruned mail out of the Cleanup panel — the oldest mail in
+    # the mailbox, and so the most likely to be worth grouping.
     db.execute(
         update(Attachment)
         .where(Attachment.message_pk == msg.id)

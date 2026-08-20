@@ -5,7 +5,9 @@ left here is what the app owes on its own account: the contacts rollup — pure
 derived data, rebuilt from rows the agent has already written — the reminder
 tick, which is the only thing in meerail that has to happen at a particular
 moment rather than in response to a request, the search-index backfill, which is
-a one-off debt the upgrade that added the index left behind, and the journal
+a one-off debt the upgrade that added the index left behind — as is the
+body-fingerprint loop beside it, which is what lets the Cleanup panel group
+mail that says the same thing under different subjects — and the journal
 loop, which is what keeps several installs of this app agreeing about the things
 IMAP has nowhere to put. The journal loop only exists on an install that has one
 configured; see app/journal.py.
@@ -19,7 +21,7 @@ import os
 from core.config import get_settings
 from core.database import SessionLocal
 
-from core import searchindex
+from core import bodysig, searchindex
 
 from . import journal, reminders
 from .contacts import rebuild_contact_pairs, rebuild_contacts
@@ -207,6 +209,74 @@ async def search_index_loop() -> None:
                   f"keyword search is on the index now", flush=True)
             built = reported = owed = 0
         await asyncio.sleep(SEARCH_INDEX_PAUSE if done else 3600)
+
+
+# --- Body fingerprints -------------------------------------------------------
+
+# Slower than the search-index backfill's pause and in smaller batches, because
+# this one is not free: every row is detoasted and its HTML flattened. The
+# Cleanup panel is the only thing waiting on it and nobody is standing in front
+# of that on the first boot after an upgrade, so it gives the mailbox room.
+BODY_SIG_PAUSE = 0.5
+BODY_SIG_REPORT_EVERY = 20_000
+
+
+def _body_sig_debt() -> int:
+    db = SessionLocal()
+    try:
+        return bodysig.pending(db)
+    finally:
+        db.close()
+
+
+def _build_body_sig_batch() -> int:
+    db = SessionLocal()
+    try:
+        return bodysig.build_batch(db)
+    finally:
+        db.close()
+
+
+async def body_sig_loop() -> None:
+    """Fingerprint the bodies of mail that predates ``messages.body_sig``.
+
+    Same shape as the search-index backfill above and for the same reasons, with
+    one difference worth stating: nothing degrades while it runs, but something
+    would *lie*. Keyword search on an unfinished index is merely slow, whereas a
+    Cleanup panel built on an unfinished fingerprint column would group the mail
+    it had reached and say nothing about the rest — which reads as "there is
+    nothing else to clean up". So the panel asks how much is still owed and says
+    so, and this loop is what makes that number fall.
+    """
+    owed = 0
+    try:
+        owed = await asyncio.to_thread(_body_sig_debt)
+    except Exception as e:  # noqa: BLE001
+        print(f"body fingerprints: could not size the backfill: {e!r}", flush=True)
+    if owed:
+        print(f"body fingerprints: {owed} message(s) predate them — building; "
+              f"the Cleanup panel says so until this finishes", flush=True)
+
+    built = 0
+    reported = 0
+    while True:
+        done = 0
+        try:
+            done = await asyncio.to_thread(_build_body_sig_batch)
+        except Exception as e:  # noqa: BLE001
+            # Same reasoning as the loops above: one bad batch must not end the
+            # loop, and must not be silent either.
+            print(f"body fingerprint backfill failed: {e!r}", flush=True)
+        if done:
+            built += done
+            if built - reported >= BODY_SIG_REPORT_EVERY:
+                reported = built
+                print(f"body fingerprints: {built}/{owed or built} message(s)", flush=True)
+        elif built:
+            print(f"body fingerprints: built for {built} message(s) — "
+                  f"Cleanup can group by body now", flush=True)
+            built = reported = owed = 0
+        await asyncio.sleep(BODY_SIG_PAUSE if done else 3600)
 
 
 # How often a snapshot is posted: the record that restates this install's whole

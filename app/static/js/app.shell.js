@@ -911,6 +911,7 @@ App.shell = (function () {
       App.status.init();
       App.undo.init();
       App.stats.init();
+      App.cleanup.init();
       // Last of the initialisers and deliberately fire-and-forget: an update
       // notice is the least urgent thing on the page, and it must not be able
       // to delay or fail the boot of the parts that show mail.

@@ -324,6 +324,27 @@ def queue_move_without_message(email: str, op_id: str) -> int:
         return action.id
 
 
+def queue_bulk_deletes(email: str, count: int, minutes_ago: int = 60) -> list[int]:
+    """A backlog of permanent deletes, as emptying a large Trash leaves behind.
+
+    One row per message, all written within a second of each other and all due
+    at once — which is the shape that matters. Every one of them is older than
+    anything the test queues next, so a queue taken strictly oldest-first has to
+    work through the whole pile before it reaches a message someone sends now.
+    """
+    when = utcnow() - timedelta(minutes=minutes_ago)
+    with session() as db:
+        account = db.query(Account).filter(Account.email == email.lower()).one()
+        rows = [PendingAction(account_id=account.id, message_pk=None, type="delete",
+                              payload={"folder": "Trash", "uid": 1000 + i,
+                                       "uidvalidity": 1},
+                              created_at=when, updated_at=when)
+                for i in range(count)]
+        db.add_all(rows)
+        db.flush()
+        return [a.id for a in rows]
+
+
 def action_status(action_id: int) -> tuple[str, bool]:
     """One queue row's status, and whether it has been marked undone."""
     with session() as db:
@@ -430,6 +451,36 @@ def pending_actions(email: str, type_: str | None = None,
             q = q.filter(PendingAction.type == type_)
         return [{"id": a.id, "type": a.type, "payload": a.payload,
                  "message_pk": a.message_pk} for a in q.order_by(PendingAction.created_at)]
+
+
+def backdate_actions(email: str, minutes_ago: int, type_: str | None = None) -> int:
+    """Age the queue. A pass takes the oldest rows first, so "queued an hour ago"
+    is what puts a row in front of everything a test does afterwards."""
+    when = utcnow() - timedelta(minutes=minutes_ago)
+    with session() as db:
+        account = db.query(Account).filter(Account.email == email.lower()).one()
+        q = db.query(PendingAction).filter(PendingAction.account_id == account.id,
+                                           PendingAction.status == "pending")
+        if type_:
+            q = q.filter(PendingAction.type == type_)
+        rows = q.all()
+        for a in rows:
+            a.created_at = when
+            a.updated_at = when
+        return len(rows)
+
+
+def drain_order(email: str) -> list[dict]:
+    """What the agent's next pass would take on, in the order it would take it —
+    the queue scan alone, with no bridge to apply anything with."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agent"))
+    import actions as agent_actions
+    with session() as db:
+        account = db.query(Account).filter(Account.email == email.lower()).one()
+        return [{"id": a.id, "type": a.type, "payload": a.payload}
+                for a in agent_actions.due_queue(db, account.id, utcnow())]
 
 
 def apply_actions(email: str, minutes_ago: int = 0) -> int:

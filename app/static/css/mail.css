@@ -27,6 +27,12 @@
      separate cards, but nowhere near black — the mail is the ink here. */
   --msg-border: light-dark(#d0d0d3, #48484b);
   --flag: #f5a623;
+  /* Not --flag, though it is the same amber family: --flag is a star drawn on a
+     surface, where a fill carries the meaning and contrast against text does
+     not matter. This one *is* text — "12 with attachments" in the Cleanup
+     panel — so it goes darker on light and keeps the bright value for dark,
+     where #f5a623 reads and a browned-off gold does not. */
+  --warning: light-dark(#96610a, #f5a623);
   --danger: #d70015;
   --unread-dot: #1d6ff2;
   --shadow: 0 1px 3px light-dark(rgba(0,0,0,.10), rgba(0,0,0,.5)),
@@ -115,6 +121,14 @@ body.resizing { cursor: col-resize; user-select: none; }
 .brand-logo { height: 22px; width: auto; display: block; }
 /* The toolbar is an Electron drag region; buttons in it must opt out to stay clickable. */
 .sidebar-toolbar .icon-btn { -webkit-app-region: no-drag; }
+/* The panel buttons, on their own line under the wordmark. Grouped hard right
+   so they line up under Refresh rather than floating in the middle of a sidebar
+   whose width the user sets. Part of the same Electron drag region as the row
+   above — the two read as one header and dragging either should move the
+   window — with the same opt-out on the buttons themselves. */
+.sidebar-tools { display: flex; align-items: center; justify-content: flex-end;
+  gap: .1rem; padding: 0 .75rem .5rem .9rem; -webkit-app-region: drag; }
+.sidebar-tools .icon-btn { -webkit-app-region: no-drag; }
 .mailbox-tree { flex: 1; overflow-y: auto; padding: .25rem .5rem 1rem; }
 .tree-section { font-size: .68rem; font-weight: 700; text-transform: uppercase;
   letter-spacing: .04em; color: var(--sidebar-section); padding: .8rem .55rem .25rem; }
@@ -1671,6 +1685,101 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
   text-transform: uppercase; letter-spacing: .04em; color: var(--text-faint);
   border-bottom: 1px solid var(--border); }
 .an-threads th.an-thread-n { text-align: right; }
+
+/* --- Cleanup modal --- */
+/* Reuses the statistics modal's controls wholesale — .an-controls, .an-tabs,
+   .an-ranges, .an-load, .an-error, .an-empty — because it is the same kind of
+   panel opened from the same row of buttons, and a second segmented control
+   that looked nearly like the first would be worse than one that is it. What is
+   new here is the group list. */
+#cleanup-modal .modal { width: min(1000px, 96vw); max-height: 92vh; }
+#cleanup-modal .modal-body { padding-top: .8rem; }
+
+.cl-lede { font-size: .8rem; color: var(--text-muted); line-height: 1.55;
+  margin: 0 0 .7rem; max-width: 78ch; }
+.cl-lede b { color: var(--text); font-weight: 600; }
+
+/* The backfill notice. Amber rather than red: nothing is wrong, the answer is
+   merely incomplete, and the difference is exactly what the reader needs to
+   know before acting on the list under it. */
+.cl-warn { font-size: .78rem; line-height: 1.5; margin: 0 0 .7rem;
+  border: 1px solid color-mix(in srgb, var(--warning) 40%, transparent);
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  border-radius: 7px; padding: .5rem .65rem; }
+
+.cl-totals { font-size: .85rem; margin: 0 0 .6rem; font-variant-numeric: tabular-nums; }
+.cl-dim { color: var(--text-muted); }
+
+.cl-table { width: 100%; border-collapse: collapse; }
+.cl-table th { text-align: left; padding: .25rem .5rem .3rem 0; font-size: .71rem;
+  font-weight: 500; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--text-faint); border-bottom: 1px solid var(--border); }
+.cl-table td { padding: .5rem .5rem .5rem 0; border-bottom: 1px solid var(--border);
+  vertical-align: top; font-size: .82rem; }
+.cl-table th.cl-n, .cl-table td.cl-n { text-align: right; white-space: nowrap;
+  font-variant-numeric: tabular-nums; }
+/* A row that has been dealt with steps back rather than disappearing: the list
+   is worked top to bottom, and rows vanishing under the pointer would move the
+   next button up into the place the last click just happened. */
+.cl-table tr.cl-filed td { opacity: .5; }
+
+.cl-who { max-width: 15rem; }
+.cl-name { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cl-addr { color: var(--text-muted); font-size: .74rem;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* The template itself, which is the one thing on the row that has to be read
+   before the button next to it is pressed. Two lines, then clipped: a subject
+   long enough to need three is one whose first two already said what it is. */
+.cl-what { max-width: 30rem; }
+.cl-label { line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical; overflow: hidden; }
+.cl-meta { font-size: .73rem; color: var(--text-muted); margin-top: .15rem; }
+/* Attachments, called out. See app.cleanup.js::meta — a hundred identical
+   notifications carrying a hundred invoices must not read as a hundred
+   identical notifications. */
+.cl-flagged { color: var(--warning); font-weight: 550; }
+
+/* A search result that is only in Trash. Muted rather than red: it is not a
+   warning, it is a location — and it most often appears on mail the reader has
+   just deleted on purpose, where an alarm colour would read as a problem. */
+.trash-chip { display: inline-flex; align-items: center; color: var(--text-faint); }
+.msg-row.active .trash-chip { color: rgba(255,255,255,.8); }
+
+/* The whole row is the "show me what is in this" target, so it has to look like
+   one — a pointer everywhere but the action cell, and the group's own words
+   underlined on hover, since that is what the search it opens is built from. */
+.cl-table tbody tr[data-key] { cursor: pointer; }
+.cl-table tbody tr[data-key]:hover td { background: var(--hover-tint-soft); }
+.cl-table tbody tr[data-key]:hover .cl-label { text-decoration: underline;
+  text-underline-offset: 2px; }
+.cl-table td.cl-act { cursor: default; }
+
+/* The column the list is ordered by. Worth marking: the row carries a message
+   count as well, and a list of counts that is not in count order reads as
+   broken until you notice which number it is sorted on. */
+.cl-table th.cl-sorted { color: var(--text-muted); }
+
+.cl-act { text-align: right; white-space: nowrap; }
+.cl-btn { font: inherit; font-size: .78rem; padding: .25rem .6rem; border-radius: 6px;
+  border: 1px solid var(--border); background: var(--bg-elev); color: var(--text);
+  cursor: pointer; }
+.cl-btn:hover { background: var(--hover-tint); }
+.cl-btn:disabled { opacity: .4; cursor: default; }
+/* Only the *confirming* button is red. The first press is a question and the
+   second is the deletion, and colouring both would say the question was already
+   the dangerous half. */
+.cl-btn.danger { border-color: var(--danger); color: var(--danger); font-weight: 550; }
+.cl-btn.danger:hover { background: color-mix(in srgb, var(--danger) 12%, transparent); }
+.cl-confirm { display: inline-flex; gap: .3rem; }
+.cl-working, .cl-done { font-size: .76rem; color: var(--text-muted); }
+
+@media (max-width: 720px) {
+  /* The sender's address and the span are the first things to go: on a phone
+     the name, what it says, how many and the button are the row. */
+  .cl-addr, .cl-table th:nth-child(5), .cl-table td:nth-child(5) { display: none; }
+  .cl-who, .cl-what { max-width: none; }
+}
 
 /* --- Narrow layout: three pages ---------------------------------------- */
 /* There is no room for two panes side by side down here, let alone three, so
