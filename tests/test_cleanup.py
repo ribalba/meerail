@@ -12,7 +12,9 @@ import dbfixture
 import pytest
 from conftest import T0, mailbox
 from core import bodysig
+from core.models import Message
 from helpers import api, make_message
+from sqlalchemy import select
 
 
 def _seed_trash(email):
@@ -62,11 +64,35 @@ def test_subject_template_groups_mail_that_differs_only_in_numbers(account):
     g = _group(_clusters(aid), "backup of")
     assert g is not None
     # The digits are what the template masks; everything else survives it.
-    assert g["key"] == "backup of /var/www on rebel: # files"
+    assert g["label"] == "backup of /var/www on rebel: # files"
+    # The key is the pair the grouping is actually by, so that two senders
+    # writing the same template are two rows the panel can tell apart.
+    assert g["key"] == "alerts@example.com\tbackup of /var/www on rebel: # files"
     assert g["count"] == 6
     assert g["subjects"] == 6
     assert g["from_addr"] == "alerts@example.com"
     assert _clusters(aid)["totals"]["messages"] >= 6
+
+
+def test_subject_group_identity_is_not_ambiguous_across_senders(account):
+    """A UI-facing cleanup identifier must distinguish every displayed row.
+
+    The key used to be the masked subject template alone, while the browser
+    stores ``confirming``, ``working`` and ``filed`` by that value and finds
+    the clicked group by it. Two senders with one template therefore shared a
+    button state, and the second row's Delete resolved to the first sender's
+    mail. Stated as an API/UI contract rather than as an implementation: what
+    the key is made of is open, that no two displayed rows share one is not.
+    """
+    email, aid = account["email"], account["id"]
+    subjects = [f"Weekly status report {n}" for n in range(1, 7)]
+    _seed(email, subjects, frm="first-sender@example.com")
+    _seed(email, subjects, frm="second-sender@example.com", uid0=300)
+
+    groups = [g for g in _clusters(aid)["clusters"]
+              if g["from_addr"] in {"first-sender@example.com", "second-sender@example.com"}]
+    assert len(groups) == 2
+    assert len({g["key"] for g in groups}) == 2
 
 
 def test_a_group_can_be_trashed_whole_and_undone(account):
@@ -265,6 +291,76 @@ def test_body_group_trashes_by_its_fingerprint(account):
 
     payload = _clusters(aid, mode="body")
     assert not [c for c in payload["clusters"] if c["from_addr"] == "digest@example.com"]
+
+
+def test_body_group_delete_never_moves_an_overlapping_neighbour(account):
+    """A body group's displayed membership and its delete membership must agree.
+
+    Message 2 shares one band with the high-reach first group and another with
+    the later five-message group. Greedy star clustering assigns it to the
+    first group, and the delete must not find it again through the later
+    group's seed: a bare one-hop predicate did, and answered "six moved" to a
+    row that displayed five.
+    """
+    email, aid = account["email"], account["id"]
+    _seed_trash(email)
+    _seed(email, [f"Overlap fixture {n}" for n in range(1, 18)],
+          frm="overlap@example.com")
+
+    # Synthetic, but valid, four-band fingerprints. The first seed claims the
+    # bridge (id 2) through x and its two dense neighbourhoods through a and b.
+    # The later seed's y-neighbourhood is displayed without that already-claimed
+    # bridge, whereas the deletion predicate finds it again through y.
+    sigs = ["x a b c", "x y p q"]
+    sigs += [f"m a {i} t{i}" for i in range(3, 8)]
+    sigs += [f"n {i} b t{i}" for i in range(8, 13)]
+    sigs += [f"v y {i} t{i}" for i in range(13, 18)]
+    with dbfixture.session() as db:
+        rows = db.execute(
+            select(Message).where(Message.account_id == aid,
+                                  Message.from_addr == "overlap@example.com")
+            .order_by(Message.id)
+        ).scalars().all()
+        assert len(rows) == len(sigs)
+        for row, sig in zip(rows, sigs):
+            row.body_sig = sig
+
+    groups = [g for g in _clusters(aid, mode="body")["clusters"]
+              if g["from_addr"] == "overlap@example.com"]
+    group = next(g for g in groups if g["count"] == 5)
+    code, result = api("POST", "/api/cleanup/trash", {
+        "mode": "body", "from_addr": group["from_addr"],
+        "key": group["key"], "account_id": aid,
+    })
+    assert code == 200, result
+    assert result["moved"] == group["count"]
+
+
+def test_cleanup_moved_count_is_distinct_messages_on_a_label_server(account):
+    """Cleanup's count is mail, not the number of local label placements changed."""
+    email, aid = account["email"], account["id"]
+    _seed_trash(email)
+    _seed(email, [f"Labelled cleanup digest {n}" for n in range(1, 7)],
+          frm="labels@example.com")
+
+    with dbfixture.session() as db:
+        message_ids = list(db.execute(
+            select(Message.message_id).where(
+                Message.account_id == aid, Message.from_addr == "labels@example.com")
+            .order_by(Message.id)
+        ).scalars().all())
+    for i, message_id in enumerate(message_ids, start=1):
+        assert dbfixture.record_placement(email, message_id, uid=800 + i,
+                                          folder="All Mail", role_hint="\\All")
+
+    group = _group(_clusters(aid), "labelled cleanup digest")
+    assert group is not None and group["count"] == 6
+    code, result = api("POST", "/api/cleanup/trash", {
+        "mode": "subject", "from_addr": group["from_addr"],
+        "key": group["key"], "account_id": aid,
+    })
+    assert code == 200, result
+    assert result["moved"] == group["count"]
 
 
 def test_trashing_a_group_that_has_already_gone_is_not_an_error(account):

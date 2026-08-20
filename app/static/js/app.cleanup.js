@@ -41,7 +41,10 @@ App.cleanup = (function () {
   let error = "";
   // The group whose Delete has been pressed once and not yet confirmed, and the
   // one currently being filed. Keys, not indices: the list is re-sorted and
-  // re-fetched under both.
+  // re-fetched under both. This leans on a group's key naming exactly one row —
+  // sender *and* template, or the seed message — because everything below finds
+  // the clicked group by it, and a key two rows shared would let one row's
+  // Delete act on the other's mail.
   let confirming = null;
   let working = null;
   // key -> how many this session filed, so a row can say what it did instead of

@@ -125,7 +125,9 @@ def test_archive_thread_clears_every_message_and_every_folder(account):
     code, body = api("POST", f"/api/messages/threads/{row['thread_id']}/archive"
                              f"?account_id={aid}")
     assert code == 200, body
-    assert body["moved"] == 3          # two inbox placements + the label
+    # Two messages, not the three placements it took to clear them: the count
+    # is mail, and one of the two sat in the inbox and under a label.
+    assert body["moved"] == 2
 
     # Gone from the folder that was on screen — and from the label, which is
     # what a "vanish from the list" that only half happened looked like.
@@ -873,7 +875,9 @@ def test_trashing_a_labelled_message_queues_one_move_not_one_per_label(account):
     code, body = api("POST", f"/api/messages/threads/{r['rows'][0]['thread_id']}/trash"
                              f"?account_id={aid}")
     assert code == 200, body
-    assert body["moved"] == 2                     # both placements left, locally
+    # One message, however many labels it was wearing: both placements left
+    # locally, but a count a person reads is a count of mail.
+    assert body["moved"] == 1
 
     moves = [m for m in _actions(email) if m["type"] in ("move", "delete")]
     assert len(moves) == 1, moves

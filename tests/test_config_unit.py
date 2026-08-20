@@ -17,7 +17,7 @@ mkdir.
 
 import pytest
 
-from core.config import AccountConfig, Settings
+from core.config import AccountConfig, EXAMPLE_CONFIG_PATH, Settings
 
 CONFIG = """\
 [database]
@@ -118,6 +118,18 @@ def test_unknown_key_is_rejected_not_ignored(tmp_path, monkeypatch):
     monkeypatch.setenv("MEERAIL_CONFIG", str(path))
     with pytest.raises(SystemExit, match="unknown key 'store_raw_mim'"):
         load()
+
+
+def test_the_shipped_example_configuration_loads(tmp_path, monkeypatch):
+    """The documented starting configuration must be accepted verbatim."""
+    path = tmp_path / "meerail.toml"
+    path.write_text(EXAMPLE_CONFIG_PATH.read_text())
+    monkeypatch.setenv("MEERAIL_CONFIG", str(path))
+    # Do not let an operator's own environment turn this into a test of their
+    # settings. The sample itself is the complete input under test.
+    for field in Settings.model_fields:
+        monkeypatch.delenv(field.upper(), raising=False)
+    assert load().llm_timeout_seconds == 180
 
 
 def test_old_agent_config_is_named_not_half_read(tmp_path, monkeypatch):

@@ -105,6 +105,36 @@ _TEMPLATE = func.btrim(
 )
 
 
+def _subject_key(from_addr: str, template: str) -> str:
+    """A subject group's identity: the pair it is actually grouped by.
+
+    The template alone is not one. Groups are `GROUP BY from_addr, template`,
+    so two senders who both write "weekly status report #" are two rows on
+    screen carrying one name — and the panel keys its per-row state (which row
+    is confirming, which is working, what each one filed) by that name and
+    finds the clicked row by it. The second sender's Delete then resolved to
+    the first sender's group, which is this feature's worst possible failure.
+
+    A tab, because neither half can contain one: an address has no whitespace
+    in it at all, and `_TEMPLATE` has already collapsed every run of it to a
+    single space. So the split below is exact rather than a best guess.
+
+    `label` keeps the bare template — that is what a person reads, and what the
+    row's search is built from.
+    """
+    return f"{from_addr}\t{template}"
+
+
+def _subject_template(key: str) -> str:
+    """The template half of a subject key, tolerating one without a sender.
+
+    An older client — or a script written against the old shape — names a group
+    by the template alone, and the sender arrives beside it in the request
+    either way, so that request still resolves to exactly what it used to.
+    """
+    return key.split("\t", 1)[-1]
+
+
 def _protected():
     """EXISTS a placement that takes this message out of consideration."""
     return (
@@ -235,7 +265,7 @@ def _subject_groups(db: DBSession, account_id: int | None, min_count: int) -> li
         {
             "from_addr": r.from_addr,
             "from_name": r.from_name or "",
-            "key": r.template,
+            "key": _subject_key(r.from_addr, r.template),
             "label": r.template,
             "count": r.count,
             "threads": r.threads,
@@ -266,9 +296,12 @@ def _components(rows) -> dict[int, list]:
 
     A star is one hop from a centre, so every member resembles the same one
     message and the group can be stated in a sentence — "everything that looks
-    like this" — which is also exactly what `:similar` searches for and what the
-    delete re-derives. Those three agreeing is what lets the panel open a group
-    in the message list and have the row count match the button.
+    like this" — which is also what `:similar` searches for and what the delete
+    re-derives, through `_seed_group`. The delete runs this same function, not
+    the looser one-hop predicate the search runs: claiming is what makes the
+    two differ at all, and a message another star has claimed is a message this
+    row did not show. `:similar` may therefore list a neighbour the row leaves
+    out, which costs a reader nothing; a delete doing it costs them mail.
 
     Seeds are taken most-connected first, so the densest centre claims its
     neighbourhood before a message on the edge of it can start a group of its
@@ -308,6 +341,49 @@ def _components(rows) -> dict[int, list]:
                     members.append(by_id[other])
         groups[seed] = members
     return groups
+
+
+def _resembles(a: str | None, b: str | None) -> bool:
+    """Whether two fingerprints agree on a band — `bodysig.shares_band` in Python.
+
+    Band *position* counts, exactly as it does in the SQL and in `_components`'
+    bucket keys: a token matching in the band it belongs to is a shared
+    neighbourhood, the same token appearing in someone else's third band is a
+    coincidence of hashing.
+    """
+    return any(x == y for x, y in zip((a or "").split(), (b or "").split()))
+
+
+def _seed_group(rows, seed: int, sig: str) -> list[int]:
+    """The messages the star centred on `seed` actually holds, clustered fresh.
+
+    Not the same thing as "everything one hop from the seed", and that gap is
+    what this exists for. Clustering claims each message once, so a message
+    that resembles two seeds is drawn under the denser of them; a plain
+    one-hop predicate finds it again under the other one and moves mail the row
+    never showed. A group that displayed five said it had moved six.
+
+    The seed is normally a centre of the fresh clustering and this is simply
+    its members. It may not be — the chunk before this one moved it to Trash,
+    or another window did — and then the group has re-formed around a new
+    centre, so the members are taken from every centre that still resembles the
+    original seed, bounded by the seed's own one-hop set. That bound is what
+    keeps the fallback no broader than the predicate it replaces; when the seed
+    *is* a centre the two agree exactly, because no other centre can resemble a
+    centre (whichever seeded first would have claimed the other).
+    """
+    by_id = {row.id: row for row in rows}
+    out: list[int] = []
+    for centre, members in _components(rows).items():
+        if centre != seed and not _resembles(by_id[centre].body_sig, sig):
+            continue
+        out += [m.id for m in members if m.id == seed or _resembles(m.body_sig, sig)]
+    # The seed last, so a group bigger than one chunk still converges: as long
+    # as the message the group is named after is still there, the next call
+    # re-forms the same star around it. Trashing it first would leave the rest
+    # of the group orphaned mid-delete.
+    out.sort(key=lambda mid: mid == seed)
+    return out
 
 
 def _body_rows(db: DBSession, account_id: int | None, from_addr: str | None = None):
@@ -499,32 +575,28 @@ def clusters(
 def _group_message_ids(db: DBSession, req: TrashRequest) -> list[int]:
     """The messages a group's key names, resolved fresh under the live filter."""
     if req.mode == "body":
-        # Re-derived from the seed's own fingerprint rather than by clustering
-        # again, which matters once a group is larger than one chunk: the second
-        # call arrives with part of the group already in Trash, and a fresh
-        # clustering of what is left is not the same clustering. A predicate is
-        # the same predicate every time, so the loop converges — and it is the
-        # same predicate the search box ran, so what was reviewed is what goes.
-        sig = db.scalar(select(Message.body_sig).where(Message.id == int(req.key))) \
-            if req.key.isdigit() else None
-        clause = bodysig.shares_band(Message.body_sig, sig or "")
-        if clause is None:
+        # The same clustering the listing drew, run again over what is still a
+        # candidate, rather than a bare "resembles the seed" predicate. The
+        # predicate is looser than the group: it finds the neighbours another,
+        # denser star had already claimed, so the row that showed five messages
+        # moved six of them — mail the person deleting it never saw.
+        #
+        # The seed's fingerprint is read without the candidate filter on
+        # purpose. Once the first chunk has gone the seed is in Trash, and this
+        # still has to know what the group was named after.
+        if not req.key.isdigit():
             return []
-        return list(db.execute(
-            select(Message.id).where(
-                *_candidates(req.account_id),
-                Message.from_addr == req.from_addr,
-                Message.body_sig.is_not(None),
-                Message.body_sig != "",
-                clause,
-            )
-        ).scalars().all())
+        seed = int(req.key)
+        sig = db.scalar(select(Message.body_sig).where(Message.id == seed))
+        if not sig:
+            return []
+        return _seed_group(_body_rows(db, req.account_id, req.from_addr), seed, sig)
 
     return list(db.execute(
         select(Message.id).where(
             *_candidates(req.account_id),
             Message.from_addr == req.from_addr,
-            _TEMPLATE == req.key,
+            _TEMPLATE == _subject_template(req.key),
         )
     ).scalars().all())
 

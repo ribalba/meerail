@@ -787,6 +787,13 @@ def move_messages(db: DBSession, msgs: list[Message], target: Mailbox | None,
     having achieved nothing. It also gave the destructive half of the old
     hand-rolled move a second chance to run against a message already sitting in
     Trash, which is how those messages were deleted outright.
+
+    Returns the number of *messages* that went, not the number of placements
+    changed getting them there — the same distinction ``purge`` makes and for
+    the same reason. On a label server one message sits in Inbox and in \\All,
+    so counting placements told the caller six messages were twelve; every one
+    of these counts is read by a person ("12 moved to Trash") or subtracted
+    from a total of messages, and neither means placements.
     """
     collapse = labels_one_message(db, msgs[0].account_id) if msgs else False
     moved = 0
@@ -799,11 +806,13 @@ def move_messages(db: DBSession, msgs: list[Message], target: Mailbox | None,
         # carrier's move is queued, the placements it has to describe have been
         # deleted out from under it.
         snaps = snapshots(db, msg, mailbox_ids)
+        went = False
         for mailbox_id in mailbox_ids:
             if move_to(db, msg, mailbox_id, target, touched,
                        enqueue_action=not collapse or mailbox_id == carrier,
                        op_id=op_id, op_kind=op_kind, undo_from=snaps):
-                moved += 1
+                went = True
+        moved += went
     return moved
 
 
