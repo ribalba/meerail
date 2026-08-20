@@ -131,7 +131,13 @@ def search(
     # caller who names no window is the one most likely not to have thought about
     # what that means on twenty years of mail.
     years: int | None = Query(None, ge=0, le=200),
-    limit: int = Query(60, ge=1, le=200),
+    # The same ceiling list_messages uses, which is what the comment above means
+    # by "the other two". A wide limit costs no more scanning than a narrow one
+    # — the budget below is a floor of 80k either way — so the ceiling is here
+    # to bound the rows fetched and returned, exactly as it is there. The page
+    # the browser asks for is far smaller; this is the size of a *re-fetch* of a
+    # result list someone has paged through, which is why 200 was not enough.
+    limit: int = Query(60, ge=1, le=1000),
     offset: int = Query(0, ge=0),
 ):
     q = q.strip()

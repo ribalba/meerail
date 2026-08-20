@@ -17,6 +17,22 @@ App.search = (function () {
   // is gone. The window is written on the control itself, so it stays readable.
   const YEARS_KEY = "meerail.search.years";
 
+  // --- Paging ---
+  // Results are paged exactly as the folder list is, through the footer button
+  // App.list owns. Without it a query that matched four hundred conversations
+  // showed the newest sixty and the rest were unreachable — the list does not
+  // scroll past what was fetched, so "60 of 400" looked identical to a search
+  // that had simply missed the mail you were after.
+  const PAGE = 60;
+  const MAX_ROWS = 1000;     // the server's ceiling on ?limit, and so on ours
+
+  let total = 0;             // conversations matching the query, not just the page
+  let capped = false;        // ...and whether that number is a floor — see total_capped
+  // The params the rows on screen came from. loadMore() reads them from here
+  // rather than off the controls, so a page still in flight when the box is
+  // edited cannot come back holding rows for a different query.
+  let pageParams = null;
+
   function els() {
     return {
       input: $("#search-input"), clear: $("#search-clear"), controls: $("#search-controls"),
@@ -89,6 +105,11 @@ App.search = (function () {
 
     const params = { q, mode: e.rx.checked ? "regex" : "keyword", years: e.years.value };
     if (e.scope.value !== "all") params.mailbox_id = Number(e.scope.value);
+    // A refresh re-fetches every page that is on screen rather than the first
+    // one: collapsing a search the reader has paged through, because a message
+    // was archived out of it, loses their place. Same rule, and the same
+    // arithmetic, as App.shell.loadList(keepPaged).
+    params.limit = refresh ? Math.min(MAX_ROWS, Math.max(PAGE, App.list.count())) : PAGE;
 
     if (inflight) inflight.abort();
     const ctrl = new AbortController();
@@ -101,17 +122,17 @@ App.search = (function () {
         App.list.reset();
         App.reader.clear();
       }
+      pageParams = params;
+      total = data.total || 0;
+      capped = !!data.total_capped;
       // render() prunes ticks whose rows are gone and keeps the keyboard cursor
       // on the slot a deleted row vacated, so a refresh needs nothing further.
       App.list.render(data.rows, true);
-      // A "+" where the server stopped counting. It reads the newest matches
-      // and stops once it has enough conversations to fill the page, so the
-      // count is exact for every search but the ones that match a large slice
-      // of the mailbox — and for those the honest answer is a floor, not a
-      // number the user waited an extra second for.
-      const more = data.total_capped ? "+" : "";
-      e.status.textContent = data.total === 0 ? "No results"
-        : `${data.total}${more} result${data.total === 1 && !more ? "" : "s"}`;
+      // render() draws the footer from whatever hook was set last, so this has
+      // to come after it — and it has to come at all, because App.list.reset()
+      // above cleared the hook the previous search left.
+      App.list.setMore(hasMore() ? loadMore : null);
+      paintStatus();
       $("#list-title").textContent = e.rx.checked ? "Regex search" : "Search";
       // The folder's own verb goes with its name: what is on screen is no
       // longer the folder. See App.shell.paintPaneAction.
@@ -125,6 +146,68 @@ App.search = (function () {
       e.status.classList.add("error");
       e.status.textContent = ex.message || "Search failed";
       return false;
+    } finally {
+      if (inflight === ctrl) inflight = null;
+    }
+  }
+
+  // A "+" where the server stopped counting. It reads the newest matches and
+  // stops once it has enough conversations to fill the page, so the count is
+  // exact for every search but the ones that match a large slice of the
+  // mailbox — and for those the honest answer is a floor, not a number the user
+  // waited an extra second for. Paging refines it: a later page scans wider, so
+  // this is repainted whenever a page lands rather than written once.
+  function paintStatus() {
+    const more = capped ? "+" : "";
+    els().status.textContent = total === 0 ? "No results"
+      : `${total}${more} result${total === 1 && !more ? "" : "s"}`;
+  }
+
+  // `total` is a floor while the count is capped, so a capped search that has
+  // shown every conversation it counted may still have more behind it — hence
+  // the second clause. The button offering one page that comes back empty is
+  // the cost of that, and it is the page itself that then takes the button
+  // away; claiming there is nothing more when the server has said "N+" would be
+  // the same lie the missing button was.
+  function hasMore() {
+    if (App.list.count() >= MAX_ROWS) return false;
+    return App.list.count() < total || capped;
+  }
+
+  // Appends the next page. Non-abort errors deliberately propagate: the footer
+  // button that called this re-enables itself, so the click can simply be
+  // retried — see App.list.renderMore().
+  async function loadMore() {
+    if (!active || !pageParams) return;
+    const request = requestSeq;
+    // Into the same slot the query itself uses, so typing over the box drops a
+    // page still being computed instead of leaving it to finish for a list it
+    // is no longer about.
+    if (inflight) inflight.abort();
+    const ctrl = new AbortController();
+    inflight = ctrl;
+    try {
+      // Clamped to what is left under the ceiling rather than a flat page:
+      // 1000 is not a multiple of 60, so the last page would otherwise land
+      // more rows than a refresh is allowed to ask back for, and the overshoot
+      // would silently disappear the next time anything reloaded the list.
+      // hasMore() has already established there is room for at least one.
+      const data = await App.api.search(
+        Object.assign({}, pageParams, {
+          limit: Math.min(PAGE, MAX_ROWS - App.list.count()),
+          offset: App.list.count(),
+        }), ctrl.signal);
+      // A new query landed while this page was in flight — these rows belong to
+      // a search that is no longer on screen.
+      if (request !== requestSeq || !active) return;
+      total = data.total || 0;
+      capped = !!data.total_capped;
+      App.list.append(data.rows, true);
+      // An empty page is the end of the results whatever the count said.
+      App.list.setMore(data.rows.length && hasMore() ? loadMore : null);
+      paintStatus();
+    } catch (ex) {
+      if (ex.name !== "AbortError") throw ex;
     } finally {
       if (inflight === ctrl) inflight = null;
     }
@@ -187,6 +270,9 @@ App.search = (function () {
     requestSeq += 1;
     const e = els();
     active = false;
+    total = 0;
+    capped = false;
+    pageParams = null;
     e.input.value = "";
     e.clear.hidden = true;
     e.controls.hidden = true;

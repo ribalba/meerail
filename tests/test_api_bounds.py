@@ -28,6 +28,19 @@ def test_an_offset_cannot_be_negative(account):
     assert api("GET", "/api/search?q=anything&offset=-1")[0] == 422
 
 
+def test_a_search_page_reaches_as_far_as_a_message_page(account):
+    """The two list endpoints page the same list into the same pane, so they
+    stop in the same place. Search used to cap `limit` at 200 while /api/messages
+    allowed 1000, which put a ceiling on how far the results could be paged:
+    re-fetching a search someone had paged past 200 conversations — which every
+    delete and every background refresh does — asked for a limit the endpoint
+    refused, and the rows they had walked to collapsed back to one page.
+    """
+    aid = account["id"]
+    assert api("GET", f"/api/search?q=a&account_id={aid}&limit=1000")[0] == 200
+    assert api("GET", f"/api/search?q=a&account_id={aid}&limit=1001")[0] == 422
+
+
 def test_a_search_window_is_a_number_of_years_not_a_number(account):
     """`years` becomes a date, and a big enough one overflows the arithmetic
     before it means anything — a 500 for a query that was only asking for
