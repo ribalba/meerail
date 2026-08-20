@@ -13,6 +13,15 @@ App.reader = (function () {
   // read live off the search box so a rerender mid-typing keeps marking the
   // term you actually opened the conversation on.
   let marks = [];
+  // Which messages have actually been on screen, by id. A thread opens on its
+  // newest message, so everything earlier is off the top of the pane with
+  // nothing to say so — this is what the "earlier messages" chip counts. It has
+  // to be viewport history rather than the seen flag, which openThread sets on
+  // the whole conversation the moment it opens.
+  let viewed = new Set();
+  let renderId = 0;    // which draw a body frame belongs to — see mountFrame()
+  let frames = 0;      // its frames mounted but not yet measured
+  let settled = false; // ...so nothing in the pane is where it will end up yet
 
   // Every action — toolbar or keyboard — applies to the newest message in the
   // conversation. That is the one you are replying to, and it keeps the single
@@ -47,24 +56,87 @@ App.reader = (function () {
   // frames left over from an earlier one fail the identity check and stay put.
   let pin = null;
 
+  // How much of the pane's top edge the sticky bars are covering. Both stick to
+  // it on a narrow layout, so what anything scrolled to the top has to clear is
+  // however much of them is actually up — offsetHeight is 0 for the nav at
+  // desktop widths, where it is display:none.
+  function stuckTop() {
+    const bar = document.getElementById("reader-bar");
+    const nav = document.getElementById("mobile-nav");
+    return (bar ? bar.offsetHeight : 0) + (nav ? nav.offsetHeight : 0);
+  }
+
+  // Brings a message to the top of the pane, clear of those bars.
+  function scrollToMsg(el, smooth) {
+    const pane = document.querySelector(".reading-pane");
+    if (!pane || !el) return;
+    const top = el.getBoundingClientRect().top - pane.getBoundingClientRect().top;
+    const to = Math.max(0, pane.scrollTop + top - stuckTop() - 10);
+    if (smooth) pane.scrollTo({ top: to, behavior: "smooth" });
+    else pane.scrollTop = to;
+  }
+
   // Where an opening thread lands: the first message carrying a search hit
   // when you got here from a search, the newest one otherwise. Re-derived on
   // every call rather than resolved once, because iframe bodies only report
   // their hits as they load — each load nudges the target forward.
   function landOn() {
     const host = document.getElementById("reader-content");
+    if (!host) return;
+    scrollToMsg((marks.length && host.querySelector(".thread-msg.has-hit"))
+      || host.lastElementChild, false);
+  }
+
+  // The messages currently drawn, oldest first.
+  function rows() {
+    return currentThread
+      ? Array.from(document.querySelectorAll("#reader-content .thread-msg")) : [];
+  }
+
+  // Nothing in the pane is where it will end up until the last body frame has
+  // been measured — an unloaded iframe is a couple of hundred pixels of a
+  // message that turns out to be ten screens. Counting what is "on screen"
+  // before then would mark half the thread looked at, so the tally starts here.
+  function settle() {
+    settled = true;
+    updateEarlier();
+  }
+
+  // The chip that floats under the action bar: how many messages sit above
+  // anything you have actually had on screen. Recomputed on every scroll —
+  // cheap, and scrolling is the only thing that changes the answer.
+  //
+  // Counted rather than merely flagged because the number is the point: a
+  // conversation that opens on its last message looks the same whether there is
+  // one reply above it or twenty.
+  function updateEarlier() {
+    const rail = document.getElementById("earlier-rail");
     const pane = document.querySelector(".reading-pane");
-    if (!host || !pane) return;
-    const el = (marks.length && host.querySelector(".thread-msg.has-hit")) || host.lastElementChild;
-    if (!el) return;
-    const bar = document.getElementById("reader-bar");
-    const nav = document.getElementById("mobile-nav");
-    // Both bars stick to the top of this pane on a narrow layout, so what the
-    // landing spot has to clear is however much of them is actually up —
-    // offsetHeight is 0 for the nav at desktop widths, where it is display:none.
-    const stuck = (bar ? bar.offsetHeight : 0) + (nav ? nav.offsetHeight : 0);
-    const top = el.getBoundingClientRect().top - pane.getBoundingClientRect().top;
-    pane.scrollTop = Math.max(0, pane.scrollTop + top - stuck - 10);
+    if (!rail || !pane) return;
+    const msgs = rows();
+    // Below the fold is only worth saying with a fold to be below.
+    if (!settled || msgs.length < 2) { rail.hidden = true; return; }
+    const stuck = stuckTop();
+    rail.style.top = stuck + "px";
+    const box = pane.getBoundingClientRect();
+    const top = box.top + stuck;
+    // Any part of a message showing counts as having seen it — a long one is
+    // read by scrolling through it, not by having it fit.
+    let first = msgs.length;
+    msgs.forEach((row, i) => {
+      const r = row.getBoundingClientRect();
+      if (r.bottom <= top || r.top >= box.bottom) return;
+      viewed.add(row.dataset.mid);
+      if (i < first) first = i;
+    });
+    // Everything above what is on screen that has never been on screen. Scrolled
+    // back down past mail you have already read, the chip stays away.
+    const missed = msgs.slice(0, first).filter((r) => !viewed.has(r.dataset.mid));
+    rail.hidden = missed.length === 0;
+    if (rail.hidden) return;
+    const pill = document.getElementById("earlier-pill");
+    pill.textContent = `↑ ${missed.length} earlier message${missed.length === 1 ? "" : "s"}`;
+    pill.title = "Jump to the oldest message you have not seen yet";
   }
 
   // Sizes a loaded body frame to its document.
@@ -94,6 +166,10 @@ App.reader = (function () {
 
   function mountFrame(container, html, onHit) {
     const p = pin;
+    // Frames from an earlier draw go on loading into a document that no longer
+    // holds them, so the tally they report back to is stamped with their draw.
+    const r = renderId;
+    frames += 1;
     const frame = document.createElement("iframe");
     frame.className = "msg-body-frame";
     frame.setAttribute("sandbox", "allow-same-origin allow-popups allow-popups-to-escape-sandbox");
@@ -112,6 +188,7 @@ App.reader = (function () {
         if (App.keys) doc.addEventListener("keydown", App.keys.handle);
       } catch (_) { frame.style.height = "400px"; }
       if (p === pin) landOn();
+      if (r === renderId && --frames <= 0) settle();
     });
     container.appendChild(frame);
   }
@@ -672,8 +749,9 @@ App.reader = (function () {
   }
 
   // Every message in the thread is drawn in full — no "N earlier messages" to
-  // unfold. The head stays a toggle so a long quoted chain can still be folded
-  // away one card at a time.
+  // unfold. (The chip of that name points up at them; it scrolls, it does not
+  // unfold — see updateEarlier.) The head stays a toggle so a long quoted chain
+  // can still be folded away one card at a time.
   // What the reader shows instead of a body for mail outside the content
   // window. The two states differ in one clause — whether the body was ever
   // here — because that is the only thing the reader can act on differently:
@@ -704,6 +782,7 @@ App.reader = (function () {
     const shut = collapsed.has(m.id);
     const wrap = document.createElement("div");
     wrap.className = "thread-msg" + (shut ? " collapsed" : "");
+    wrap.dataset.mid = m.id;
     const av = App.avatarColor(m.from_addr);
     const showImages = imagesFor.has(m.id);
     // Cc is part of who was addressed, so it sits next to To rather than behind
@@ -981,10 +1060,20 @@ App.reader = (function () {
     closeMoveMenu();
     if (App.reminders) App.reminders.close();
     pin = pinLast ? {} : null;
+    // A redraw remounts every body frame, so the pane is unmeasured again until
+    // they land. The chip stays down in the meantime rather than counting
+    // against half-height messages.
+    renderId += 1;
+    frames = 0;
+    settled = false;
     renderBar();
     const host = document.getElementById("reader-content");
     const empty = document.getElementById("reader-empty");
-    if (!currentThread) { host.hidden = true; empty.hidden = false; renderEmpty(); return; }
+    // updateEarlier() with nothing settled takes the chip down, which is what
+    // an emptied pane needs — clear() comes through here with it still up.
+    if (!currentThread) {
+      host.hidden = true; empty.hidden = false; renderEmpty(); updateEarlier(); return;
+    }
     empty.hidden = true; host.hidden = false;
     host.innerHTML = "";
     // Above the conversation, and only for one that is waiting on a reminder:
@@ -999,6 +1088,9 @@ App.reader = (function () {
     fitToolbars();
     // Right away for text-only mail; the iframes redo it as they measure up.
     if (pinLast) landOn();
+    // Text-only mail mounts no frame, so nothing else would ever call time on
+    // the layout; with frames up, the last one to load does it.
+    if (frames === 0) settle();
   }
 
   async function openThread(threadId, accountId, focusId) {
@@ -1025,6 +1117,8 @@ App.reader = (function () {
     // Whole conversation open, oldest to newest — folding is something you ask
     // for per message, not a state a thread arrives in.
     collapsed = new Set();
+    // A different conversation, so what has been on screen starts over.
+    viewed = new Set();
     rerender(true);
     // clear() drops the ↑↓ marker along with the thread it belonged to, which
     // is right when the pane empties — but archiving from here empties it and
@@ -1042,6 +1136,7 @@ App.reader = (function () {
     openRequest += 1;
     currentThread = null;
     marks = [];
+    viewed = new Set();
     keyFocus = false;
     rerender();
   }
@@ -1085,6 +1180,15 @@ App.reader = (function () {
   });
   renderBar();
 
+  // The chip goes to the oldest message you have not seen, so a conversation
+  // you dipped into halfway is picked up where you left off rather than from
+  // the very top.
+  document.getElementById("earlier-pill").addEventListener("click", () => {
+    scrollToMsg(rows().find((r) => !viewed.has(r.dataset.mid)), true);
+  });
+  document.querySelector(".reading-pane")
+    .addEventListener("scroll", updateEarlier, { passive: true });
+
   // The pane rather than the toolbars, for two reasons. The divider between the
   // list and the reader is draggable, so the width that decides this changes
   // without any message being re-rendered — and watching the pane means one
@@ -1093,7 +1197,8 @@ App.reader = (function () {
   // callback does: folding a toolbar changes the row's contents, never the
   // pane's width, so there is no loop to fall into.
   if (window.ResizeObserver) {
-    new ResizeObserver(fitToolbars).observe(document.querySelector(".reading-pane"));
+    new ResizeObserver(() => { fitToolbars(); updateEarlier(); })
+      .observe(document.querySelector(".reading-pane"));
   }
 
   // `redraw` is exported so App.tasks can put the Add Task buttons up (or take

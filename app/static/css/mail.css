@@ -507,6 +507,23 @@ body.resizing { cursor: col-resize; user-select: none; }
 .reader-empty.all-done p { font-size: 1.05rem; color: var(--text-muted); }
 .reader-content { padding: .9rem 1rem 1.4rem; }
 
+/* "N earlier messages" — the only sign a thread has history above the message
+   it opened on. The rail is a zero-height sticky strip, so the chip hangs over
+   the top of the reading instead of taking a row of its own and pushing the
+   thread down every time it appears; `top` comes from JS, which is what knows
+   how much sticky bar is above it at this width. */
+.earlier-rail { position: sticky; z-index: 4; height: 0; overflow: visible;
+  display: flex; justify-content: center; pointer-events: none;
+  /* The rail is zero-height on purpose; without this the chip stretches to
+     match it and its own text spills out the bottom. */
+  align-items: flex-start; }
+.earlier-rail[hidden] { display: none; }
+.earlier-pill { pointer-events: auto; margin-top: .5rem; font: inherit;
+  font-size: .78rem; font-weight: 600; color: var(--accent); background: var(--bg-elev);
+  border: 1px solid var(--accent-soft); border-radius: 999px; padding: .3rem .75rem;
+  cursor: pointer; white-space: nowrap; box-shadow: 0 2px 10px rgba(0, 0, 0, .16); }
+.earlier-pill:hover { background: var(--accent-weak); }
+
 /* Each message is its own bordered card. Threads run long and every reply
    quotes the last one back at you, so the boundary has to be drawn hard —
    the old 8px spacer left two messages reading as one. */

@@ -127,6 +127,14 @@
       </div>
       <!-- Thread action bar — always present, acts on the newest message -->
       <div class="reader-bar" id="reader-bar"></div>
+      <!-- "There is more of this conversation above you." The pane opens on the
+           newest message, so a long thread hides its history off the top with
+           nothing to show for it. Zero-height and sticky, so the chip floats
+           over the reading rather than shoving it down when it turns up
+           mid-scroll; app.reader.js sets how far down it sits and fills it in. -->
+      <div class="earlier-rail" id="earlier-rail" hidden>
+        <button class="earlier-pill" id="earlier-pill" type="button"></button>
+      </div>
       <div class="reader-empty" id="reader-empty">
         <div class="reader-empty-glyph"></div>
         <p>No message selected</p>
