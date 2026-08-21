@@ -84,11 +84,34 @@ _DIGEST = HASHES * 4
 _UNPACK = struct.Struct(f">{HASHES}I").unpack
 _BAND_PACK = struct.Struct(f">{BAND}I").pack
 
+# How much of the body is looked at at all. MAX_WORDS below bounds what comes
+# *out* of this; without a bound on what goes in, every pass below still reads
+# the whole thing to produce those 200 words — and a mail carrying a megabyte of
+# quoted thread pays for all of it. Sixty-four kilobytes is two orders of
+# magnitude more text than 200 words of prose needs, so the window is only ever
+# reached by mail that is mostly not prose.
+MAX_CHARS = 64_000
+
 # URLs go before anything else: a tracking link is different in every copy of
 # the same newsletter, and its path segments survive word-splitting as a fistful
 # of nonsense shingles that make two identical mails look unrelated.
 _URL_RE = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
-_ADDR_RE = re.compile(r"\S+@\S+\.\w+")
+# Bounded on purpose, and the bounds are not cosmetic: the unbounded form of
+# this — `\S+@\S+\.\w+` — backtracks quadratically over any long run of
+# non-space characters that turns out *not* to be an address, which is what a
+# base64 blob in a text part is. Two hundred kilobytes of it took 104 seconds in
+# one `re.sub` call, and `re` holds the GIL for the whole of one: the server
+# stopped answering, the reminder tick stopped ticking, and the batch was
+# re-attempted from the start on every restart because it never got to commit.
+# 64 and 255 are what RFC 5321 allows a local part and a domain, so nothing that
+# is really an address is lost by refusing to look past them.
+_ADDR_RE = re.compile(r"[^\s@]{1,64}@[^\s@]{1,255}\.\w{1,24}")
+# What is left of a run that long once URLs and addresses are gone is not a
+# word: it is a base64 image, a hash, a tracking id, a signature block. Dropping
+# them keeps the fingerprint on the prose — the same thing stripping URLs does,
+# and for the same reason — and keeps the pass above linear, since no run it can
+# start on is longer than this.
+_LONG_RE = re.compile(r"\S{45,}")
 # Everything that is not a letter becomes a gap. Digits go with it — the whole
 # point is that "3 neue Angebote" and "7 neue Angebote" are the same mail — and
 # so does punctuation, which quoting and line-wrapping move around. `\W` is
@@ -101,8 +124,9 @@ def words(text: str) -> list[str]:
     """The body reduced to the word sequence the fingerprint is taken over."""
     if not text:
         return []
-    s = _URL_RE.sub(" ", text)
+    s = _URL_RE.sub(" ", text[:MAX_CHARS])
     s = _ADDR_RE.sub(" ", s)
+    s = _LONG_RE.sub(" ", s)
     s = _NOISE_RE.sub(" ", s.lower())
     return s.split()[:MAX_WORDS]
 

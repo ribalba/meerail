@@ -18,6 +18,11 @@ App.reader = (function () {
   // nothing to say so — this is what the "earlier messages" chip counts. It has
   // to be viewport history rather than the seen flag, which openThread sets on
   // the whole conversation the moment it opens.
+  //
+  // Kept across visits rather than only for the open conversation: the chip is
+  // there to point out mail you scrolled past, and one you have already read
+  // down through has nothing left to say the second time you walk in. See
+  // loadViewed().
   let viewed = new Set();
   let renderId = 0;    // which draw a body frame belongs to — see mountFrame()
   let frames = 0;      // its frames mounted but not yet measured
@@ -55,6 +60,54 @@ App.reader = (function () {
   // scroll has to be redone as each one settles — a fresh object per render, so
   // frames left over from an earlier one fail the identity check and stay put.
   let pin = null;
+
+  // Where that history lives between visits. Bounded to the conversations most
+  // recently read, so a mailbox worked through over months cannot grow this
+  // without end — falling off the list only costs you a chip you have already
+  // dismissed once.
+  const VIEWED_KEY = "meerail.reader.viewed";
+  const VIEWED_THREADS = 300;
+
+  // A conversation is its server thread id where it has one; a message that
+  // belongs to no thread stands in with its own. Both are scoped by account,
+  // which is what the ids themselves are unique within.
+  function viewedKey() {
+    const msgs = currentThread ? currentThread.messages : [];
+    if (!msgs.length) return null;
+    return currentThread.thread_id
+      ? `t${msgs[0].account_id}:${currentThread.thread_id}`
+      : `m${msgs[0].account_id}:${msgs[0].id}`;
+  }
+
+  function viewedStore() {
+    try { return JSON.parse(localStorage.getItem(VIEWED_KEY)) || {}; }
+    catch { return {}; }   // private mode, or something else wrote the key
+  }
+
+  function loadViewed() {
+    const key = viewedKey();
+    if (!key) return new Set();
+    const ids = viewedStore()[key];
+    // dataset values are strings, and JSON hands back whatever went in.
+    return new Set(Array.isArray(ids) ? ids.map(String) : []);
+  }
+
+  // Read back before every write, so a second tab reading a different
+  // conversation does not save over the history this one has been building.
+  function saveViewed() {
+    const key = viewedKey();
+    if (!key) return;
+    const store = viewedStore();
+    // Re-inserted at the end rather than updated in place: an object keeps its
+    // keys in insertion order, which makes that order the least-recently-read
+    // list to trim from the front of.
+    delete store[key];
+    store[key] = Array.from(viewed);
+    const keys = Object.keys(store);
+    for (const k of keys.slice(0, Math.max(0, keys.length - VIEWED_THREADS))) delete store[k];
+    try { localStorage.setItem(VIEWED_KEY, JSON.stringify(store)); }
+    catch { /* private mode, or the quota is up */ }
+  }
 
   // How much of the pane's top edge the sticky bars are covering. Both stick to
   // it on a narrow layout, so what anything scrolled to the top has to clear is
@@ -123,12 +176,16 @@ App.reader = (function () {
     // Any part of a message showing counts as having seen it — a long one is
     // read by scrolling through it, not by having it fit.
     let first = msgs.length;
+    let grew = false;
     msgs.forEach((row, i) => {
       const r = row.getBoundingClientRect();
       if (r.bottom <= top || r.top >= box.bottom) return;
-      viewed.add(row.dataset.mid);
+      if (!viewed.has(row.dataset.mid)) { viewed.add(row.dataset.mid); grew = true; }
       if (i < first) first = i;
     });
+    // Only on the scrolls that actually turned something up — which is at most
+    // once per message, however far the thread is scrolled back and forth.
+    if (grew) saveViewed();
     // Everything above what is on screen that has never been on screen. Scrolled
     // back down past mail you have already read, the chip stays away.
     const missed = msgs.slice(0, first).filter((r) => !viewed.has(r.dataset.mid));
@@ -1117,8 +1174,9 @@ App.reader = (function () {
     // Whole conversation open, oldest to newest — folding is something you ask
     // for per message, not a state a thread arrives in.
     collapsed = new Set();
-    // A different conversation, so what has been on screen starts over.
-    viewed = new Set();
+    // Picked up where this conversation was left, counting the visits before
+    // this one — not started over.
+    viewed = loadViewed();
     rerender(true);
     // clear() drops the ↑↓ marker along with the thread it belonged to, which
     // is right when the pane empties — but archiving from here empties it and

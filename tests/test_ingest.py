@@ -10,7 +10,10 @@ import sys
 import uuid
 import zipfile
 from datetime import datetime, timedelta, timezone
+from email.message import EmailMessage
+from email.utils import format_datetime
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
@@ -19,7 +22,7 @@ from core import ingest
 from core.config import get_settings
 from core.mail.parse import parse_email
 from conftest import status_for
-from helpers import api, api_bytes, make_message
+from helpers import api, api_bytes, build_png, make_message
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agent"))
 import sync as agent_sync
@@ -963,6 +966,38 @@ def test_inline_disposition_is_allowlisted(account):
     # executing script on our own origin.
     _, _, h = api_bytes(f"/api/attachments/{txt['id']}?inline=1")
     assert h["Content-Disposition"].startswith("attachment;")
+
+
+def test_attachment_name_outside_latin1_still_downloads(account):
+    """A name a header cannot carry is still a download, never a 500.
+
+    Real mail names files "Rechnung 1 234,00 €.png" — narrow no-break space and
+    all — and Content-Disposition is a latin-1 header, so the name has to go out
+    percent-encoded with an ASCII fallback beside it.
+    """
+    email, aid = account["email"], account["id"]
+    name = "Rechnung 1\u202f234,00\u202f\u20ac.png"
+    m = EmailMessage()
+    m["Message-ID"] = f"<u8-{uuid.uuid4().hex}@t>"
+    m["Subject"] = "Unicode attachment name"
+    m["From"] = "x@y.com"
+    m["To"] = email
+    m["Date"] = format_datetime(T0)
+    m.set_content("body")
+    m.add_attachment(build_png(), maintype="image", subtype="png", filename=name)
+    dbfixture.ingest_raw_message(email, m.as_bytes(), uid=1)
+
+    msg = _detail_by_subject(aid, "Unicode attachment name")
+    att = next(a for a in msg["attachments"] if a["filename"] == name)
+    code, body, h = api_bytes(f"/api/attachments/{att['id']}?inline=1")
+    assert code == 200
+    assert body.startswith(b"\x89PNG")
+
+    dispo = h["Content-Disposition"]
+    assert dispo.isascii()                      # what broke: it used not to be
+    assert dispo.startswith("inline;")
+    assert "filename*=UTF-8''" + quote(name, safe="") in dispo
+    assert 'filename="Rechnung 1_234,00_.png"' in dispo
 
 
 def test_all_attachments_download_as_one_zip(account):

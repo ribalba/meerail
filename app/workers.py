@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 
 from core.config import get_settings
 from core.database import SessionLocal
@@ -218,7 +219,17 @@ async def search_index_loop() -> None:
 # Cleanup panel is the only thing waiting on it and nobody is standing in front
 # of that on the first boot after an upgrade, so it gives the mailbox room.
 BODY_SIG_PAUSE = 0.5
-BODY_SIG_REPORT_EVERY = 20_000
+BODY_SIG_REPORT_EVERY = 5_000
+
+# The floor on how much of the machine this may take: after a batch, sleep at
+# least as long as the batch itself took, so the backfill never runs at more
+# than half a core however slow a batch turns out to be. Rate-limiting by a
+# fixed pause alone does not hold that — it assumes a batch is quick, and the
+# one time that assumption broke it broke completely (see the note on _ADDR_RE
+# in core/bodysig.py: one batch held the GIL for minutes and the server stopped
+# answering). Pacing off the measured cost is what makes a slow batch merely
+# slow rather than fatal.
+BODY_SIG_DUTY = 1.0
 
 
 def _body_sig_debt() -> int:
@@ -261,12 +272,14 @@ async def body_sig_loop() -> None:
     reported = 0
     while True:
         done = 0
+        started = time.monotonic()
         try:
             done = await asyncio.to_thread(_build_body_sig_batch)
         except Exception as e:  # noqa: BLE001
             # Same reasoning as the loops above: one bad batch must not end the
             # loop, and must not be silent either.
             print(f"body fingerprint backfill failed: {e!r}", flush=True)
+        spent = time.monotonic() - started
         if done:
             built += done
             if built - reported >= BODY_SIG_REPORT_EVERY:
@@ -276,7 +289,7 @@ async def body_sig_loop() -> None:
             print(f"body fingerprints: built for {built} message(s) — "
                   f"Cleanup can group by body now", flush=True)
             built = reported = owed = 0
-        await asyncio.sleep(BODY_SIG_PAUSE if done else 3600)
+        await asyncio.sleep(max(BODY_SIG_PAUSE, spent * BODY_SIG_DUTY) if done else 3600)
 
 
 # How often a snapshot is posted: the record that restates this install's whole

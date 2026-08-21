@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import re
 import zipfile
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import func, or_, select, tuple_
@@ -528,6 +529,23 @@ def _inline_safe(content_type: str) -> bool:
     return (content_type or "").split(";")[0].strip().lower() in _INLINE_SAFE
 
 
+def _disposition(dispo: str, filename: str) -> str:
+    """A Content-Disposition line for a name mail may have written in any script.
+
+    Header values go out latin-1; attachment names do not. A single narrow
+    no-break space in an invoice name — the thing a German bank puts between
+    the amount and the currency — was a 500 where a download belonged. So the
+    quoted `filename` keeps only what survives the wire and stands as the
+    fallback, while RFC 5987's `filename*` carries the real name for every
+    browser of the last decade. Quotes, backslashes and control characters go
+    with the rest: the name is sender-controlled, and a newline in a header is
+    someone else's response.
+    """
+    ascii_name = re.sub(r'[^\x20-\x7e]+', "_", filename).replace('"', "").replace("\\", "")
+    return (f'{dispo}; filename="{ascii_name.strip() or "attachment"}"; '
+            f"filename*=UTF-8''{quote(filename, safe='')}")
+
+
 @router.get("/attachments/{attachment_id}")
 def download_attachment(
     attachment_id: int, inline: bool = False, db: DBSession = Depends(get_db)
@@ -536,13 +554,18 @@ def download_attachment(
     if att is None or att.content is None:
         raise HTTPException(status_code=404, detail="Attachment not found")
     _readable(db, att.message_pk)   # nor do its files outlive the message
-    filename = (att.filename or "attachment").replace('"', "")
+    filename = att.filename or "attachment"
     dispo = "inline" if inline and _inline_safe(att.content_type) else "attachment"
+    # The stored content type came off the wire too, so it gets the same
+    # treatment: anything but a plain ASCII one is not worth a broken response.
+    media = att.content_type or "application/octet-stream"
+    if not media.isascii() or not media.isprintable():
+        media = "application/octet-stream"
     return Response(
         content=att.content,
-        media_type=att.content_type or "application/octet-stream",
+        media_type=media,
         headers={
-            "Content-Disposition": f'{dispo}; filename="{filename}"',
+            "Content-Disposition": _disposition(dispo, filename),
             # Belt and braces around the allowlist: never let the browser sniff
             # its way to a different type, and neuter scripts if one slips past.
             "X-Content-Type-Options": "nosniff",

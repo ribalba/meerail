@@ -565,3 +565,37 @@ def test_fingerprint_declines_a_body_too_short_to_mean_anything():
 def test_fingerprint_is_stable_across_calls(changed):
     text = BODY.format(status="ok", n=3) + " " + changed
     assert bodysig.fingerprint(text) == bodysig.fingerprint(text)
+
+
+def test_fingerprint_survives_a_body_that_is_mostly_one_long_blob():
+    """A base64 run in a text part must cost milliseconds, not minutes.
+
+    The regression this pins: `_ADDR_RE` used to be `\\S+@\\S+\\.\\w+`, which
+    backtracks quadratically over a long run of non-space characters that turns
+    out not to be an address. Two hundred kilobytes of base64 took 104 seconds
+    inside one `re.sub`, and `re` holds the GIL throughout — so the server
+    stopped answering HTTP, the batch never reached its commit, and every
+    restart began the same batch again. The wall-clock assertion is the point of
+    the test; the margin is five thousand times the fixed cost, so it says
+    "quadratic again" rather than "the machine is busy".
+    """
+    import time as _time
+
+    blob = "ABCDEFghijkl0123456789+/" * 9000  # ~216 KB, no whitespace, no '@'
+    prose = BODY.format(status="ok", n=4)
+    started = _time.monotonic()
+    sig = bodysig.fingerprint(prose + "\n" + blob)
+    assert _time.monotonic() - started < 2.0
+
+    # And the blob is dropped rather than shingled: what is left is the prose,
+    # so the mail still groups with the same template sent without one.
+    assert sig == bodysig.fingerprint(prose) != ""
+
+
+def test_fingerprint_reads_only_the_front_of_a_very_long_body():
+    """MAX_CHARS bounds the work; MAX_WORDS already bounded the answer."""
+    prose = BODY.format(status="ok", n=4)
+    quoted = " ".join(f"line {i} of a very long quoted thread" for i in range(20_000))
+    body = prose + " " + quoted
+    assert len(body) > bodysig.MAX_CHARS
+    assert bodysig.fingerprint(body) == bodysig.fingerprint(body[:bodysig.MAX_CHARS]) != ""
