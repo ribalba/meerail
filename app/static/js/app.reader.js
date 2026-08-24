@@ -1231,6 +1231,32 @@ App.reader = (function () {
     return true;
   }
 
+  // Jumps to the header of the next or previous message in the conversation.
+  // The arrows and Space move by the screenful, which in a long thread is a lot
+  // of presses between one message and the next — this is the coarse gear.
+  //
+  // `held` is the key repeating: the same reasoning as scrollBy(), where a
+  // queue of smooth animations falls behind a held key, so only single presses
+  // animate.
+  function scrollMsg(dir, held) {
+    const p = pane();
+    if (!p) return false;
+    // The line scrollToMsg() parks a header on: the top of the pane, clear of
+    // the sticky bars. A message sitting within a few pixels of it is the one
+    // being read rather than one to jump to, which is what keeps a press going
+    // somewhere instead of re-landing on the message already at the top.
+    const line = p.getBoundingClientRect().top + stuckTop() + 10;
+    const msgs = rows();
+    const to = dir > 0
+      ? msgs.find((el) => el.getBoundingClientRect().top > line + 4)
+      : msgs.filter((el) => el.getBoundingClientRect().top < line - 4).pop();
+    // Past the last header there is still the tail of the last message to read,
+    // and above the first one the top of the thread, so the key never dies in
+    // the reader — it runs out of messages into the ends of the conversation.
+    if (to) scrollToMsg(to, !held); else scrollEnd(dir);
+    return true;
+  }
+
   // Delegated once, so redrawing the bar never has to re-bind it.
   document.getElementById("reader-bar").addEventListener("click", (e) => {
     const btn = e.target.closest("[data-act]");
@@ -1262,7 +1288,7 @@ App.reader = (function () {
   // `redraw` is exported so App.tasks can put the Add Task buttons up (or take
   // them down) the moment the Meerato URL changes, rather than at the next
   // thread open — both the bar and the per-message toolbars carry one.
-  return { openThread, clear, action, scrollBy, scrollEnd, setKeyFocus, renderEmpty,
+  return { openThread, clear, action, scrollBy, scrollEnd, scrollMsg, setKeyFocus, renderEmpty,
     redraw: () => rerender(), isOpen: () => !!currentThread,
     // How many messages the open conversation holds — App.ai says so before it
     // sends any of them to a provider.

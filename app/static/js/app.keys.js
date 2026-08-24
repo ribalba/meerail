@@ -118,6 +118,21 @@ App.keys = (function () {
           run: () => App.reader.scrollEnd(1) },
         { keys: ["PageUp"], show: "PgUp", label: "Top of thread",
           run: () => App.reader.scrollEnd(-1) },
+        // A whole message per press. PgUp/PgDn jump to the ends of a thread and
+        // Space pages through it; in a conversation of thirty replies neither
+        // is a way to get to the next message, which is what these two are for.
+        { keys: ["n"], show: "n", label: "Next message in thread",
+          run: (e) => App.reader.scrollMsg(1, e.repeat) },
+        { keys: ["p"], show: "p", label: "Previous message in thread",
+          run: (e) => App.reader.scrollMsg(-1, e.repeat) },
+        // Display-only, and handled ahead of the table in handle() like the
+        // other modified keys: the same jump for hands that reach for a paging
+        // key. Alt rather than Ctrl because Chrome and Firefox keep
+        // Ctrl+PageUp/PageDown for switching tabs and never hand it to a page.
+        // "Alt" without the ⌥ the other modified rows carry, because the pair
+        // of glyphs pushes the label past the width of the box — and Apple
+        // prints "alt" on that key next to the symbol anyway.
+        { show: "Alt PgDn/PgUp", label: "Jump one message" },
         { keys: [" "], show: "Space", label: "Scroll message",
           run: (e) => App.reader.scrollBy(e.shiftKey ? -1 : 1) },
         { chord: ["g", "i"], show: "g i", label: "Go to Inbox",
@@ -298,6 +313,13 @@ App.keys = (function () {
       if (isTyping(e.target) || isTyping(document.activeElement)) return;
       if (!App.bulk.selectAllLoaded()) return;         // empty list — let the browser have it
       e.preventDefault();
+      return;
+    }
+
+    // Alt+PageDown/PageUp is n/p for people who page rather than type letters.
+    // Up here because a modified key never reaches the table below.
+    if (e.altKey && !mod && (e.key === "PageDown" || e.key === "PageUp")) {
+      if (App.reader.scrollMsg(e.key === "PageDown" ? 1 : -1, e.repeat)) e.preventDefault();
       return;
     }
 
