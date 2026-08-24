@@ -524,6 +524,78 @@ silently undid. Delete the key again and Settings takes it back, keeping the val
 last gave it. `footer = ""` is an answer, not an omission: it means this account has no
 footer. Handy when accounts are provisioned from a file rather than set up by hand.
 
+### Removing an account
+
+There is no button for this, deliberately: it is the one operation that takes an account's
+mail away wholesale, and nothing puts it back. It also takes more than one step, because two
+things own an account. `meerail.toml` decides that it exists — the agent inserts the row on
+its first pass, keyed on the address — and the database holds everything it has synced since.
+Doing one without the other does not work: delete the rows while the file still names the
+account and the agent recreates it on the next pass, and take it out of the file alone and
+its mail sits in the app forever with nothing keeping it up to date.
+
+**1. Let it finish.** Everything below is cascaded away by the database, queued work
+included: a message still in the Outbox and a move that has not reached the server yet go
+with the account, unsent and unapplied. So check the Outbox is empty and give the agent a
+pass to drain its queue — the agent-status panel counts what is still waiting, above the
+per-account cards. This is the only step that is about your mail rather than about meerail.
+
+**2. Stop everything.**
+
+```bash
+./meerail.sh stop            # from a clone: docker compose stop
+```
+
+The agent is the thing that would put the account back, so it has to be down while the file
+is edited. If it runs natively next to Bridge rather than in a container, stop *that* — the
+script only knows about containers.
+
+**3. Take the account out of the config.**
+
+```bash
+./meerail.sh config          # or open meerail.toml in your editor
+```
+
+Delete that address's whole `[[agent.account]]` block. Nothing else in the file names it.
+
+**4. Start again.**
+
+```bash
+./meerail.sh start
+```
+
+The agent comes up without the account. The app still shows it, because its mail is still in
+the database — which is the last step.
+
+**5. Delete the rows.**
+
+```bash
+./meerail.sh psql            # from a clone: docker compose exec db psql -U meerail -d meerail
+```
+
+```sql
+SELECT id, email, label FROM accounts ORDER BY id;
+DELETE FROM accounts WHERE email = 'you@example.com';
+```
+
+One statement is the whole job. Every table hanging off an account is `ON DELETE CASCADE`,
+so the row takes its mailboxes, messages, threads, reminders, queued actions and outbox
+entries with it, and those messages take their recipients, attachments and folder placements
+— there is nothing left over to find later. On a large account it takes a while, and it is
+not undoable: `./meerail.sh backup` first if you might want to change your mind.
+`DELETE /api/accounts/{id}` is the same delete from the API side.
+
+Two things afterwards. **Contacts outlive it** — the autocomplete index is keyed on address
+rather than account and rebuilt every six hours, so addresses you only ever saw on that
+account keep being offered until it is; restarting the server rebuilds it at once. And **the
+volume does not shrink**: Postgres reuses the freed space for new mail rather than handing it
+back to the disk, so a [`backup` and `restore`](#backing-up-and-restoring) pair is what
+returns it if you need the room.
+
+An **imported** account — one from `tools/import_mbox.py`, with no mail server behind it —
+has no config entry to remove, so steps 2 to 4 do not apply and step 5 is the whole
+procedure. Its mail is not a copy of anything, though, so that delete takes the only copy.
+
 ### Upgrading from the two-file layout
 
 Before this, settings lived in `.env` *and* `agent/config.toml`, with `STORE_RAW_MIME` and
@@ -671,7 +743,7 @@ removes one because a connection failed.
 | A folder | It has been gone from the server's `LIST` for an hour | Its messages go with it, unless they are also filed elsewhere. Never on an empty `LIST`, and never on one absence: a Bridge that is still loading answers with part of the mailbox, so a folder that disappears is marked and kept — with all its mail — until it stays gone. Never for a folder meerail made itself — an imported account's folders, and any you add to one — which is absent from `LIST` by definition. |
 | A message no folder holds any more | At the end of a completed pass, hours after the last placement went | Almost always a reused UID after a `UIDVALIDITY` reset: the walk binds the number to the message that has it now, and the one it used to mean is left with no folder, invisible and still on disk. Never asked mid-pass, when a message is legitimately between folders, and never about one a queued action still names. |
 | Bodies and attachments of old mail | `content_window_months` is set | Headers stay; the mail still lists, threads and searches. Off by default. Age is counted from when the mail *arrived* (the server's `INTERNALDATE`), not from its `Date:` header — a header is written by the sender, and a window read from one could be aimed: date a message 1998 and its body would be stripped on the pass that stored it. See [The content window](#the-content-window). |
-| Everything for an account | `DELETE /api/accounts/{id}` | The one command that removes an account's mail wholesale. No button in the UI calls it. |
+| Everything for an account | `DELETE /api/accounts/{id}`, or the `DELETE` in [Removing an account](#removing-an-account) | The one command that removes an account's mail wholesale — the mailboxes, the messages, the threads, the reminders and anything still queued. No button in the UI calls it. |
 
 Being offline is never a reason to delete anything, and the agent is written for machines
 that are: a laptop that is opened twice a week, a Bridge that has not signed in yet, a mail
