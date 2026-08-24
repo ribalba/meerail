@@ -85,8 +85,8 @@ services:
     # Tesseract, which is what OCRs scanned PDFs and image attachments; it is a
     # much larger image than plain `apache/tika`. Drop back to `:latest` to skip
     # OCR — extraction still works, images just come back empty.
-    # apache/tika:latest-full plus the JPEG2000 ImageIO jars — see tika/Dockerfile
-    # for why the stock image cannot ship them.
+    # apache/tika:4.0.0-full plus the JPEG2000 ImageIO jars — see tika/Dockerfile
+    # for why the stock image cannot ship them, and why the version is pinned.
     image: meerail-tika
     build: ./tika
     networks: [meerail]
@@ -96,17 +96,18 @@ services:
       # who can reach it and has no auth of its own, so the 127.0.0.1 prefix
       # matters here even more than it does for Postgres.
       - "127.0.0.1:9998:9998"
-    # Single-process mode, deliberately. Tika's default is a watchdog parent
-    # plus a forked child, so that a parse which exhausts the heap kills only
-    # the child — except that the service does not come back from it: the child
-    # is restarted, and every request afterwards is answered 503, for every
-    # file, until somebody restarts the container by hand. Reproduced with a
-    # 1.7MB PDF holding one 9000x12000 scan, which is enough to exhaust the heap
-    # while PDFBox renders the page for OCR. In one process that OOM ends the
-    # process instead, and `restart` below has Tika serving again about two
-    # seconds later. -XX:+ExitOnOutOfMemoryError is what makes that prompt: the
-    # JVM leaves rather than limping on with a half-collected heap.
-    command: ["-h", "0.0.0.0", "-noFork"]
+    # The host to bind, and nothing else. This used to carry `-noFork` to keep
+    # Tika in one process, because the 3.x watchdog-plus-child arrangement did
+    # not come back from a heap exhaustion: the child was restarted and every
+    # request afterwards was answered 503, for every file, until somebody
+    # restarted the container by hand. 4.x parses in forked JVMs always — the
+    # flag is gone, and a compose file still passing it stops the container at
+    # startup with `Unrecognized option: -noFork` — and so is the failure. A
+    # parse that exhausts the heap now ends that one fork, that one document is
+    # answered 503, and the next request is served normally. The pool size and
+    # the fork's heap are set in the image's tika-config.json; tika/README.md
+    # says why they are what they are.
+    command: ["-h", "0.0.0.0"]
     environment:
       # This image's entrypoint is `exec java -cp ... ` with no $JAVA_OPTS, so
       # that variable is silently ignored here. JAVA_TOOL_OPTIONS is read by the
@@ -117,7 +118,14 @@ services:
       # hitting the ceiling gets the process OOM-killed rather than triggering a
       # GC. MaxRAMPercentage keeps the heap strictly under the limit below, so
       # Tika collects instead of dying.
-      JAVA_TOOL_OPTIONS: "-XX:MaxRAMPercentage=60 -XX:+ExitOnOutOfMemoryError"
+      #
+      # It applies to every JVM in the container, which since 4.x means the
+      # forked parsers as well as this one — hence 15% rather than the 60% it
+      # was: this process routes requests and spools oversized bodies to disk,
+      # it does not parse, and the fork that does takes 60% of the limit below
+      # from tika-config.json, where being on the fork's own command line makes
+      # it win over the percentage here. Both heaps have to fit one container.
+      JAVA_TOOL_OPTIONS: "-XX:MaxRAMPercentage=15 -XX:+ExitOnOutOfMemoryError"
     # 3GB total: ~1.8GB heap, the rest for JVM metaspace/threads and Tesseract,
     # which does its OCR work in native memory outside the heap entirely.
     deploy:

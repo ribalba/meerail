@@ -64,14 +64,17 @@ UNPROCESSABLE = _Unprocessable()
 
 
 class _Crashed:
-    """Singleton marker: the JVM went away with this payload inside it.
+    """Singleton marker: a JVM went away with this payload inside it.
 
-    Distinct from ``None``: nothing answered, but the connection was accepted
-    and the request was in flight, and Tika does not drop requests it is merely
-    busy with. What does drop them is the process dying — which for a payload
-    this client chose is the payload's doing, not the service's. See
-    core/ingest.py, which waits for Tika to come back and then burns the file
-    rather than handing it the same one forever.
+    Two shapes reach here. Tika answers ``503 {"status": "UNSPECIFIED_CRASH"}``
+    when the forked parser holding this document died without saying why; and
+    the connection simply closes when it is the server process itself that went,
+    which nothing but that can cause once the request is in flight.
+
+    Distinct from ``None`` in both cases: something did happen to this payload,
+    and it may or may not have been this payload's doing. See core/ingest.py,
+    which waits for Tika to come back and hands it the same file exactly once
+    more — twice is what separates a poison pill from a bystander.
     """
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid only
@@ -98,8 +101,12 @@ TIMEOUT = _Timeout()
 
 # Leading bytes that identify the raster formats we send for OCR. Mail clients
 # mislabel these constantly — Outlook in particular emits JPEG bodies under
-# `image/png` filenames — and Tika trusts the Content-Type header we supply, so
-# a wrong label makes it hand a JPEG to the PNG reader and throw.
+# `image/png` filenames. Tika 3 trusted the Content-Type header we supplied and
+# handed a mislabelled JPEG to the PNG reader, which threw; Tika 4 treats it as
+# a hint and keeps it only where it agrees with what the bytes say, so a wrong
+# label now costs nothing. Still sniffed, because a *right* label is what
+# refines detection within a format family, and being honest about the type is
+# cheap.
 _MAGIC = (
     (b"\x89PNG\r\n\x1a\n", "image/png"),
     (b"\xff\xd8\xff", "image/jpeg"),
@@ -111,67 +118,37 @@ _MAGIC = (
 )
 
 # 4xx means Tika understood the request, so retrying changes nothing — except
-# for these two, which are back-pressure and genuinely worth another pass.
+# for these two, which are back-pressure and genuinely worth another pass. 429
+# is what a busy server says now that parsing runs in a fixed pool of forked
+# JVMs: nothing failed, the pool was full, and the same bytes succeed later.
 _TRANSIENT_STATUSES = {408, 429}
 
-# What a heap exhaustion looks like from this side: a 500 whose body carries the
-# JVM's own words for it. Worth matching on, because it is the one 5xx that is a
-# property of the file rather than of the service — see extract_text.
-_OOM_MARKERS = ("OutOfMemoryError", "Java heap space")
-
-# How long Tika may spend inside one OCR call, sent per request so it is derived
-# from the same number as the HTTP timeout below rather than configured next to
-# it and left to drift.
+# What a failed parse looks like from this side: a JSON body naming the outcome,
+# where 3.x sent the plain text "Parse failed: TIMEOUT". The status is what
+# separates a file that cannot be read from a service having a bad minute, so it
+# is read rather than guessed at from the HTTP code.
 #
-# Without it the two budgets are independent, and whichever is larger is time
-# spent on an answer the other side will not wait for. Tesseract's default is
-# 120s per image; when we listened for 60 the container spent a further minute
-# OCRing an attachment whose row had already been burned, which on a backlog of
-# oversized scans is a core pinned permanently on work nobody will read. Tying
-# Tika's budget to ours ends that: the parse stops while we are still listening,
-# so the file is judged once, on the budget it was given. How that stop reaches
-# us is its own question — see _TASK_TIMEOUT_KILL_WINDOW.
+# OOM and TIMEOUT are properties of the payload. Heap exhaustion is entirely
+# one: rendering a PDF page for OCR allocates from the *decoded* size of the
+# images inside it, so a 2MB PDF holding one 9000x12000 scan takes ~300MB every
+# time it is parsed, and every later pass exhausts the same heap. A document
+# that ran out of its budget runs out of it again. Both are burned like any
+# other file Tika cannot read.
 #
-# The bounds are the server's, not ours: tika-server refuses anything under its
-# minimumTimeoutMillis with a 400 and anything over its taskTimeoutMillis with a
-# 500, and this client reads those as "burn the file" and "Tika is broken"
-# respectively. Both would be wrong, and both would be caused by us, so the
-# value is clamped rather than trusted.
-_TASK_TIMEOUT_HEADER = "X-Tika-Timeout-Millis"
-_MIN_TASK_TIMEOUT_MS = 30_000
-_MAX_TASK_TIMEOUT_MS = 300_000
-# Enough of a gap that Tika's answer arrives while we are still listening.
-_TASK_TIMEOUT_MARGIN_MS = 5_000
-
-# How the budget above is actually enforced, which is not by an HTTP status.
-# tika-server hands the parse to a forked JVM and watches the clock; when the
-# budget runs out its watchdog *kills that process* ("Shutting down forked
-# process with status: TIMEOUT") and restarts it a second later. Sometimes the
-# 422 makes it onto the wire first and sometimes the socket simply closes —
-# measured on 3.3.1, both happen for the same file.
-#
-# The closed socket is indistinguishable from the JVM dying under a poison pill,
-# and telling them apart matters: CRASHED hands the same payload back for a
-# second go, which here means a second full budget burned and a second forked
-# process killed to reach the verdict the first one already gave. What separates
-# them is the clock. The watchdog fires at the budget and the kill takes
-# milliseconds, so a disconnect in the last tenth of the budget is our own
-# deadline coming back to us, and the file is finished — while a request cut
-# down as a bystander of *another* file's kill is dropped at an arbitrary point
-# in its own budget, which is the case CRASHED was written for and still gets.
-_TASK_TIMEOUT_KILL_WINDOW = 0.9
+# UNSPECIFIED_CRASH is not: the fork died without attributing it, which happens
+# to whichever document was inside it at the time. That one gets the single
+# retry CRASHED buys — see core/ingest.py.
+_FATAL_PIPES_STATUSES = {"OOM", "TIMEOUT"}
+_CRASH_PIPES_STATUSES = {"UNSPECIFIED_CRASH"}
 
 
-def _task_timeout_ms(timeout: float) -> int:
-    """Tika's per-OCR budget for a request this client will abandon at ``timeout``.
-
-    Note what it is *not*: a cap on the whole parse. Tika applies it to each
-    Tesseract call separately, so a fifty-page scan still gets fifty budgets and
-    finishes — the HTTP timeout stays the limit on how long a single page may go
-    quiet, which is what it was already.
-    """
-    wanted = int(timeout * 1000) - _TASK_TIMEOUT_MARGIN_MS
-    return max(_MIN_TASK_TIMEOUT_MS, min(_MAX_TASK_TIMEOUT_MS, wanted))
+def _pipes_status(resp) -> str:
+    """The ``status`` tika-server gives for a failed parse, or "" if it gave none."""
+    try:
+        body = resp.json()
+    except Exception:
+        return ""
+    return body.get("status", "") if isinstance(body, dict) else ""
 
 
 def should_extract(content_type: str, filename: str = "") -> bool:
@@ -238,42 +215,53 @@ def _effective_type(payload: bytes, content_type: str) -> str | None:
 # own (see agent/main.py, where the indexer is not what stamps the agent's
 # heartbeat), while an attachment burned for want of time is not read again.
 #
-# 300s is also the ceiling: tika-server refuses a larger per-task budget than
-# its own taskTimeoutMillis, which defaults to exactly this. See _task_timeout_ms.
+# It is also the outer bound on a budget the server keeps for itself. Tika 4
+# takes no per-request timeout — the header 3.x read for that is silently
+# ignored — so the number that actually stops a runaway parse is
+# totalTaskTimeoutMillis in the image's tika-config.json, set to 240s so that
+# Tika gives up, and answers, inside the window this client is still listening
+# in. The 60s of daylight between them is the wind-down that turns an exhausted
+# budget into a truncated success rather than a hang.
 _EXTRACT_TIMEOUT = 300.0
 
 
 def extract_text(payload: bytes, content_type: str, timeout: float = _EXTRACT_TIMEOUT):
     """Return extracted text, or a marker describing how the attempt failed.
 
-    Three outcomes, which callers must keep apart:
+    Four outcomes, which callers must keep apart:
 
     * ``str`` — success. An empty string means a document with no text in it.
-    * ``None`` — Tika is unreachable, timed out, or returned 5xx. Temporary;
-      the attachment should stay queued and be retried on a later pass.
-    * ``UNPROCESSABLE`` — Tika rejected the bytes (4xx), or its watchdog killed
-      the parse at the budget we set. Permanent; requeueing only blocks the
-      queue behind a file that will never extract.
+      A parse that ran out of its budget or threw part-way lands here too, with
+      whatever had been extracted before it stopped.
+    * ``None`` — Tika is unreachable, or busy, or broken in a way that is not
+      about this file. Temporary; the attachment should stay queued and be
+      retried on a later pass.
+    * ``UNPROCESSABLE`` — Tika read the bytes and got nowhere: a rejected
+      request, a parse that yielded nothing, a heap or a budget this document
+      exhausts every time. Permanent; requeueing only blocks the queue behind a
+      file that will never extract.
+    * ``CRASHED`` — the parse took a JVM with it. Worth exactly one more go;
+      see core/ingest.py.
     * ``TIMEOUT`` — Tika took the bytes and did not answer within ``timeout``.
       Attributable to this payload rather than the service, so the caller must
       not treat it as "Tika is down" and stop draining.
 
-    ``timeout`` bounds Tika's own work as well as our wait for it — see
-    _task_timeout_ms — so an OCR that cannot finish in the budget comes back as
-    a refusal rather than as silence we give up on.
+    ``timeout`` is this client's patience only. The budget Tika parses under is
+    its own, set in tika-config.json and deliberately shorter — see
+    _EXTRACT_TIMEOUT — so a parse that cannot finish comes back as an answer
+    rather than as silence we give up on.
     """
     if not payload:
         return ""
-    url = settings.tika_url.rstrip("/") + "/tika"
-    task_timeout_ms = _task_timeout_ms(timeout)
-    headers = {
-        "Accept": "text/plain",
-        _TASK_TIMEOUT_HEADER: str(task_timeout_ms),
-    }
+    # /tika/text, not /tika: 4.x routes the output format by path and the bare
+    # endpoint now returns Markdown, headings and bullets and all, whatever the
+    # Accept header says. Indexing that would put `#` and `-` into the search
+    # text and the document's title at the top of every body.
+    url = settings.tika_url.rstrip("/") + "/tika/text"
+    headers = {}
     effective = _effective_type(payload, content_type)
     if effective:
         headers["Content-Type"] = effective
-    started = time.monotonic()
     try:
         resp = httpx.put(url, content=payload, headers=headers, timeout=timeout)
     except httpx.TimeoutException:
@@ -283,25 +271,29 @@ def extract_text(payload: bytes, content_type: str, timeout: float = _EXTRACT_TI
         # what is wrong. Temporary, like the None below.
         return None
     except httpx.HTTPError:
-        # Connected, sent, and then the far end vanished — either the watchdog
-        # enforcing the budget we asked for, or a JVM that fell over. See
-        # _TASK_TIMEOUT_KILL_WINDOW for why the clock is what tells them apart.
-        spent_ms = (time.monotonic() - started) * 1000
-        if spent_ms >= task_timeout_ms * _TASK_TIMEOUT_KILL_WINDOW:
-            return UNPROCESSABLE
+        # Connected, sent, and then the far end vanished. A forked parser dying
+        # no longer looks like this — the server outlives it and says so in a
+        # 503 — so what is left is the server process itself going, with this
+        # request inside it.
         return CRASHED
     except Exception:
         return None
+    if resp.status_code == 422:
+        # A container-level exception, with whatever was extracted before it as
+        # the body: a PDF that turned out to be truncated after page three, an
+        # image whose bytes stop half way. Keeping the partial text is the whole
+        # point of Tika answering this way rather than with an error, and an
+        # empty one says it got nothing at all, which is a file to burn.
+        text = strip_nuls(resp.text).strip()
+        return text if text else UNPROCESSABLE
     if resp.status_code >= 500:
-        # A heap exhaustion is a 500, and it is entirely a property of this
-        # file: rendering a PDF page for OCR allocates from the *decoded* size
-        # of the images inside it, so a 2MB PDF holding one 9000x12000 scan
-        # takes ~300MB every time it is parsed. Handing it back to Tika only
-        # kills Tika again — and this server does not recover from that, it
-        # answers 503 to everything until the container is restarted. So it is
-        # burned like any other file Tika cannot read.
-        if any(m in (resp.text or "") for m in _OOM_MARKERS):
+        status = _pipes_status(resp)
+        if status in _FATAL_PIPES_STATUSES:
             return UNPROCESSABLE
+        if status in _CRASH_PIPES_STATUSES:
+            return CRASHED
+        # Anything else 5xx is the service, not the file — a fork that could not
+        # start, a misconfiguration, a restart mid-request.
         return None
     if resp.status_code in _TRANSIENT_STATUSES:
         return None

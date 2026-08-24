@@ -1,0 +1,31 @@
+{
+  "server": {},
+  "parsers": [
+    {
+      "pdf-parser": {
+        "ocr": {
+          "dpi": 200,
+          "strategyAuto": {
+            "unmappedUnicodeCharsPerPage": 0.5,
+            "totalCharsPerPage": 10
+          }
+        }
+      }
+    },
+    {
+      "default-parser": {}
+    }
+  ],
+  "parse-context": {
+    "timeout-limits": {
+      "totalTaskTimeoutMillis": 240000
+    }
+  },
+  "pipes": {
+    "numClients": 1,
+    "forkedJvmArgs": [
+      "-XX:MaxRAMPercentage=60",
+      "-XX:-ExitOnOutOfMemoryError"
+    ]
+  }
+}

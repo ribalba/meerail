@@ -29,9 +29,12 @@ make on shared or untrusted infrastructure.
 | **A wildcard domain** | Or at least one A record pointing at the Coolify host, for the server's hostname. |
 | **SSH to the host** | Non-negotiable: logging Bridge into Proton is interactive and Coolify has no way to drive it. |
 
-Tika's `latest-full` image bundles Tesseract for OCR and is a multi-GB pull. If the
-host is disk-tight, edit the `tika` service to `image: apache/tika:latest` and drop
-the `build:` line — text extraction still works, images just come back empty.
+Tika's `-full` image bundles Tesseract for OCR and is a multi-GB pull. If the
+host is disk-tight, edit the `tika` service to `image: apache/tika:4.0.0` and drop
+the `build:` line — text extraction still works, images just come back empty. Note
+that the stock image also drops the settings meerail builds in (tika/README.md):
+notably the parse budget and the size of Tika's forked-parser pool, which it
+otherwise derives from the host's core count regardless of the memory limit.
 
 One thing to know before you start: **plain `docker compose` rejects this file.**
 The agent's config mount uses Coolify's `content:` extension, which is not a
@@ -212,8 +215,13 @@ plaintext on the host) and does not block anything.
 
 The limits in the compose file assume ~8 GB. On 4 GB, in this order:
 
-1. `tika` → `image: apache/tika:latest`, drop `build:`, limit `1g`. Loses OCR of
-   scanned PDFs and images; ordinary text extraction is unaffected.
+1. `tika` → `image: apache/tika:4.0.0`, drop `build:`, limit `1g`. Loses OCR of
+   scanned PDFs and images; ordinary text extraction is unaffected. It also
+   loses the config the built image carries, and on a many-core host Tika then
+   starts a forked parser per pair of cores and sizes each one as a share of
+   memory it does not know is capped at 1g — so if this is the step you take,
+   raise the limit rather than trusting it. Dropping `build:` is the saving
+   worth having here; the 1g is not.
 2. `agent` → `batch_size = 25` in the Storages file, limit `1g`. The peak is one batch
    of complete raw MIME messages held in memory at once, so this scales roughly
    linearly and costs only extra round trips.

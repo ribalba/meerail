@@ -1040,10 +1040,11 @@ def _extract_one(content, content_type) -> tuple[str | None, str]:
     if isinstance(body, str):
         return body, "keep"
     if body is tika.UNPROCESSABLE:
-        # Tika read the bytes and refused them — a truncated or mislabelled
-        # file, or one that exhausted its heap. Retrying is guaranteed to fail
-        # again, and leaving it pending parks it at the head of every future
-        # batch and stalls the whole queue behind it, so burn it and keep going.
+        # Tika read the bytes and got nothing out of them — a truncated or
+        # mislabelled file, or one that exhausts the heap or the parse budget
+        # every time. Retrying is guaranteed to fail again, and leaving it
+        # pending parks it at the head of every future batch and stalls the
+        # whole queue behind it, so burn it and keep going.
         return None, "reject"
     if body is tika.TIMEOUT:
         # Tika took the bytes and never came back. Ask whether the service is
@@ -1053,12 +1054,14 @@ def _extract_one(content, content_type) -> tuple[str | None, str]:
         # fault, so leave the queue alone and let a later pass retry it.
         return (None, "reject") if tika.health() else (None, "stop")
     if body is tika.CRASHED:
-        # The service died with this attachment inside it. Wait for it to come
-        # back — under a restart policy that is seconds — and then hand it the
-        # same file once more. Twice is what tells a poison pill from a
-        # bystander: a drain running alongside another one loses its in-flight
-        # request too when the JVM goes, and that payload did nothing wrong,
-        # while a file that exhausts the heap does it again on the way back.
+        # A JVM died with this attachment inside it: the forked parser, which
+        # Tika replaces itself and reports, or the server process, which the
+        # restart policy brings back in seconds. Wait for whichever it was to be
+        # answering again, then hand it the same file once more. Twice is what
+        # tells a poison pill from a bystander: a drain running alongside
+        # another one loses its in-flight request too when a fork goes, and that
+        # payload did nothing wrong, while a file that exhausts the heap does it
+        # again on the way back.
         if not tika.wait_for_health():
             return None, "stop"
         second = tika.extract_text(content or b"", content_type)

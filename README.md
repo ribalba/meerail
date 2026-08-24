@@ -77,8 +77,8 @@ that shaped the architecture.
 | **Disk** | Sized to your mailbox. Raw MIME plus attachment bytes plus the trigram index runs to tens of GB for a large account — [the content window](#the-content-window) and `agent.store_raw_mime` are the two knobs that bound it. |
 | **Mail access** | Proton Mail Bridge running and unlocked, **or** any IMAP+SMTP account. Gmail needs 2-Step Verification, an App Password and IMAP enabled — your normal password will not work. |
 
-Tika's `latest-full` image bundles Tesseract and is a multi-GB pull; it is what OCRs
-scanned PDFs and image attachments. Switch to `apache/tika:latest` in
+Tika's `-full` image bundles Tesseract and is a multi-GB pull; it is what OCRs
+scanned PDFs and image attachments. Switch to `apache/tika:4.0.0` in
 [`docker-compose.yml`](docker-compose.yml) if you want a much smaller image and can live
 without OCR — text extraction still works, images just come back empty.
 
