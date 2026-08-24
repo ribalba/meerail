@@ -18,6 +18,7 @@ from core.mail.parse import html_to_text
 from .. import reminders as reminders_core, searchquery
 from ..deps import require_ui_auth
 from ..mail.render import sanitize_html
+from .mailboxes import ROLE_ORDER
 from core.models import (
     Account, Attachment, Mailbox, Message, MessageLocation, Recipient, Reminder, Setting,
     still_filed,
@@ -60,6 +61,26 @@ def _readable(db: DBSession, message_id: int) -> Message:
     if placed is None:
         raise HTTPException(status_code=404, detail="Message not found")
     return msg
+
+
+def folders_of(placements) -> list[dict]:
+    """Where a message is filed, from ``(mailbox id, role, display name)`` triples.
+
+    The chips the list and the reader draw over a message: which folder it is
+    actually in, which is the one thing neither a search result nor a
+    conversation half-deleted from can otherwise say.
+
+    Deduped by folder — a label server can file the same message under one
+    folder twice, with two UIDs — and ordered the way the sidebar orders its
+    folders, so Inbox leads and a custom folder trails wherever the message
+    turns up. The leaf name only: the full path is the browser's to add, out of
+    the folder tree it already holds (see App.folderChips).
+    """
+    seen: dict[int, dict] = {}
+    for mailbox_id, role, name in placements:
+        seen[mailbox_id] = {"mailbox_id": mailbox_id, "role": role, "name": name}
+    return sorted(seen.values(),
+                  key=lambda f: (ROLE_ORDER.get(f["role"], 8), f["name"].lower()))
 
 
 def _thread_counts(db: DBSession, keys: set[tuple[int, str]]) -> dict[tuple[int, str], int]:
@@ -320,10 +341,14 @@ def _message_detail(db: DBSession, msg: Message, load_remote: bool,
         "has_source": has_source,
         "seen": any(l.seen for l in locs), "flagged": any(l.flagged for l in locs),
         "answered": any(l.answered for l in locs),
-        "locations": [
-            {"mailbox_id": l.mailbox_id, "role": db.get(Mailbox, l.mailbox_id).role}
-            for l in locs
-        ],
+        # Named as well as identified: the reader draws the folder beside the
+        # date, and the browser's copy of the folder tree can be a sync pass
+        # behind — a message filed into a folder made a minute ago must still
+        # say where it is.
+        "locations": folders_of(
+            (mb.id, mb.role, mb.display_name)
+            for mb in (db.get(Mailbox, l.mailbox_id) for l in locs)
+        ),
         "attachments": [
             {"id": a.id, "filename": a.filename, "content_type": a.content_type,
              "size": a.size_bytes, "is_inline": a.is_inline, "stored": a.stored,

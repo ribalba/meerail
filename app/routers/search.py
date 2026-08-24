@@ -38,7 +38,7 @@ from sqlalchemy.orm import Session as DBSession
 from core import bodysig
 from core.config import get_settings
 from core.database import get_db
-from .messages import _not_deleted
+from .messages import _not_deleted, folders_of
 from .. import searchquery
 from ..deps import require_ui_auth
 from core.models import Account, Mailbox, Message, MessageLocation, Recipient, utcnow
@@ -381,25 +381,48 @@ def search(
     total_capped = not exhausted
 
     ids = [r.id for r in rows]
-    flags: dict[int, tuple[bool, bool]] = {}
+    # Where each result on this page is filed, and how it is flagged there.
+    # Read as placements rather than as SQL aggregates because the folders
+    # themselves are now part of the answer: a search reads the whole mailbox,
+    # so the row has to say which folder it found the mail in. At sixty rows
+    # with a placement or three each that is a smaller result set than the page
+    # it decorates, and it makes the flags a fold over the same rows.
+    #
+    # Live placements only. A deleted one keeps the flags it had when it was
+    # deleted, so a result read in Trash and emptied out of it would otherwise
+    # come back marked read while the copy the search actually found sits unread
+    # in the inbox — and it would go on naming a folder the mail has left.
+    placed: dict[int, list[tuple]] = {}
     if ids:
-        for pk, seen_all, flagged_any, trashed in db.execute(
-            select(MessageLocation.message_pk, func.bool_and(MessageLocation.seen),
-                   func.bool_or(MessageLocation.flagged),
-                   # Every live placement is in Trash, so this result *is* the
-                   # deleted copy. Results come from the whole mailbox, Trash
-                   # included, and without saying so a search run straight after
-                   # a delete looks exactly like a delete that did nothing.
-                   func.bool_and(Mailbox.role == "trash"))
+        for pk, seen, flagged, mb_id, role, name in db.execute(
+            select(MessageLocation.message_pk, MessageLocation.seen, MessageLocation.flagged,
+                   Mailbox.id, Mailbox.role, Mailbox.display_name)
             .join(Mailbox, Mailbox.id == MessageLocation.mailbox_id)
-            # Live placements only. A deleted one keeps the flags it had when it
-            # was deleted, so a result read in Trash and emptied out of it would
-            # otherwise come back marked read while the copy the search actually
-            # found sits unread in the inbox.
             .where(MessageLocation.message_pk.in_(ids), MessageLocation.deleted.is_(False))
-            .group_by(MessageLocation.message_pk)
         ).all():
-            flags[pk] = (bool(seen_all), bool(flagged_any), bool(trashed))
+            placed.setdefault(pk, []).append((seen, flagged, mb_id, role, name))
+
+    def _where(pk: int) -> dict:
+        """The seen/flagged/folders part of one row.
+
+        No live placement at all is the answer for a message deleted between the
+        scan and this query: read as seen and filed nowhere, which is what the
+        aggregate this replaced defaulted to.
+        """
+        here = placed.get(pk, [])
+        folders = folders_of((mb_id, role, name) for _, _, mb_id, role, name in here)
+        return {
+            "seen": all(p[0] for p in here),
+            "flagged": any(p[1] for p in here),
+            # Every live placement is in Trash, so this result *is* the deleted
+            # copy. Kept as its own field rather than left for the client to
+            # read off the folders: `:no-trash` filters on the same idea, and
+            # the two must not part ways.
+            "in_trash": bool(folders) and all(f["role"] == "trash" for f in folders),
+            "folders": folders,
+        }
+
+    where = {r.id: _where(r.id) for r in rows}
 
     tids = {r.thread_id for r in rows if r.thread_id}
     sizes: dict[tuple[int, str], int] = {}
@@ -425,9 +448,8 @@ def search(
                 "from_name": r.from_name, "from_addr": r.from_addr,
                 "date": r.date_sent.isoformat() if r.date_sent else None,
                 "snippet": r.snippet, "has_attachments": r.has_attachments,
-                "seen": flags.get(r.id, (True, False, False))[0],
-                "flagged": flags.get(r.id, (True, False, False))[1],
-                "in_trash": flags.get(r.id, (True, False, False))[2],
+                # seen, flagged, in_trash, and the folders the row is filed in.
+                **where[r.id],
                 "account_id": r.account_id, "account_color": r.color,
                 "thread_count": sizes.get((r.account_id, r.thread_id), 1),
             }

@@ -870,6 +870,13 @@ App.reader = (function () {
     const snippet = m.body_text ? m.body_text.slice(0, 140)
       : (m.content_status && m.content_status !== "full"
           ? "Outside the sync window — headers only" : "");
+    // Which folder this message is in, left of the date — where Apple Mail puts
+    // it, and dropped by CSS on a pane too narrow to carry both. Per message
+    // rather than per conversation, because that is the question a thread
+    // cannot answer for you: whether the mail you are looking at is the copy in
+    // Trash, and whether the rest of the thread went with it. Drawn on folded
+    // cards too, which is what makes it readable as a column down a long thread.
+    const where = App.folderChips(m.locations, m.account_id);
 
     wrap.innerHTML = `
       <div class="msg-head" role="button" tabindex="0"
@@ -882,6 +889,7 @@ App.reader = (function () {
             <div class="${detailClass}"${detailTitle}>${
               shut ? App.esc(snippet) : detail(openTo)}</div>
           </div>
+          <span class="msg-folders"></span>
           <div class="msg-date-full${shut ? "" : " selectable"}">${App.esc(App.fmtDateFull(m.date))}</div>
           <span class="msg-chevron">${App.icon("chevron", 16)}</span>
         </div>
@@ -892,6 +900,11 @@ App.reader = (function () {
     // too — including the collapsed snippet, which is often the only text a
     // folded message shows.
     if (App.highlight.mark(head, marks)) wrap.classList.add("has-hit");
+    // Filled in after the marking, not before it: the folder's name is ours
+    // rather than the sender's, so a search for "invoices" must not light up
+    // every card filed under Invoices — nor have that card count as a message
+    // the search matched.
+    head.querySelector(".msg-folders").innerHTML = where;
     const toggle = () => {
       if (collapsed.has(m.id)) collapsed.delete(m.id); else collapsed.add(m.id);
       rerender();

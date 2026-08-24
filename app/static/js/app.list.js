@@ -150,13 +150,14 @@ App.list = (function () {
       `${selected.has(r.id) ? " checked" : ""} aria-label="Select this conversation" />`;
     const flag = r.flagged ? `<span class="flag-dot">${App.icon("flag", 13, true)}</span>` : "";
     const attach = r.has_attachments ? `<span class="attach-glyph">${App.icon("paperclip", 12)}</span>` : "";
-    // Only search puts this on a row, and only when every live copy of the
-    // conversation is in Trash. A folder list never needs it — you can see
-    // which folder you are standing in — but a search reads the whole mailbox,
-    // so without it deleting a result and watching it stay on screen looks
-    // exactly like a delete that did not work. Add `:no-trash` to leave them out.
-    const trashed = r.in_trash
-      ? `<span class="trash-chip" title="In Trash">${App.icon("trash", 11)}</span>` : "";
+    // Only search puts folders on a row. A folder list never needs them — you
+    // can see which folder you are standing in — but a search reads the whole
+    // mailbox, and where it found a result is half of what it is answering:
+    // Trash, Sent, or the folder a rule filed the mail into two years ago.
+    // Deleting from a search view and watching the rows sit there is the case
+    // that made this necessary; a row that now says "Trash" in words is the
+    // answer to it. Add `:no-trash` to leave those out altogether.
+    const where = App.folderChips(r.folders, r.account_id);
     const badge = r.thread_count > 1
       ? `<span class="thread-badge" title="${r.thread_count} messages in this thread">` +
         `${App.icon("thread", 11)}${r.thread_count}</span>` : "";
@@ -182,7 +183,7 @@ App.list = (function () {
         <div class="msg-subject">${App.esc(r.subject)}</div>
         <div class="msg-snippet${absent ? " is-absent" : ""}">${
           absent ? "Outside the sync window — headers only" : App.esc(r.snippet || "")}</div>
-        <div class="msg-meta">${badge}${remind}${trashed}${flag}${attach}</div>
+        <div class="msg-meta">${badge}${remind}${where}${flag}${attach}</div>
       </div>`;
 
     const box = el.querySelector(".msg-check");

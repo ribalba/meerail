@@ -462,6 +462,58 @@ def test_results_page_without_gaps_or_repeats(account):
     assert past["rows"] == [] and past["total"] == 5
 
 
+def test_results_say_which_folder_they_were_found_in(account):
+    """A search reads the whole mailbox, so the row has to name the folder.
+
+    The list can show which folder you are standing in for free — you chose it —
+    but a result can come from anywhere, and "which mailbox is this in" is a
+    question people ask of a search result before anything else. The rows carry
+    `folders`, and the chips the list draws come straight off them.
+    """
+    email, aid = account["email"], account["id"]
+    token = "WHERETOK" + uuid.uuid4().hex[:6]
+    mid = f"where-{uuid.uuid4().hex}@t"
+    raw = make_message(f"<{mid}>", "Receipt", "shop@y.com", email, f"{token} paid in full", T0)
+    dbfixture.ingest_raw_message(email, raw, uid=1, folder="Receipts/2026")
+
+    _, r = _search(aid, token)
+    assert r["total"] == 1
+    row = r["rows"][0]
+    # The leaf, as the sidebar prints it, with the role that picks the icon.
+    assert [(f["name"], f["role"]) for f in row["folders"]] == [("2026", "custom")]
+    assert row["in_trash"] is False
+
+    # Filed in Trash as well — the same message, under a second placement, which
+    # is what a label server does when you delete on one device. Both folders
+    # are named, in the order the sidebar lists them, and the row is not "in
+    # Trash": a copy of it is still filed elsewhere.
+    assert dbfixture.record_placement(email, mid, 2, "Trash", role_hint="\\Trash")
+
+    _, r = _search(aid, token)
+    row = r["rows"][0]
+    assert [f["name"] for f in row["folders"]] == ["Trash", "2026"]
+    assert row["in_trash"] is False
+
+
+def test_a_result_only_in_the_trash_says_so(account):
+    """Deleting from a search view and watching the row sit there is
+    indistinguishable from a delete that failed. The row says "Trash" — as a
+    folder, like any other — and `in_trash` is what `:no-trash` filters on."""
+    email, aid = account["email"], account["id"]
+    token = "TRASHTOK" + uuid.uuid4().hex[:6]
+    dbfixture.ingest_raw_message(email, make_message(
+        f"<t-{uuid.uuid4().hex}@t>", "Old receipt", "shop@y.com", email,
+        f"{token} paid in full", T0), uid=1, folder="Trash", role_hint="\\Trash")
+
+    _, r = _search(aid, token)
+    row = r["rows"][0]
+    assert [(f["name"], f["role"]) for f in row["folders"]] == [("Trash", "trash")]
+    assert row["in_trash"] is True
+
+    _, r = _search(aid, f"{token} :no-trash")
+    assert r["rows"] == []
+
+
 def test_an_id_the_text_parser_would_split_is_still_found(account):
     """A hex id survives the trip from the search box to the index.
 

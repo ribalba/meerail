@@ -18,6 +18,9 @@ APP_HOME      := $(XDG_DATA_HOME)/meerail
 APP_IMAGE     := $(APP_HOME)/meerail.AppImage
 DESKTOP_DIR   := $(XDG_DATA_HOME)/applications
 DESKTOP_FILE  := $(DESKTOP_DIR)/meerail.desktop
+# hicolor tops out at 512x512, and an icon theme only looks in the directory
+# whose name matches the file's real size. build/icon.png is 1024 because that
+# is what macOS wants as an icns source, so it gets scaled down on the way in.
 ICON_DIR      := $(XDG_DATA_HOME)/icons/hicolor/512x512/apps
 
 # macOS: the .app bundle itself is the install. ~/Applications rather than
@@ -65,7 +68,10 @@ distinstall-linux: dist
 	echo "Installing $$src -> $(APP_IMAGE)"; \
 	mkdir -p "$(APP_HOME)" "$(BIN_DIR)" "$(DESKTOP_DIR)" "$(ICON_DIR)"; \
 	install -m 0755 "$$src" "$(APP_IMAGE)"; \
-	install -m 0644 build/icon.png "$(ICON_DIR)/meerail.png"; \
+	if command -v magick >/dev/null 2>&1; then magick build/icon.png -resize 512x512 "$(ICON_DIR)/meerail.png"; \
+	elif command -v convert >/dev/null 2>&1; then convert build/icon.png -resize 512x512 "$(ICON_DIR)/meerail.png"; \
+	else install -m 0644 build/icon.png "$(ICON_DIR)/meerail.png"; fi; \
+	chmod 0644 "$(ICON_DIR)/meerail.png"; \
 	ln -sfn "$(APP_IMAGE)" "$(BIN_DIR)/meerail"; \
 	printf '%s\n' \
 		'[Desktop Entry]' \
@@ -86,6 +92,7 @@ distinstall-linux: dist
 	command -v desktop-file-validate >/dev/null 2>&1 && desktop-file-validate "$(DESKTOP_FILE)" || true; \
 	command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$(DESKTOP_DIR)" || true; \
 	command -v gtk-update-icon-cache  >/dev/null 2>&1 && gtk-update-icon-cache -f -t "$(XDG_DATA_HOME)/icons/hicolor" >/dev/null 2>&1 || true; \
+	rm -f "$(HOME)/.cache/icon-cache.kcache"; \
 	for k in kbuildsycoca6 kbuildsycoca5; do command -v $$k >/dev/null 2>&1 && $$k >/dev/null 2>&1 && break; done; true; \
 	echo "Installed. Launch from your app menu, or run 'meerail' (needs $(BIN_DIR) on PATH)."
 
@@ -94,6 +101,7 @@ distuninstall-linux:
 	@rmdir "$(APP_HOME)" 2>/dev/null || true
 	@command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$(DESKTOP_DIR)" || true
 	@command -v gtk-update-icon-cache  >/dev/null 2>&1 && gtk-update-icon-cache -f -t "$(XDG_DATA_HOME)/icons/hicolor" >/dev/null 2>&1 || true
+	@rm -f "$(HOME)/.cache/icon-cache.kcache"
 	@for k in kbuildsycoca6 kbuildsycoca5; do command -v $$k >/dev/null 2>&1 && $$k >/dev/null 2>&1 && break; done; true
 	@echo "Uninstalled."
 

@@ -374,6 +374,18 @@ body.resizing { cursor: col-resize; user-select: none; }
 .thread-badge { font-size: .7rem; background: var(--bg-elev); border: 1px solid var(--border-strong);
   color: var(--text-muted); border-radius: 999px; padding: 0 .4rem; font-variant-numeric: tabular-nums;
   display: inline-flex; align-items: center; gap: .2rem; }
+/* Where a message is filed — on a search result, and beside the date in the
+   reader. Muted rather than red even when it says "Trash": it is not a warning,
+   it is a location, and it most often appears on mail the reader has just
+   deleted on purpose, where an alarm colour would read as a problem.
+   Built like .thread-badge because it stands beside it and the two are the same
+   kind of thing — a fact about the row rather than about the mail. */
+.folder-chip { font-size: .7rem; background: var(--bg-elev); border: 1px solid var(--border-strong);
+  color: var(--text-muted); border-radius: 999px; padding: 0 .4rem; max-width: 11rem;
+  display: inline-flex; align-items: center; gap: .2rem; white-space: nowrap; }
+/* The icon must not be squeezed to buy the name another character. */
+.folder-chip svg { flex: 0 0 auto; }
+.folder-chip .fc-name { overflow: hidden; text-overflow: ellipsis; }
 .flag-dot { color: var(--flag); display: flex; }
 .attach-glyph { color: var(--text-faint); display: flex; }
 /* "Coming back Monday 09:00", on a conversation that was put off. Keyed to
@@ -638,6 +650,12 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
   word-break: break-word; overflow-wrap: break-word; }
 .from-detail.expandable { cursor: pointer; }
 .from-detail.expandable:hover, .from-detail.expandable:focus-visible { color: var(--text); }
+/* Left of the date, as Apple Mail has it. Shrinkable and last to get the room:
+   the header's job is the sender, the date and the subject, and the folder is
+   the line that gives way — down to an ellipsis inside the chip, and away
+   entirely on a narrow pane (see the media query at the foot of this file). */
+.msg-folders { display: flex; align-items: center; gap: .3rem; flex: 0 1 auto; min-width: 0; }
+.msg-folders:empty { display: none; }
 .msg-date-full { font-size: .8rem; color: var(--text-muted); white-space: nowrap; }
 /* One toolbar for the pane, pinned to the top of the scroller — it acts on the
    newest message in the thread, so it has no reason to move with the reading. */
@@ -1740,12 +1758,6 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
    identical notifications. */
 .cl-flagged { color: var(--warning); font-weight: 550; }
 
-/* A search result that is only in Trash. Muted rather than red: it is not a
-   warning, it is a location — and it most often appears on mail the reader has
-   just deleted on purpose, where an alarm colour would read as a problem. */
-.trash-chip { display: inline-flex; align-items: center; color: var(--text-faint); }
-.msg-row.active .trash-chip { color: rgba(255,255,255,.8); }
-
 /* The whole row is the "show me what is in this" target, so it has to look like
    one — a pointer everywhere but the action cell, and the group's own words
    underlined on hover, since that is what the search it opens is built from. */
@@ -1859,6 +1871,10 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
      name has to do the same, and the date has to stop being shrinkable. */
   .from-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .msg-date-full { flex: 0 0 auto; font-size: .74rem; }
+  /* And the folder goes rather than crowd the two of them — which is what Apple
+     Mail does with it at this width too. Little is lost: the search list still
+     carries the chip, and a search result is where the question is asked. */
+  .msg-folders { display: none; }
 
   /* Sync progress is a footnote, but it renders a block per account and can
      take half the folder page during a backfill. */

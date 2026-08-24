@@ -402,6 +402,45 @@ App.roleIcon = function (role) {
     trash: "trash", junk: "junk", all: "all", flagged: "flag" }[role] || "folder";
 };
 
+// Where a message is filed, as chips: an icon for the folder's role and the
+// folder's own name. Drawn in a search result (the list cannot say where a
+// result came from any other way) and beside the date in the reader, which is
+// where Apple Mail puts it.
+//
+// The name comes from the server, which knows it straight away — a message
+// filed into a folder made a minute ago must not go unnamed because the
+// sidebar in this tab is a sync pass old. The sidebar's copy is consulted for
+// the *path*, which only the tooltip needs: a leaf called "2024" says little
+// on its own, and three of them say less.
+//
+// Past two folders the rest fold into a "+N": a message wearing half a dozen
+// Proton labels would otherwise push the date off the row.
+//
+// \All is left out of that. Bridge and Gmail file *every* message there as well
+// as wherever it really is, so a chip for it distinguishes nothing — it would
+// simply say "All Mail" down the whole list. It is kept only when it is the one
+// place a message is filed, which is the case where it is the answer: mail that
+// has been taken out of every folder and is now only in the archive of
+// everything.
+App.folderChips = function (folders, accountId) {
+  const all = folders || [];
+  const filed = all.filter((f) => f.role !== "all");
+  const list = filed.length ? filed : all;
+  if (!list.length) return "";
+  const boxes = (App.shell && App.shell.mailboxesFor(accountId)) || [];
+  const path = (f) => {
+    const mb = boxes.find((b) => b.id === f.mailbox_id);
+    return (mb && (mb.path || mb.display_name)) || f.name;
+  };
+  const chips = list.slice(0, 2).map((f) =>
+    `<span class="folder-chip" title="In ${App.esc(path(f))}">${App.icon(App.roleIcon(f.role), 11)}` +
+    `<span class="fc-name">${App.esc(f.name)}</span></span>`).join("");
+  const rest = list.slice(2);
+  return chips + (rest.length
+    ? `<span class="folder-chip" title="Also in ${App.esc(rest.map(path).join(", "))}"
+        >+${rest.length}</span>` : "");
+};
+
 // --- Utilities ---
 App.esc = function (s) {
   return String(s == null ? "" : s).replace(/[&<>"']/g, (c) =>

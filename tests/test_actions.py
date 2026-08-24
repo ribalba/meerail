@@ -1045,6 +1045,32 @@ def test_a_deleted_placement_stops_deciding_whether_a_message_is_read(account):
     assert detail["flagged"] is False
 
 
+def test_a_message_names_the_folders_it_is_filed_in(account):
+    """The reader draws the folder beside the date, so the detail has to name it.
+
+    Every live placement, because a label server files one message in several
+    and "which of these am I looking at" is the question the chip answers —
+    ordered as the sidebar orders folders, so the inbox copy leads. The deleted
+    placement is left out for the same reason the flags leave it out: it is a
+    copy somebody threw away in another client, and the header must not go on
+    saying the mail is in Trash because of it.
+    """
+    email, aid = account["email"], account["id"]
+    _seed_trash(email)
+    tok = "WHEREIS" + uuid.uuid4().hex[:6]
+    mid = _read_and_deleted_in_trash(email, tok, uid=60)
+    # A second, live placement — a label, which is how Bridge exposes one.
+    assert dbfixture.record_placement(email, mid.strip("<>"), 62, "Receipts/2026")
+
+    _, detail = api("GET", f"/api/messages/{_search_id(aid, tok)}")
+
+    assert [(l["name"], l["role"]) for l in detail["locations"]] == [
+        ("INBOX", "inbox"), ("2026", "custom")]
+    # The id travels with the name: the browser looks the full path up in the
+    # folder tree it already holds, for a leaf like "2026" that says little.
+    assert all(isinstance(l["mailbox_id"], int) for l in detail["locations"])
+
+
 def test_search_reads_the_same_flags_the_message_does(account):
     """Search rolled its own flags up, and rolled them up over every placement —
     so the row it drew for a message could contradict the message it opened."""
