@@ -43,6 +43,6 @@ isn't the default: `make distinstall MEERAIL_URL=http://meerail.local:8000`.
 bar/dock.
 
 `electron-builder` targets are configured in `package.json`. The app icon is
-`build/icon.png` (replace with a higher-resolution export for production; macOS
-prefers a 1024×1024 source). Code signing/notarization is not configured — add
-your certs for distributable macOS builds.
+`build/icon.png`, a 1024×1024 export (the size macOS prefers as an `icns`
+source). Code signing/notarization is not configured — add your certs for
+distributable macOS builds.
