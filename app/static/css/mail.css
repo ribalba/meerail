@@ -1013,6 +1013,24 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
 .compose-toggle[aria-pressed="true"]:hover { background: var(--accent); color: #fff;
   filter: brightness(1.05); }
 .compose-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+/* The shortcut that opens the row behind the button, in a bubble under it.
+   These two are deliberately not tab stops, so the key is the only way to Cc
+   and Bcc for hands that stay off the mouse — and a shortcut nobody can see is
+   one nobody uses. Drawn rather than left to title=, which arrives half a
+   second later in the system's font and cannot be styled to match the app.
+   Anchored to the button's right edge rather than centred on it: the toggles
+   sit at the end of the To row, and .modal-body clips what leans past it. */
+.compose-toggle[data-keys] { position: relative; }
+.compose-toggle[data-keys]:hover::after,
+.compose-toggle[data-keys]:focus-visible::after {
+  content: attr(data-keys);
+  position: absolute; right: 0; top: calc(100% + 5px); z-index: 3;
+  pointer-events: none; white-space: nowrap;
+  padding: .15rem .4rem; font-size: .72rem; line-height: 1.4;
+  color: var(--text-muted); background: var(--bg-elev);
+  border: 1px solid var(--border); border-radius: 6px;
+  box-shadow: 0 2px 8px light-dark(rgba(0,0,0,.12), rgba(0,0,0,.45));
+}
 .compose-textarea {
   flex: 1; min-height: 120px; resize: none; font: inherit; font-size: .9rem; line-height: 1.5;
   padding: .6rem .7rem; border: 1px solid var(--border); border-radius: 8px;

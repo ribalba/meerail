@@ -667,12 +667,17 @@
                and a folded-away row is an offer, not a field. Alt+Shift+C/B is
                the keyboard's way to them; see app.keys.js. -->
           <span class="compose-toggles">
+            <!-- data-keys is the bubble the CSS draws on hover, and the only
+                 place the shortcut is written down outside the ? box. No
+                 title= beside it: the two would say the same thing twice, half
+                 a second apart. aria-keyshortcuts is the same fact for a
+                 screen reader, which cannot see either. -->
             <button type="button" class="compose-toggle" id="compose-cc-toggle" tabindex="-1"
                     aria-expanded="false" aria-controls="compose-cc"
-                    title="Add a Cc line (⌥/Alt ⇧ C)">Cc</button>
+                    aria-keyshortcuts="Alt+Shift+C" data-keys="⌥/Alt ⇧ C">Cc</button>
             <button type="button" class="compose-toggle" id="compose-bcc-toggle" tabindex="-1"
                     aria-expanded="false" aria-controls="compose-bcc"
-                    title="Add a Bcc line (⌥/Alt ⇧ B)">Bcc</button>
+                    aria-keyshortcuts="Alt+Shift+B" data-keys="⌥/Alt ⇧ B">Bcc</button>
           </span></div>
         <div class="compose-row" id="compose-cc-row" hidden><label>Cc</label>
           <input id="compose-cc" type="text" autocomplete="off" /></div>

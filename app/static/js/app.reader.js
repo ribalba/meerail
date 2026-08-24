@@ -748,6 +748,15 @@ App.reader = (function () {
   function archiveTicket() {
     const msgs = currentThread ? currentThread.messages : [];
     if (!msgs.length) return null;
+    // Only for a conversation that is still in an inbox. Archiving is the verb
+    // for clearing one, so behind a reply to mail that was already filed —
+    // something dug back out of Archive, a thread answered from Sent, anything
+    // sitting in a folder you put it in — the button offers a move that either
+    // does nothing or undoes that filing. No ticket is how it stops being
+    // offered: compose hides the button, and Ctrl+Enter goes back to meaning
+    // plain Send. See app.compose's updateSendButtons.
+    if (!msgs.some((m) => (m.locations || []).some((l) => l.role === "inbox")))
+      return null;
     return {
       thread_id: currentThread.thread_id || null,
       account_id: msgs[0].account_id,

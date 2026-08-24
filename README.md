@@ -432,6 +432,48 @@ Bridge included, in a container — as one resource, with Traefik in front and n
 else published. It moves your mail credentials onto the server, which is the one thing
 the layout above is built to avoid; that file opens by saying so.
 
+#### HTTPS without a proxy in front
+
+A password also changes what a **local** install needs, which is easy to miss. The loopback
+exemption is about the address the server sees, and in the compose stack it does not see yours:
+the browser is on the host and the server is in a container, so the request arrives from the
+Docker bridge gateway — `172.18.0.1` and the like — which is not `127.0.0.1`. Plain HTTP from a
+non-loopback address is exactly what the rule turns away, so setting `password` and then opening
+`http://localhost:8000` earns a redirect to `https://localhost:8000` with nothing listening
+there. (`make dev` runs uvicorn on the host itself, sees `127.0.0.1`, and is unaffected.)
+
+[`docker-compose.tls.yml`](docker-compose.tls.yml) is the smallest way out of that: TLS in
+uvicorn itself, with a certificate the stack issues to itself on first start.
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d
+```
+
+Or put `COMPOSE_FILE=docker-compose.yml:docker-compose.tls.yml` in `.env` and go on typing
+`docker compose up -d`. The app moves to `https://localhost:8000` and the browser asks once
+whether you accept the certificate. `trusted_proxies` stays empty, because there is no proxy —
+the scheme is HTTPS at the source. The pair lands in `./certs` (gitignored) and is reused on
+every start, so accepting it is a one-time thing; it is also yours to replace, since the file
+only generates when both files are missing. Drop a real `cert.pem` and `key.pem` in there and it
+leaves them alone. `MEERAIL_CERT_HOSTS` adds names to the certificate for an install reached as
+something other than `localhost`.
+
+Two things it cannot do for you. **Set `hsts_max_age_days = 0`** while the certificate is
+self-signed: HSTS promises a browser will not offer a way past a bad certificate, and that
+promise outlives the certificate you later regenerate. And **the desktop app cannot click
+through a warning at all** — Chromium fails the load and you get "Can't reach the meerail
+server" — so for Electron the certificate has to be trusted by the machine rather than accepted
+per visit. Import `certs/cert.pem` into the macOS Keychain or the Windows certificate store; on
+Linux, Chromium and Electron read NSS:
+
+```bash
+certutil -d sql:$HOME/.pki/nssdb -A -t "C,," -n meerail -i certs/cert.pem
+```
+
+[`mkcert`](https://github.com/FiloSottile/mkcert) is the shortcut for all of this: it runs a
+local CA, installs it into both the system store and NSS, and issues a certificate you can put
+straight into `./certs`.
+
 ## Configuration
 
 **One file: `meerail.toml`.** The server and the agent both read it — the server takes
@@ -472,7 +514,7 @@ keys unless you specifically want a per-machine override.
 | Key | Env | Default | What it does |
 | --- | --- | --- | --- |
 | `secret_key` | `SECRET_KEY` | `dev-insecure-…` | Signs tokens and encrypts any server-side stored credentials. **Change it** before exposing the app: `python -c "import secrets;print(secrets.token_urlsafe(48))"`. |
-| `password` | `SERVER_PASSWORD` | *(empty)* | Empty means no auth — correct for a localhost app. Set it if the server is reachable from anywhere else: the UI then shows a password screen, and a successful login holds a signed session cookie for `session_max_age_days`. **Setting it also requires HTTPS for everything**, not only for signing in: with a password configured, a plaintext request never gets the page, because getting the page is what puts the password on the wire. A plain `http://` GET is redirected to `https://`; anything else is refused. Loopback is exempt, and TLS terminated by a proxy needs `trusted_proxies` below. Failed logins are rate-limited per address (5 per 15 minutes), and **Log out really ends the session**: the cookie names a row on the server, so a copy of it taken elsewhere stops working the moment you log out. Logging out in one browser leaves your other browsers signed in. |
+| `password` | `SERVER_PASSWORD` | *(empty)* | Empty means no auth — correct for a localhost app. Set it if the server is reachable from anywhere else: the UI then shows a password screen, and a successful login holds a signed session cookie for `session_max_age_days`. **Setting it also requires HTTPS for everything**, not only for signing in: with a password configured, a plaintext request never gets the page, because getting the page is what puts the password on the wire. A plain `http://` GET is redirected to `https://`; anything else is refused. Loopback is exempt, and TLS terminated by a proxy needs `trusted_proxies` below — but note that the compose stack's server sees the Docker gateway rather than your loopback address, so a local install needs TLS too; see [HTTPS without a proxy in front](#https-without-a-proxy-in-front). Failed logins are rate-limited per address (5 per 15 minutes), and **Log out really ends the session**: the cookie names a row on the server, so a copy of it taken elsewhere stops working the moment you log out. Logging out in one browser leaves your other browsers signed in. |
 | `api_token` | `API_TOKEN` | *(empty)* | Credential for scripted clients: `Authorization: Bearer <token>`. Empty means the API can only be reached with a browser session. Deliberately **not** the UI password — that used to be accepted here too, which made the thing you type into a browser a permanent key to the whole mailbox, revocable only by changing the password and signing every browser out. Generate one with `python -c "import secrets;print(secrets.token_urlsafe(32))"`, and change it when a script should stop having access. |
 | `session_max_age_days` | `SESSION_MAX_AGE_DAYS` | `30` | How long a browser login lasts before the password is asked again. Changing `password` or `secret_key` logs every browser out immediately. |
 | `trusted_proxies` | `TRUSTED_PROXIES` | *(empty)* | Reverse proxies this server may believe about where a request came from — IPs or CIDR blocks, comma-separated. Empty trusts nothing, which is right when the browser reaches the server directly. **Set it whenever TLS is terminated in front** (Traefik, Caddy, nginx): without it every request looks like plain HTTP from the proxy's own address, so the session cookie goes out without `Secure` and the login rate limiter counts one attacker's failures against everyone behind the proxy. Only these addresses are believed — anything that can reach the port can set `X-Forwarded-For`. With a password set and this unset, the app cannot tell an encrypted request from a plaintext one and answers every request with a 421 naming this setting, rather than guessing. |

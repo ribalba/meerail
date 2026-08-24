@@ -1,0 +1,127 @@
+# meerail over HTTPS, with a certificate it issues to itself.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d
+#
+# or put COMPOSE_FILE=docker-compose.yml:docker-compose.tls.yml in .env and go
+# on typing `docker compose up -d`. Then the app is at https://localhost:8000,
+# and the browser will ask once whether you accept the certificate.
+#
+# Why this file exists at all: setting `password` under [server] turns on the
+# HTTPS requirement (app/main.py::require_https), and the loopback exemption
+# that would otherwise cover a desktop install does not fire in this stack. The
+# exemption asks whether the request came from 127.0.0.1 — but the server is in
+# a container and the browser is not, so the address it sees is the bridge
+# gateway (172.18.0.1 and the like), a plain http:// request from a non-loopback
+# address. Every request is redirected to https:// and nothing is listening
+# there. Issue #15 is that dead end. This file ends it in the other direction,
+# by having something listen there.
+#
+# It is TLS in uvicorn itself rather than a proxy in front, which is the smaller
+# of the two changes: the scheme is https at the source, so `trusted_proxies`
+# stays empty and there is no second container. Put a real terminator in front
+# instead — Caddy, nginx, Coolify's Traefik — and this file is not the one you
+# want; see COOLIFY.md and the README's "Reaching it from another machine".
+#
+# Two things to know before you rely on it:
+#
+#   * Set `hsts_max_age_days = 0` in meerail.toml while a self-signed
+#     certificate is in play. HSTS is a promise with a duration, and part of the
+#     promise is that the browser will not offer a way past a bad certificate —
+#     so a browser that has trusted this hostname once has no route back in when
+#     the certificate is regenerated. It is not set for you here: the
+#     environment outranks meerail.toml, so claiming it in this file would take
+#     the setting away from you for good, including on the day you drop a real
+#     certificate into ./certs.
+#
+#   * The Electron app cannot click through a certificate warning — Chromium
+#     fails the load outright (ERR_CERT_AUTHORITY_INVALID) and you get the
+#     "Can't reach the meerail server" page with no way past it. For the desktop
+#     app the certificate has to be trusted by the machine, not accepted per
+#     visit: ./certs/cert.pem is written for you to import (macOS Keychain,
+#     Windows certificate store, `certutil -d sql:$HOME/.pki/nssdb -A -t "C,,"
+#     -n meerail -i certs/cert.pem` for Chromium and Electron on Linux). Or use
+#     mkcert, which does both stores in one command, and drop its output in as
+#     below.
+#
+# ./certs is a bind mount, so the pair is yours to look at, to import, and to
+# replace: put your own cert.pem and key.pem there and this file will leave them
+# alone — it only generates when both are missing. Add `certs/` to .gitignore;
+# key.pem is a private key.
+
+services:
+  server:
+    environment:
+      # Extra names the certificate should be valid for, comma-separated, on top
+      # of localhost. Needed only if you reach this install by some other name —
+      # a LAN address, a hostname in /etc/hosts. A certificate says nothing
+      # about a name it was not issued for, so the browser refuses that name
+      # even after you have accepted the certificate for another one.
+      MEERAIL_CERT_HOSTS: "${MEERAIL_CERT_HOSTS:-}"
+
+      # Written once into ./certs, then reused on every start. Kept here rather
+      # than in a script beside it so that this file is the whole change — the
+      # image needs nothing added to it, because `cryptography` is already in
+      # requirements.txt for the credential store.
+      MEERAIL_MAKE_CERT: |
+        import datetime, ipaddress, os, pathlib
+        from cryptography import x509
+        from cryptography.x509.oid import NameOID
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+
+        d = pathlib.Path("/certs"); crt = d / "cert.pem"; key = d / "key.pem"
+        if crt.exists() and key.exists():
+            raise SystemExit(0)
+        d.mkdir(parents=True, exist_ok=True)
+
+        hosts = ["localhost"] + [h.strip() for h in os.environ.get("MEERAIL_CERT_HOSTS", "").split(",") if h.strip()]
+        san = []
+        for h in hosts:
+            try:
+                san.append(x509.IPAddress(ipaddress.ip_address(h)))
+            except ValueError:
+                san.append(x509.DNSName(h))
+        san += [x509.IPAddress(ipaddress.ip_address(a)) for a in ("127.0.0.1", "::1")]
+
+        k = ec.generate_private_key(ec.SECP256R1())
+        who = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "meerail (self-signed)")])
+        now = datetime.datetime.now(datetime.timezone.utc)
+        cert = (x509.CertificateBuilder()
+                .subject_name(who).issuer_name(who)
+                .public_key(k.public_key())
+                .serial_number(x509.random_serial_number())
+                # Backdated a day so a clock skew between container and host
+                # cannot make a certificate that is not valid yet.
+                .not_valid_before(now - datetime.timedelta(days=1))
+                # 825 days: longer than that and Safari refuses the certificate
+                # outright, trusted or not.
+                .not_valid_after(now + datetime.timedelta(days=825))
+                .add_extension(x509.SubjectAlternativeName(san), critical=False)
+                .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+                .sign(k, hashes.SHA256()))
+
+        key.write_bytes(k.private_bytes(serialization.Encoding.PEM,
+                                        serialization.PrivateFormat.PKCS8,
+                                        serialization.NoEncryption()))
+        crt.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+        key.chmod(0o600); crt.chmod(0o644)
+        print(f"tls: issued {crt} for {', '.join(hosts)}", flush=True)
+
+    volumes:
+      - ./certs:/certs
+
+    command:
+      - sh
+      - -c
+      - |
+        python -c "$$MEERAIL_MAKE_CERT" || exit 1
+        exec uvicorn app.main:app --host 0.0.0.0 --port 8000 \
+          --ssl-keyfile /certs/key.pem --ssl-certfile /certs/cert.pem
+
+    healthcheck:
+      # The base file's probe speaks http:// to this port, which is now a TLS
+      # socket — it would fail forever and mark the container unhealthy. Same
+      # request over https, and unverified because the thing it is checking is
+      # whether the server answers, not who signed its certificate. It runs
+      # inside the container, so it never crosses a network.
+      test: ["CMD", "python", "-c", "import ssl,urllib.request,sys; sys.exit(0 if urllib.request.urlopen('https://localhost:8000/healthz', context=ssl._create_unverified_context()).status==200 else 1)"]

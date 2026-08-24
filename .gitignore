@@ -233,3 +233,7 @@ electron/.DS_Store
 # Database dumps written by `make backup` / `meerail.sh backup` — every message
 # you have, in one file.
 /backups/
+
+# Self-signed TLS pair written by docker-compose.tls.yml on first start. The
+# certificate is public and the key is not — neither belongs in a repository.
+/certs/

@@ -192,6 +192,20 @@ def trash_ids(db: DBSession) -> set[int]:
     return set(db.execute(select(Mailbox.id).where(Mailbox.role == "trash")).scalars().all())
 
 
+# Folders that hold mail you wrote rather than mail that arrived. Archiving is a
+# verb about the inbox — "I have dealt with this, take it off my desk" — and a
+# copy in \Sent was never on that desk. See own_mail_ids.
+OWN_ROLES = ("sent", "drafts")
+
+
+def own_mail_ids(db: DBSession, account_id: int) -> set[int]:
+    """This account's \\Sent and \\Drafts, as a set to test placements against."""
+    return set(db.execute(
+        select(Mailbox.id).where(Mailbox.account_id == account_id,
+                                 Mailbox.role.in_(OWN_ROLES))
+    ).scalars().all())
+
+
 def trash_mailbox(db: DBSession, account_id: int) -> Mailbox:
     """Where "trash" files mail, making it first if this account owns its own folders.
 
@@ -773,10 +787,51 @@ def purge_messages(db: DBSession, message_pks: set[int], touched: set[int]) -> i
     return purge(db, location_ids, touched)
 
 
+def _spared(db: DBSession, msgs: list[Message], target: Mailbox | None) -> set[int]:
+    """Which of this account's own-mail folders a conversation move leaves alone.
+
+    Answered for the conversation rather than per message, because "leave my
+    Sent copies where they are" only makes sense while there is something else
+    in the thread to file. A conversation that is nothing but mail you wrote —
+    a note to yourself, a thread whose incoming half was archived months ago —
+    would otherwise answer Archive by doing nothing at all, and report it as
+    "this is already in Archive", which is neither true nor any use. There this
+    comes back empty and the move is the move it always was.
+
+    \\All does not count as something else. Every message on a label server is
+    in it, so a placement there says nothing about whether this conversation
+    ever reached an inbox — see move_to, which makes the same distinction about
+    the same folder.
+
+    Mail already sitting in the target does count, though, and has to: a thread
+    answered twice is one whose incoming half went to Archive on the first Send
+    & Archive. Reading that as "nothing here but your own mail" would spare the
+    Sent copies on the first reply and file them on the second, which is the bug
+    this exists for, arriving one reply late. Nothing moves and the caller says
+    the conversation is already archived, which is what has happened.
+    """
+    if not msgs:
+        return set()
+    own = own_mail_ids(db, msgs[0].account_id)
+    if not own:
+        return own
+    everything = role_mailbox(db, msgs[0].account_id, "all")
+    ignored = own | ({everything.id} if everything is not None else set())
+    for msg in msgs:
+        if any(loc.mailbox_id not in ignored for loc in msg.locations):
+            return own
+    return set()
+
+
 def move_messages(db: DBSession, msgs: list[Message], target: Mailbox | None,
                   touched: set[int], op_id: str | None = None,
-                  op_kind: str = "move") -> int:
+                  op_kind: str = "move", spare_own_mail: bool = False) -> int:
     """Move every placement of every message, without committing or recounting.
+
+    `spare_own_mail` holds back the placements in \\Sent and \\Drafts: the
+    conversation is filed, and the half of it you wrote stays where you wrote
+    it. Archiving asks for this and nothing else does — see _spared for when it
+    stands down, and actions.archive_thread for why the verb wants it.
 
     Every placement goes, but on a label server only one of them is queued for
     the agent. The rest are the same message under another label, and the first
@@ -796,11 +851,22 @@ def move_messages(db: DBSession, msgs: list[Message], target: Mailbox | None,
     from a total of messages, and neither means placements.
     """
     collapse = labels_one_message(db, msgs[0].account_id) if msgs else False
+    spared = _spared(db, msgs, target) if spare_own_mail else set()
     moved = 0
     for msg in msgs:
         # Snapshotted: move_to deletes out of msg.locations as it goes.
         mailbox_ids = [loc.mailbox_id for loc in msg.locations
                        if target is None or loc.mailbox_id != target.id]
+        if spared.intersection(mailbox_ids):
+            # This one is yours. Its \\Sent placement stays, and so does its
+            # \\All one: a move out of \\All is an added label and nothing
+            # else (see _carrier), and the label being added here is Archive —
+            # which on Proton, where the system folders are exclusive, is the
+            # message leaving Sent by the back door. What is left is the
+            # ordinary folders it also sits in, if any, and usually there are
+            # none.
+            mailbox_ids = [mid for mid in mailbox_ids if mid not in spared
+                           and not _is_everything(db, mid)]
         carrier = _carrier(db, msg, mailbox_ids) if collapse else None
         # Taken here, for the same reason the mailbox ids are: by the time the
         # carrier's move is queued, the placements it has to describe have been
@@ -814,6 +880,11 @@ def move_messages(db: DBSession, msgs: list[Message], target: Mailbox | None,
                 went = True
         moved += went
     return moved
+
+
+def _is_everything(db: DBSession, mailbox_id: int) -> bool:
+    mb = db.get(Mailbox, mailbox_id)
+    return mb is not None and mb.role == "all"
 
 
 def _carrier(db: DBSession, msg: Message, mailbox_ids: list[int]) -> int | None:

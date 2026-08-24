@@ -141,6 +141,188 @@ def test_archive_thread_clears_every_message_and_every_folder(account):
     assert len([m for m in moves if m["payload"]["to_folder"] == "Archive"]) == 3
 
 
+def _seed_archive(email):
+    """Give the account an \\Archive to file into."""
+    dbfixture.ingest_raw_message(email, make_message(
+        f"<arch-seed-{uuid.uuid4().hex}@t>", "Seed", "x@y.com", email, "seed", T0),
+        uid=1, folder="Archive", role_hint="\\Archive")
+
+
+def _seed_reply_thread(email, tok, label_server=False):
+    """One mail in, one answer out: the shape of every conversation you replied to.
+
+    ``label_server`` gives both messages the \\All placement Proton and Gmail
+    put on everything, which is the arrangement issue #20 was reported against.
+    """
+    a, b = (f"{p}-{uuid.uuid4().hex}@t" for p in ("a", "b"))
+    dbfixture.ingest_raw_message(email, make_message(
+        f"<{a}>", f"Subject {tok}", "x@y.com", email, f"{tok} body", T0), uid=1)
+    dbfixture.ingest_raw_message(email, make_message(
+        f"<{b}>", f"Re: Subject {tok}", email, "x@y.com", f"{tok} reply",
+        T0 + timedelta(hours=1), in_reply_to=f"<{a}>", refs=[f"<{a}>"]),
+        uid=2, folder="Sent", role_hint="\\Sent")
+    if label_server:
+        for mid, uid in ((a, 101), (b, 102)):
+            dbfixture.record_placement(email, mid, uid=uid, folder="All Mail",
+                                       role_hint="\\All")
+    return a, b
+
+
+def _mailboxes(email):
+    _, boxes = api("GET", "/api/mailboxes")
+    return next(x for x in boxes["accounts"] if x["email"] == email)["mailboxes"]
+
+
+def _thread_in(email, mailbox_id, tok):
+    _, rows = api("GET", f"/api/messages?mailbox_id={mailbox_id}&limit=50")
+    return [r for r in rows["rows"] if tok in r["subject"]]
+
+
+def test_archive_thread_leaves_the_sent_half_in_sent(account):
+    """github.com/ribalba/meerail/issues/20.
+
+    Reply to something, press Send & Archive, and the conversation is filed —
+    but the copy of the reply in \\Sent is not part of what was being filed. It
+    is in Sent because it was sent, and on Proton, where the system folders are
+    exclusive, archiving it is literally taking it out of Sent: the report was
+    of a whole conversation, sent side included, arriving in Archive.
+    """
+    email, aid = account["email"], account["id"]
+    tok = "SENTARCH" + uuid.uuid4().hex[:6]
+    _seed_reply_thread(email, tok)
+    _seed_archive(email)
+    mine = _mailboxes(email)
+    inbox = next(m for m in mine if m["role"] == "inbox")
+    sent = next(m for m in mine if m["role"] == "sent")
+    archive = next(m for m in mine if m["role"] == "archive")
+
+    thread_id = _thread_in(email, inbox["id"], tok)[0]["thread_id"]
+    code, body = api("POST", f"/api/messages/threads/{thread_id}/archive"
+                             f"?account_id={aid}")
+    assert code == 200, body
+    # One message filed, not two: the reply was never the thing being archived.
+    assert body["moved"] == 1
+
+    assert not _thread_in(email, inbox["id"], tok)     # off the desk
+    assert _thread_in(email, archive["id"], tok)       # and filed
+    assert _thread_in(email, sent["id"], tok)          # your copy, where you left it
+
+    # And nothing queued that would take it out of Sent on the server, which is
+    # the half of this the user actually saw in Proton.
+    moves = [x["payload"] for x in _actions(email) if x["type"] == "move"]
+    assert [m["to_folder"] for m in moves] == ["Archive"]
+    assert moves[0]["from_folder"] == "INBOX"
+
+
+def test_archive_thread_spares_the_sent_half_on_a_label_server(account):
+    """The same, where every message also sits in \\All.
+
+    Dropping only the \\Sent placement would not be enough here. \\All is
+    not a folder a message can be taken *out* of — a move from it is an added
+    label — so the reply would have been queued out of \\All into Archive
+    instead, which on Proton is the same message leaving Sent by another route.
+    """
+    email, aid = account["email"], account["id"]
+    tok = "LBLARCH" + uuid.uuid4().hex[:6]
+    _seed_reply_thread(email, tok, label_server=True)
+    _seed_archive(email)
+    mine = _mailboxes(email)
+    inbox = next(m for m in mine if m["role"] == "inbox")
+    sent = next(m for m in mine if m["role"] == "sent")
+    everything = next(m for m in mine if m["role"] == "all")
+
+    thread_id = _thread_in(email, inbox["id"], tok)[0]["thread_id"]
+    code, body = api("POST", f"/api/messages/threads/{thread_id}/archive"
+                             f"?account_id={aid}")
+    assert code == 200, body
+    assert body["moved"] == 1
+    assert _thread_in(email, sent["id"], tok)
+    # Still in the union it never left, rather than moved out of it.
+    assert _thread_in(email, everything["id"], tok)
+    assert [x["payload"]["from_folder"] for x in _actions(email)
+            if x["type"] == "move"] == ["INBOX"]
+
+
+def test_archive_thread_files_a_conversation_that_is_only_your_own_mail(account):
+    """Sparing Sent stands down when Sent is all there is.
+
+    Otherwise Archive answers a thread of nothing but mail you wrote by doing
+    nothing, and reports it as "this is already in Archive" — neither true nor
+    any use.
+    """
+    email, aid = account["email"], account["id"]
+    tok = "OWNONLY" + uuid.uuid4().hex[:6]
+    mid = f"own-{uuid.uuid4().hex}@t"
+    dbfixture.ingest_raw_message(email, make_message(
+        f"<{mid}>", f"Subject {tok}", email, "x@y.com", f"{tok} body", T0),
+        uid=2, folder="Sent", role_hint="\\Sent")
+    _seed_archive(email)
+    mine = _mailboxes(email)
+    sent = next(m for m in mine if m["role"] == "sent")
+    archive = next(m for m in mine if m["role"] == "archive")
+
+    thread_id = _thread_in(email, sent["id"], tok)[0]["thread_id"]
+    code, body = api("POST", f"/api/messages/threads/{thread_id}/archive"
+                             f"?account_id={aid}")
+    assert code == 200, body
+    assert body["moved"] == 1
+    assert not _thread_in(email, sent["id"], tok)
+    assert _thread_in(email, archive["id"], tok)
+
+
+def test_archiving_an_already_archived_thread_still_spares_sent(account):
+    """A conversation answered twice does not lose its Sent half on the second.
+
+    Mail already sitting in Archive is still mail that arrived, so it counts as
+    something to file for the purpose of deciding whether Sent is spared. Read
+    the other way, the second Send & Archive on the same thread would find
+    "nothing here but your own mail" and file exactly what the first one was
+    careful not to.
+    """
+    email, aid = account["email"], account["id"]
+    tok = "TWICE" + uuid.uuid4().hex[:6]
+    _seed_reply_thread(email, tok)
+    _seed_archive(email)
+    mine = _mailboxes(email)
+    inbox = next(m for m in mine if m["role"] == "inbox")
+    sent = next(m for m in mine if m["role"] == "sent")
+
+    thread_id = _thread_in(email, inbox["id"], tok)[0]["thread_id"]
+    assert api("POST", f"/api/messages/threads/{thread_id}/archive"
+                       f"?account_id={aid}")[0] == 200
+    code, body = api("POST", f"/api/messages/threads/{thread_id}/archive"
+                             f"?account_id={aid}")
+    assert code == 409
+    assert "already in Archive" in body["detail"]
+    assert _thread_in(email, sent["id"], tok)
+
+
+def test_trash_thread_still_takes_the_sent_half(account):
+    """Deleting a conversation means the whole of it, the copies you wrote too.
+
+    The counterpart to the archive tests above, and the reason the sparing is a
+    flag on the move rather than the rule for every verb: "delete this
+    conversation" has one reading, and leaving your side of it in Sent would
+    leave the thread on screen in the one folder that still held it.
+    """
+    email, aid = account["email"], account["id"]
+    tok = "TRASHALL" + uuid.uuid4().hex[:6]
+    _seed_reply_thread(email, tok)
+    _seed_trash(email)
+    mine = _mailboxes(email)
+    inbox = next(m for m in mine if m["role"] == "inbox")
+    sent = next(m for m in mine if m["role"] == "sent")
+    trash = next(m for m in mine if m["role"] == "trash")
+
+    thread_id = _thread_in(email, inbox["id"], tok)[0]["thread_id"]
+    code, body = api("POST", f"/api/messages/threads/{thread_id}/trash"
+                             f"?account_id={aid}")
+    assert code == 200, body
+    assert body["moved"] == 2
+    assert not _thread_in(email, sent["id"], tok)
+    assert _thread_in(email, trash["id"], tok)
+
+
 def test_trashing_one_message_leaves_the_rest_of_the_conversation(account):
     """The trash icon on a message card takes that message, not the thread.
 

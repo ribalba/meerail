@@ -796,7 +796,7 @@ def archive(message_id: int, source_mailbox_id: int | None = None,
 
 
 def _thread_move(db: DBSession, thread_id: str, account_id: int, target: Mailbox | None,
-                 op_kind: str = "move") -> tuple[int, str]:
+                 op_kind: str = "move", spare_own_mail: bool = False) -> tuple[int, str]:
     """File an entire conversation, every message and every placement.
 
     Doing this server-side rather than message-by-message from the reader is
@@ -818,7 +818,8 @@ def _thread_move(db: DBSession, thread_id: str, account_id: int, target: Mailbox
     # puts the whole conversation back rather than the message the reader
     # happened to have open.
     op_id = undo.new_op_id()
-    moved = mailops.move_messages(db, msgs, target, touched, op_id, op_kind)
+    moved = mailops.move_messages(db, msgs, target, touched, op_id, op_kind,
+                                  spare_own_mail=spare_own_mail)
     if not moved and target is not None:
         # Every placement was already in the target folder, so the conversation
         # is where it was being asked to go. Said rather than reported as a
@@ -837,8 +838,24 @@ def _thread_move(db: DBSession, thread_id: str, account_id: int, target: Mailbox
 
 @router.post("/threads/{thread_id:path}/archive")
 def archive_thread(thread_id: str, account_id: int, db: DBSession = Depends(get_db)):
+    """File the conversation, and leave the half of it you wrote where it is.
+
+    The one conversation verb that spares \\Sent and \\Drafts. Archiving is
+    about the inbox — the mail that arrived is dealt with and can leave the desk
+    — and your own copy of a reply was never on that desk: it is in Sent because
+    you sent it, which is not a filing decision anyone is asking to revisit. On
+    Proton the system folders are exclusive, so archiving the sent copy is
+    literally taking it out of Sent, which is what
+    github.com/ribalba/meerail/issues/20 reported: reply to something in Sent,
+    press Send & Archive, and the sent side of the thread goes with it.
+
+    Trash does not do this, deliberately. "Delete this conversation" means the
+    whole of it, the copies you wrote included — the same reading every mail
+    client has of it, and the one that leaves nothing behind to explain.
+    """
     target = mailops.require_archive_mailbox(db, account_id)
-    moved, op_id = _thread_move(db, thread_id, account_id, target, "archive")
+    moved, op_id = _thread_move(db, thread_id, account_id, target, "archive",
+                                spare_own_mail=True)
     return {"ok": True, "moved": moved, "op_id": op_id}
 
 
