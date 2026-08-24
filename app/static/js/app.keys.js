@@ -210,6 +210,10 @@ App.keys = (function () {
         // it has to work while the composer has the keyboard, since swapping
         // the draft you are typing in for another one is the point of it.
         { show: "⌥/Alt C", label: "Next minimized draft" },
+        // Also display-only. Listed because the Cc/Bcc buttons are deliberately
+        // not tab stops, which leaves this as the only way to those rows for
+        // hands that never touch the mouse.
+        { show: "⌥/Alt ⇧ C/B", label: "Cc / Bcc line" },
         { keys: ["/"], show: "/", label: "Search", run: () => App.search.focusInput() },
         { show: "⌘/Ctrl ↵", label: "Send message" },
         // Handled ahead of the table in handle() — modified keys never reach it.
@@ -292,6 +296,19 @@ App.keys = (function () {
     }
     if (e.altKey && !mod && e.key === "Enter") {
       if (App.compose.isOpen()) { e.preventDefault(); App.compose.sendNow(); }
+      return;
+    }
+    // Alt+Shift+C/B open the composer's Cc and Bcc rows and put the caret in
+    // them. The buttons that do the same thing sit outside the tab ring — Tab
+    // in the composer walks the fields a message is written into and nothing
+    // else — so this is the keyboard's way to them. Ahead of Alt+C below,
+    // which would otherwise answer Alt+Shift+C with a different draft, and
+    // swallowed rather than passed on when no composer is open: a shortcut for
+    // a window that is not there does nothing.
+    if (e.altKey && !mod && e.shiftKey && (e.code === "KeyC" || e.code === "KeyB")) {
+      if (!App.compose.isOpen()) return;
+      e.preventDefault();
+      App.compose.focusExtra(e.code === "KeyC" ? "cc" : "bcc");
       return;
     }
     // Alt+C brings the next minimized draft up, parking whatever is in the

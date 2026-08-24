@@ -46,3 +46,19 @@ bar/dock.
 `build/icon.png`, a 1024×1024 export (the size macOS prefers as an `icns`
 source). Code signing/notarization is not configured — add your certs for
 distributable macOS builds.
+
+## Warnings during `npm install`
+
+The install prints deprecation warnings for `inflight`, `glob@7`, `rimraf@2`
+and `boolean`. All four come from `electron-builder`'s own dependency tree
+(`@electron/asar`, `electron-winstaller`, `@electron/get`) — nothing this
+project depends on directly, and nothing that ends up in the shipped app,
+which bundles only `main.js`, `package.json` and the icon. Newer releases of
+those packages are ESM-only and Node ≥ 22.12, which `electron-builder` cannot
+consume yet, so an `overrides` block would break the build rather than fix the
+warnings. They go away when `electron-builder` updates upstream.
+
+`electron` on its own installs 13 packages with no warnings; the noise is
+entirely the packaging toolchain. `npm audit` should report no
+vulnerabilities — if it does not, `npm audit fix --package-lock-only` and
+commit the lockfile.

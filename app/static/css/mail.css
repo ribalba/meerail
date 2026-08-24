@@ -550,6 +550,30 @@ body.resizing { cursor: col-resize; user-select: none; }
   cursor: pointer; white-space: nowrap; box-shadow: 0 2px 10px rgba(0, 0, 0, .16); }
 .earlier-pill:hover { background: var(--accent-weak); }
 
+/* Link peek — the address behind the link under the pointer, drawn where a
+   browser draws it. Fixed to the window rather than placed in the pane, which
+   is the scroller: app.linkpeek.js measures both edges off .reading-pane, since
+   the divider moves one and the narrow layout can lift the other. Never takes
+   the pointer: it sits over the mail, and a click meant for the message must
+   reach it. */
+.link-peek { position: fixed; z-index: 30; pointer-events: none;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  background: var(--bg-elev); border: 1px solid var(--border);
+  border-left: none; border-bottom: none; border-radius: 0 6px 0 0;
+  padding: .2rem .55rem; box-shadow: 0 -1px 8px light-dark(rgba(0,0,0,.10), rgba(0,0,0,.45));
+  /* Monospaced, unlike the rest of the app: this is a string being examined
+     rather than read, and rn/m and l/1 have to be told apart in it. */
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .74rem; line-height: 1.5;
+  /* A right-to-left run inside a path must not be able to walk the host out of
+     the position that says which one it is. */
+  direction: ltr; unicode-bidi: isolate; }
+.link-peek[hidden] { display: none; }
+/* Which host the click lands on is the whole question, so it is the one part
+   drawn at full strength. */
+.link-peek .lp-host { color: var(--text); font-weight: 600; unicode-bidi: isolate; }
+.link-peek .lp-dim { color: var(--text-muted); }
+
 /* Each message is its own bordered card. Threads run long and every reply
    quotes the last one back at you, so the boundary has to be drawn hard —
    the old 8px spacer left two messages reading as one. */
@@ -958,6 +982,11 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
   background: transparent; color: var(--text-muted);
 }
 .compose-suggest-btn:hover { border-style: solid; border-color: var(--accent); color: var(--text); }
+/* Focus only ever lands here from the keyboard — ↓ out of a recipient field —
+   and it arrives by script, which not every browser counts as :focus-visible.
+   So the ring is on plain :focus; a click adds the address and moves the caret
+   into the field, so there is never one left sitting on a chip. */
+.compose-suggest-btn:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
 .compose-suggest-btn .cs-plus { color: var(--accent); font-weight: 600; }
 .compose-suggest-btn .cs-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Why the From changed itself. Shrinks before the field it explains does, and

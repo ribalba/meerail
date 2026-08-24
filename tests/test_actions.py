@@ -141,6 +141,69 @@ def test_archive_thread_clears_every_message_and_every_folder(account):
     assert len([m for m in moves if m["payload"]["to_folder"] == "Archive"]) == 3
 
 
+def test_trashing_one_message_leaves_the_rest_of_the_conversation(account):
+    """The trash icon on a message card takes that message, not the thread.
+
+    github.com/ribalba/meerail/issues/19: it shared a code path with the bar at
+    the top of the reader, so trashing the auto-responder that had landed in the
+    middle of a long conversation put every mail in that conversation into the
+    Trash — on Proton, a delete timer on all of them, which is what the report
+    was of.
+
+    The other half of the same button is here too: the message has to leave
+    *every* folder it is filed under. A message card carries no folder, so the
+    call names none, and a copy left behind under a label would be the delete
+    not having happened as far as anything showing that label is concerned.
+    """
+    email, aid = account["email"], account["id"]
+    _seed_trash(email)
+    a, b = (f"{p}-{uuid.uuid4().hex}@t" for p in ("a", "b"))
+    tok = "ONEMSGTOK" + uuid.uuid4().hex[:6]
+    A = make_message(f"<{a}>", f"Subject {tok}", "x@y.com", email, f"{tok} body", T0)
+    B = make_message(f"<{b}>", f"Re: Subject {tok}", "auto@y.com", email, f"{tok} away",
+                     T0 + timedelta(hours=1), in_reply_to=f"<{a}>", refs=[f"<{a}>"])
+    for uid, raw in enumerate((A, B), start=1):
+        dbfixture.ingest_raw_message(email, raw, uid=uid)
+    # The auto-responder also wears a Proton label, as a real message does.
+    dbfixture.record_placement(email, b, uid=101, folder="Labels/Work")
+
+    _, boxes = api("GET", "/api/mailboxes")
+    mine = next(x for x in boxes["accounts"] if x["email"] == email)["mailboxes"]
+    inbox = next(m for m in mine if m["role"] == "inbox")
+    label = next(m for m in mine if m["imap_name"] == "Labels/Work")
+
+    _, rows = api("GET", f"/api/messages?mailbox_id={inbox['id']}&limit=50")
+    row = next(r for r in rows["rows"] if tok in r["subject"])
+    assert row["thread_count"] == 2
+    _, thread = api("GET", f"/api/threads/{row['thread_id']}?account_id={aid}")
+    first, reply = thread["messages"]                      # oldest first
+    assert reply["subject"].startswith("Re:")
+
+    # No source folder: the message, wherever it is filed.
+    code, body = api("POST", f"/api/messages/{reply['id']}/trash")
+    assert code == 200, body
+
+    # The bug, stated as an assertion: the message that was not asked about is
+    # still sitting in the inbox rather than in the Trash beside the one that was.
+    _, kept = api("GET", f"/api/messages/{first['id']}")
+    assert [f["role"] for f in kept["locations"]] == ["inbox"]
+    _, rows = api("GET", f"/api/messages?mailbox_id={inbox['id']}&limit=50")
+    assert [r for r in rows["rows"] if tok in r["subject"]]
+
+    # The one that was asked about is in the Trash and nowhere else — not left
+    # behind under the label, which is the other way this used to half-work.
+    _, went = api("GET", f"/api/messages/{reply['id']}")
+    assert [f["role"] for f in went["locations"]] == ["trash"]
+    _, rows = api("GET", f"/api/messages?mailbox_id={label['id']}&limit=50")
+    assert not [r for r in rows["rows"] if tok in r["subject"]]
+
+    # Two placements to clear, and nothing queued against the message that stayed.
+    moves = [x for x in _actions(email) if x["type"] == "move"]
+    assert len(moves) == 2
+    assert all(m["payload"]["to_folder"] == "Trash" for m in moves)
+    assert {m["payload"]["from_folder"] for m in moves} == {"INBOX", "Labels/Work"}
+
+
 def test_archiving_a_conversation_twice_says_it_is_already_filed(account):
     """A second press moves nothing, and says so.
 

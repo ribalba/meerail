@@ -739,34 +739,60 @@ def flag(message_id: int, flagged: bool = True, db: DBSession = Depends(get_db))
     return {"ok": True, "flagged": flagged}
 
 
-@router.post("/{message_id}/trash")
-def trash(message_id: int, source_mailbox_id: int, db: DBSession = Depends(get_db)):
-    msg = _get_message(db, message_id)
-    target = mailops.trash_mailbox(db, msg.account_id)
+def _message_move(db: DBSession, msg: Message, target: Mailbox, op_kind: str,
+                  source_mailbox_id: int | None) -> dict:
+    """File one message: out of one folder, or out of every folder it is in.
+
+    Which of the two is `source_mailbox_id`. Naming a folder moves that
+    placement and leaves the message's other labels alone — the swipe on a list
+    row, which is a copy sitting in the folder being looked at, and the shape
+    every caller of these routes had before the reader grew a per-message verb.
+
+    Leaving it out means the message itself, wherever it is filed. That is what
+    the trash icon on a message card has to mean: on a label server the copies
+    in INBOX, in \\All and under a user label are one mail seen three times, so
+    clearing only the placement the reader happened to pick leaves the message
+    exactly where it was as far as anyone looking at the list can tell. It is
+    the rule _thread_move follows for a conversation, scoped to one message.
+
+    Both paths refuse the same way when nothing moved. move_to raises it itself
+    for a source that is already the target; the all-placements path drops those
+    placements from the set it walks and comes back having moved nothing, which
+    says the same thing.
+    """
     op_id = undo.new_op_id()
-    if not mailops.move_to(db, msg, source_mailbox_id, target, op_id=op_id, op_kind="trash"):
+    touched: set[int] = set()
+    if source_mailbox_id is None:
+        moved = mailops.move_messages(db, [msg], target, touched, op_id, op_kind)
+    else:
+        moved = mailops.move_to(db, msg, source_mailbox_id, target, touched,
+                                op_id=op_id, op_kind=op_kind)
+    if not moved:
         raise HTTPException(status_code=409, detail=mailops.already_there(target))
+    mailops.recompute(db, touched)
     db.commit()
     mailops.wake_agent(db, msg.account_id)
-    events.publish({"type": "present", "message_id": message_id})
+    events.publish({"type": "present", "message_id": msg.id})
     # The operation id goes back to the browser so the Recent actions panel can
     # show the entry the moment the keypress lands, rather than waiting for the
     # event that says the list changed. See app/static/js/app.undo.js.
     return {"ok": True, "op_id": op_id}
 
 
-@router.post("/{message_id}/archive")
-def archive(message_id: int, source_mailbox_id: int, db: DBSession = Depends(get_db)):
+@router.post("/{message_id}/trash")
+def trash(message_id: int, source_mailbox_id: int | None = None,
+          db: DBSession = Depends(get_db)):
     msg = _get_message(db, message_id)
-    target = mailops.require_archive_mailbox(db, msg.account_id)
-    op_id = undo.new_op_id()
-    if not mailops.move_to(db, msg, source_mailbox_id, target, op_id=op_id, op_kind="archive"):
-        raise HTTPException(status_code=409, detail=mailops.already_there(target))
-    db.commit()
-    mailops.wake_agent(db, msg.account_id)
-    events.publish({"type": "present", "message_id": message_id})
-    # See trash(), above.
-    return {"ok": True, "op_id": op_id}
+    return _message_move(db, msg, mailops.trash_mailbox(db, msg.account_id),
+                         "trash", source_mailbox_id)
+
+
+@router.post("/{message_id}/archive")
+def archive(message_id: int, source_mailbox_id: int | None = None,
+            db: DBSession = Depends(get_db)):
+    msg = _get_message(db, message_id)
+    return _message_move(db, msg, mailops.require_archive_mailbox(db, msg.account_id),
+                         "archive", source_mailbox_id)
 
 
 def _thread_move(db: DBSession, thread_id: str, account_id: int, target: Mailbox | None,
@@ -824,16 +850,11 @@ def trash_thread(thread_id: str, account_id: int, db: DBSession = Depends(get_db
 
 
 @router.post("/{message_id}/move")
-def move(message_id: int, mailbox_id: int, source_mailbox_id: int, db: DBSession = Depends(get_db)):
+def move(message_id: int, mailbox_id: int, source_mailbox_id: int | None = None,
+         db: DBSession = Depends(get_db)):
     msg = _get_message(db, message_id)
     target = db.get(Mailbox, mailbox_id)
     if target is None or target.account_id != msg.account_id:
         raise HTTPException(status_code=400, detail="Invalid target mailbox")
-    op_id = undo.new_op_id()
-    if not mailops.move_to(db, msg, source_mailbox_id, target, op_id=op_id, op_kind="move"):
-        raise HTTPException(status_code=409, detail=mailops.already_there(target))
-    db.commit()
-    mailops.wake_agent(db, msg.account_id)
-    events.publish({"type": "present", "message_id": message_id})
-    # See trash(), above.
-    return {"ok": True, "op_id": op_id}
+    # See _message_move for what leaving the source out means.
+    return _message_move(db, msg, target, "move", source_mailbox_id)

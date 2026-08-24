@@ -15,13 +15,14 @@ for analytics. Runs on Linux, macOS and Windows.
 
 **Features:** three-pane Apple-Mail-style UI · unified inbox across accounts · conversation
 threading · POSIX-regex & keyword search (scope + "last N years" window, `:unread` / `:read` /
-`:has-attachment` / `:from` / `:to` filters, searches PDF/Office attachment text via Tika) ·
-every result says **which folder it was found in**, and each message in a thread says where it
-is filed — Trash included · sandboxed HTML rendering that blocks every remote fetch a message
-can ask for — the images, and the CSS that would otherwise fetch them for it · read/flag/
-archive/delete and compose that **sync back to your mail server** over IMAP/SMTP · file a mail
-as a **Meerato task**, attachments and all · optional **AI help** — write the search query from
-a description, ask anything about a whole conversation, have a reminder time suggested from
+`:has-attachment` / `:from` / `:to` filters, searches PDF/Office attachment text via Tika) · every
+result says **which folder it was found in**, and each message in a thread says where it is filed
+— Trash included · sandboxed HTML rendering that blocks every remote fetch a message can ask for —
+the images, and the CSS that would otherwise fetch them for it · **hover a link and the address it
+really goes to** appears at the foot of the pane, with the host picked out of it ·
+read/flag/archive/delete and compose that **sync back to your mail server** over IMAP/SMTP · file
+a mail as a **Meerato task**, attachments and all · optional **AI help** — write the search query
+from a description, ask anything about a whole conversation, have a reminder time suggested from
 what the thread says, explain an attachment (Claude, OpenAI, or any OpenAI-compatible endpoint
 including a local Ollama) · light + dark, following the system or pinned to either in Settings.
 

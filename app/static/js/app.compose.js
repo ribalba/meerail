@@ -250,8 +250,13 @@ App.compose = (function () {
     const host = $("#compose-suggest");
     suggestItems = items;
     $("#compose-suggest-row").hidden = !items.length;
+    // tabindex="-1" on every chip: these are offers, and a row of them between
+    // the recipients and the subject turned Tab from To into a walk past
+    // everyone the history could think of before it reached the message. Tab
+    // walks the fields; the chips are reached with ↓ from a recipient field
+    // (see onHeaderKey) and stay clickable as they always were.
     host.innerHTML = items.map((c, i) =>
-      `<button type="button" class="compose-suggest-btn" data-i="${i}"
+      `<button type="button" class="compose-suggest-btn" data-i="${i}" tabindex="-1"
                title="Add ${App.esc(c.address)}">
         <span class="cs-plus">+</span>
         <span class="cs-label">${App.esc(c.name || c.address)}</span>
@@ -260,20 +265,89 @@ App.compose = (function () {
       b.addEventListener("click", () => addRecipient(items[Number(b.dataset.i)])));
   }
 
-  // Into whichever recipient field was last used, so adding to Cc keeps adding
-  // to Cc — but never into a row that has since been folded away, since that
-  // clears on close and the address would vanish without ever being seen.
-  function addRecipient(contact) {
-    if (!contact) return;
+  // Whichever recipient field was last used, so adding to Cc keeps adding to
+  // Cc — but never a row that has since been folded away, since that clears on
+  // close and an address put there would vanish without ever being seen.
+  function recipientInput() {
     let sel = lastField;
     if (sel !== "#compose-to" && $(`${sel}-row`).hidden) sel = "#compose-to";
-    const input = $(sel);
+    return $(sel);
+  }
+
+  function addRecipient(contact) {
+    if (!contact) return;
+    const input = recipientInput();
     const current = input.value.trim().replace(/,$/, "").trim();
     input.value = (current ? `${current}, ` : "") + contact.address + ", ";
     input.focus();
     // Scripted .value changes fire nothing, and this is a recipient arriving:
     // the From guess and the next round of suggestions both hang off it.
     input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  // --- Reaching the offers from the keyboard ---------------------------
+  // The chips are out of the tab ring, so there has to be a way in that is not
+  // the mouse. ↓ from a recipient field is that way: the same key that walks
+  // the autocomplete list under the field, one row further down. ←/→ walk the
+  // chips, Enter adds the focused one (it is a button — that is free), and
+  // Escape or ↑ hands the caret back to the field it would have been added to.
+  // Tab from a chip carries on to Subject, since nothing in between is tabbable.
+
+  function suggestButtons() {
+    return Array.from($("#compose-suggest").querySelectorAll(".compose-suggest-btn"));
+  }
+
+  function enterSuggestions() {
+    if ($("#compose-suggest-row").hidden) return false;
+    const first = suggestButtons()[0];
+    if (first) first.focus();
+    return !!first;
+  }
+
+  function onSuggestKey(e) {
+    const btns = suggestButtons();
+    const i = btns.indexOf(document.activeElement);
+    if (i < 0) return;
+    // Nothing pressed on a chip belongs to the shortcuts behind the composer.
+    // Focus is on a button rather than in a field, which is app.keys.js's test
+    // for "not typing" — left alone, ↓ scrolls the list under the window and a
+    // bare letter archives the thread the draft is a reply to. Tab is the one
+    // key let through, and only to leave: it carries on to Subject.
+    if (e.key === "Tab" || e.altKey || e.ctrlKey || e.metaKey) return;
+    e.stopPropagation();
+    if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+      e.preventDefault();
+      btns[(i + (e.key === "ArrowRight" ? 1 : btns.length - 1)) % btns.length].focus();
+    } else if (e.key === "Enter" || e.key === " ") {
+      // What a focused button answers to anyway — except that app.keys.js
+      // takes Enter for "open what is selected" and cancels it before the
+      // browser can turn it into a click. So the click is made here.
+      e.preventDefault();
+      btns[i].click();
+    } else if (e.key === "ArrowUp" || e.key === "Escape") {
+      // Escape in here means "none of these people", not "put the draft away".
+      e.preventDefault();
+      recipientInput().focus();
+    } else if (e.key.length === 1) {
+      // Somebody carried on typing an address instead of picking a name. Hand
+      // the caret back without eating the character: focus moves during the
+      // keydown, so what was typed lands in the field, which is where it was
+      // going before the chips were in the way.
+      recipientInput().focus();
+    }
+  }
+
+  // Enter in a header field means "done addressing": it goes straight to the
+  // message rather than one field on, which is the jump people ask for after
+  // tabbing past everything between To and the body. Shift+Tab comes back.
+  //
+  // Neither key reaches here while the autocomplete list is open — Enter picks
+  // the highlighted name and ↓ walks the list, and that handler took the key
+  // first (it is attached first, and calls preventDefault when it acts).
+  function onHeaderKey(e, offers) {
+    if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    if (e.key === "Enter") { e.preventDefault(); body.focus(false); }
+    else if (offers && e.key === "ArrowDown" && enterSuggestions()) e.preventDefault();
   }
 
   async function suggestRelated() {
@@ -607,6 +681,24 @@ App.compose = (function () {
     if (on) $(`#compose-${which}`).focus();
   }
 
+  // Alt+Shift+C / Alt+Shift+B, from app.keys.js. The buttons these stand in for
+  // are out of the tab ring, so this is how the keyboard opens a Cc or Bcc row.
+  // Pressed again on the row it just opened, with nothing typed in, it folds
+  // that row away again — a mistyped shortcut leaves the composer as it found
+  // it. A row with an address in it is never closed this way: closing clears
+  // the field, and a shortcut must not throw a recipient away silently.
+  function focusExtra(which) {
+    const input = $(`#compose-${which}`);
+    if (!$(`#compose-${which}-row`).hidden
+        && document.activeElement === input && !input.value.trim()) {
+      showExtra(which, false);
+      $("#compose-to").focus();
+      return;
+    }
+    showExtra(which, true);
+    input.focus();
+  }
+
   function openWith(ctx) {
     makeRoom();                 // park whatever was in the window first
     discardStaged();
@@ -860,10 +952,17 @@ App.compose = (function () {
     $("#compose-bcc-toggle").addEventListener("click", () => toggleExtra("bcc"));
     $("#compose-file").addEventListener("change", (e) => onFiles(e.target.files));
     ["#compose-to", "#compose-cc", "#compose-bcc"].forEach((s) => {
+      // Attached first so it gets first refusal on ↵ and ↓: with names on
+      // screen those keys belong to the list, and onHeaderKey stands down.
       App.autocomplete.attach($(s));
       $(s).addEventListener("input", queueRecipientLookups);
       $(s).addEventListener("focus", () => { lastField = s; });
+      $(s).addEventListener("keydown", (e) => onHeaderKey(e, true));
     });
+    // No ↓ from the subject: the offers are the row above it, and a key that
+    // means "further down the window" must not send the caret backwards.
+    $("#compose-subject").addEventListener("keydown", (e) => onHeaderKey(e, false));
+    $("#compose-suggest").addEventListener("keydown", onSuggestKey);
     // Hiding a Cc/Bcc row clears it, which changes who the message is going to.
     ["#compose-cc-toggle", "#compose-bcc-toggle"].forEach((s) =>
       $(s).addEventListener("click", queueRecipientLookups));
@@ -911,7 +1010,7 @@ App.compose = (function () {
   return {
     init, openNew, openReply, openWithBody, close, sendNow, sendDefault, sendAndArchive,
     sendAndTicket,
-    minimize, cycle,
+    minimize, cycle, focusExtra,
     htmlDefault, setHtmlDefault,     // the settings modal owns the checkbox, not the state
     isOpen: () => !$("#compose-modal").hidden,
     refreshAccounts: async () => {

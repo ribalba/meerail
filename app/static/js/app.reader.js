@@ -243,6 +243,10 @@ App.reader = (function () {
         // shortcuts would silently stop working. Forward them back out — this
         // reaches across only because the sandbox allows same-origin.
         if (App.keys) doc.addEventListener("keydown", App.keys.handle);
+        // Same reach, for the reason mail needs it most: the link text in an
+        // HTML body is the sender's to write, and the address behind it is not
+        // visible anywhere else in the frame.
+        if (App.linkpeek) App.linkpeek.watch(doc);
       } catch (_) { frame.style.height = "400px"; }
       if (p === pin) landOn();
       if (r === renderId && --frames <= 0) settle();
@@ -308,8 +312,13 @@ App.reader = (function () {
       <button class="tb-btn" data-act="reply" title="Reply">${App.icon("reply", 16)} Reply</button>
       <button class="tb-btn" data-act="replyall" title="Reply All">${App.icon("replyAll", 16)} Reply All</button>
       <button class="tb-btn" data-act="forward" title="Forward">${App.icon("forward", 16)} Forward</button>
-      <button class="tb-btn" data-act="archive" title="Archive">${App.icon("archive", 16)}</button>
-      <button class="tb-btn" data-act="trash" title="Delete">${App.icon("trash", 16)}</button>
+      <!-- "this message", spelled out in the tooltips: these two look exactly
+           like the pair in the bar above, which files the whole conversation,
+           and the icon alone cannot say which of the two a click will do. -->
+      <button class="tb-btn" data-act="archive" title="Archive this message"
+        >${App.icon("archive", 16)}</button>
+      <button class="tb-btn" data-act="trash" title="Delete this message"
+        >${App.icon("trash", 16)}</button>
       <span class="tb-spacer"></span>
       <span class="tb-right">
       <!-- Icon-only, all of them, and not only to keep the row short: this
@@ -332,7 +341,8 @@ App.reader = (function () {
         title="${srcHint}" aria-label="${srcHint}"${noSrc ? " disabled" : ""}
         >${App.icon("code", 16)}</button>
       <button class="tb-btn ${m.flagged ? "on" : ""}" data-act="flag" title="Flag">${App.icon("flag", 16, m.flagged)}</button>
-      <button class="tb-btn" data-act="move" title="Move to folder">${App.icon("move", 16)}</button>
+      <button class="tb-btn" data-act="move" title="Move this message to a folder"
+        >${App.icon("move", 16)}</button>
       <button class="tb-btn" data-act="remind" title="Remind me later">${App.icon("bell", 16)}</button>
       <button class="tb-btn" data-act="unread" title="Mark as unread">${App.icon("markunread", 16)}</button>
       </span>
@@ -525,7 +535,7 @@ App.reader = (function () {
   // what gives the menu its wording for free — the plain-text switch says
   // "Show the plain text version" or "Show the formatted message" depending on
   // which way it currently is.
-  function openOverflowMenu(m, anchor) {
+  function openOverflowMenu(m, anchor, one) {
     closeMoveMenu();
     const buttons = [...anchor.closest(".msg-toolbar").querySelectorAll(".tb-right .tb-btn")];
     const el = document.createElement("div");
@@ -542,13 +552,15 @@ App.reader = (function () {
       closeMoveMenu();
       // Anchored to the ⋯ rather than to the button it stands for: Move and
       // Remind open menus of their own, and the button theirs would have hung
-      // off is the one that is not on screen.
-      handleAction(act, m, anchor);
+      // off is the one that is not on screen. `one` travels with it: the ⋯ is
+      // only ever drawn on a message's own toolbar, and a verb reached through
+      // it has to mean what it would have meant as a button.
+      handleAction(act, m, anchor, one);
     });
     mountMenu(el, anchor);
   }
 
-  function openMoveMenu(m, anchor) {
+  function openMoveMenu(m, anchor, one) {
     closeMoveMenu();
     const source = sourceOf(m);
     // The folder it already sits in is not a destination; neither is a folder
@@ -573,7 +585,7 @@ App.reader = (function () {
       if (!item) return;
       const mailboxId = Number(item.dataset.mailbox);
       closeMoveMenu();
-      moveThreadTo(mailboxId);
+      if (one) moveMessageTo(m, mailboxId); else moveThreadTo(mailboxId);
     });
     mountMenu(el, anchor);
   }
@@ -588,6 +600,12 @@ App.reader = (function () {
         for (const t of targets) await App.api.moveMsg(t.m.id, mailboxId, t.source);
       })());
     } catch (e) { alert(e.message || "Move failed"); }
+  }
+
+  // The same verb from a message's own toolbar: this one message, and no source
+  // folder — see removeMessage.
+  function moveMessageTo(m, mailboxId) {
+    finishRemove([m], App.api.moveMsg(m.id, mailboxId), true);
   }
 
   // Archive/trash the whole conversation. Split out of handleAction so the
@@ -620,6 +638,23 @@ App.reader = (function () {
     })());
   }
 
+  // Archive/trash *one* message out of the conversation — the pair of icons on
+  // a message card, as against the pair in the bar above it. Trashing the
+  // auto-reply that landed in the middle of a long thread is the whole point of
+  // them being there, and until this they went through removeThread and put the
+  // entire conversation in the Trash: on Proton that is a delete timer on every
+  // mail in it, which is what github.com/ribalba/meerail/issues/19 reported.
+  //
+  // No source folder goes with the call. "This one, out of my way" is about the
+  // mail rather than about the copy of it this pane happened to draw, and on a
+  // label server that same mail is also in \All and under every label it wears
+  // — leaving those behind is the delete not having happened. The server clears
+  // every placement it has; see app/routers/actions.py::_message_move.
+  function removeMessage(act, m) {
+    finishRemove([m],
+      act === "archive" ? App.api.archiveMsg(m.id) : App.api.trashMsg(m.id), true);
+  }
+
   // Is the folder on screen the one Delete would otherwise file this into? The
   // same question app.bulk.js asks of the bulk bar, and answered the same way:
   // off the folder, not off the message, because a search result or the unified
@@ -637,22 +672,32 @@ App.reader = (function () {
   // saying so, in the words of whichever kind of account this is. Imported mail
   // is gone when the rows go; mail with a server behind it is expunged from the
   // Trash the server itself is holding. See app/routers/actions.py::bulk_purge.
-  function deleteForever() {
+  //
+  // `one` is a message asked for by itself, from its own toolbar: it is named
+  // by itself, the rest of the conversation stays where it is, and the question
+  // says which of the two is about to happen. Everything else about it — what
+  // "delete" costs on this kind of account, that there is no undo — is the same
+  // either way. See removeMessage for why the toolbars mean different things.
+  function deleteForever(one) {
     const msgs = currentThread ? currentThread.messages : [];
     if (!msgs.length) return;
-    const accountId = msgs[0].account_id;
+    const going = one ? [one] : msgs.slice();
+    const accountId = going[0].account_id;
     const acc = App.shell.accounts().find((a) => a.id === accountId);
     const what = acc && acc.local
       ? "This mail was imported, so meerail holds the only copy of it."
       : "This deletes it from the mail server.";
-    if (!confirm(`Permanently delete this conversation?\n\n${what} It cannot be undone.`)) return;
+    const subject = one ? "this message" : "this conversation";
+    if (!confirm(`Permanently delete ${subject}?\n\n${what} It cannot be undone.`)) return;
     // One item for the conversation where there is one, so a reply that landed
     // after this pane was drawn goes with it — the same rule removeThread
     // follows, and for the same reason.
-    const items = currentThread.thread_id
-      ? [{ account_id: accountId, thread_id: currentThread.thread_id }]
-      : msgs.map((m) => ({ account_id: m.account_id, message_id: m.id }));
-    finishRemove(msgs.slice(), App.api.bulkPurge(items));
+    let items;
+    if (one) items = [{ account_id: one.account_id, message_id: one.id }];
+    else if (currentThread.thread_id) {
+      items = [{ account_id: accountId, thread_id: currentThread.thread_id }];
+    } else items = msgs.map((m) => ({ account_id: m.account_id, message_id: m.id }));
+    finishRemove(going, App.api.bulkPurge(items), !!one);
   }
 
   // --- "Remind me" --------------------------------------------------------
@@ -745,12 +790,17 @@ App.reader = (function () {
       });
   }
 
-  async function handleAction(act, m, anchor) {
+  // `one` is the scope the verb was asked for at, and only the filing verbs read
+  // it: true from a message's own toolbar, meaning that message, and falsy from
+  // the bar at the top and from the keyboard, meaning the conversation. The
+  // rest have never had two readings — Reply has always answered the message
+  // whose button was pressed, Flag has always flagged it.
+  async function handleAction(act, m, anchor, one) {
     try {
       if (act === "new") return App.compose.openNew();
       if (!m) return;
-      if (act === "more") return anchor && openOverflowMenu(m, anchor);
-      if (act === "move") return anchor && openMoveMenu(m, anchor);
+      if (act === "more") return anchor && openOverflowMenu(m, anchor, one);
+      if (act === "move") return anchor && openMoveMenu(m, anchor, one);
       if (act === "remind") return anchor && App.reminders.open(m, anchor);
       if (act === "task") return App.tasks.open(m);
       if (act === "ai") return App.ai.openThread(m);
@@ -771,8 +821,10 @@ App.reader = (function () {
       }
       if (act === "flag") { m.flagged = !m.flagged; rerender(); await App.api.flagMsg(m.id, m.flagged); return; }
       if (act === "unread") { m.seen = false; await App.api.markSeen(m.id, false); return; }
-      if (act === "trash" && inTrash()) return deleteForever();
-      if (act === "archive" || act === "trash") return removeThread(act);
+      if (act === "trash" && inTrash()) return deleteForever(one ? m : null);
+      if (act === "archive" || act === "trash") {
+        return one ? removeMessage(act, m) : removeThread(act);
+      }
     } catch (e) { alert(e.message || "Action failed"); }
   }
 
@@ -781,7 +833,14 @@ App.reader = (function () {
   // round trip is what made archive and delete feel stuck. The reload after it
   // settles reconciles the list with the truth — which, when the server said
   // no, is also what puts the rows back.
-  function finishRemove(removed, call) {
+  //
+  // `keptRow` is a removal that took part of a conversation rather than the
+  // whole of it — one message off its own toolbar. The row it came from is
+  // still a conversation with mail in it, so it stays in the list and only its
+  // preview and count are briefly stale, which the reload below settles. The
+  // last message going is not that case: nothing is left to open, so the row
+  // goes with it.
+  function finishRemove(removed, call, keptRow) {
     const threadId = currentThread.thread_id;
     const accountId = removed[0].account_id;
     const gone = new Set(removed.map((x) => x.id));
@@ -790,9 +849,11 @@ App.reader = (function () {
     if (emptied) clear(); else rerender();
     // A list row is a conversation, so it goes by thread — its id is whichever
     // message the row was built from, not necessarily one the reader held.
-    App.list.drop((r) => (threadId
-      ? r.thread_id === threadId && r.account_id === accountId
-      : gone.has(r.id)));
+    if (emptied || !keptRow) {
+      App.list.drop((r) => (threadId
+        ? r.thread_id === threadId && r.account_id === accountId
+        : gone.has(r.id)));
+    }
     // Clearing the conversation you were reading would leave the pane blank and
     // the keyboard flow stranded. The list kept the cursor on the slot the row
     // vacated, so opening it lands on the next mail down — and on nothing at
@@ -957,7 +1018,9 @@ App.reader = (function () {
     wrap.insertAdjacentHTML("beforeend", msgToolbar(m));
     wrap.querySelector(".msg-toolbar").addEventListener("click", (e) => {
       const btn = e.target.closest("[data-act]");
-      if (btn) handleAction(btn.dataset.act, m, btn);
+      // The one place that asks for a verb at message scope: this row belongs to
+      // a single card, and Archive/Delete/Move pressed on it mean that card.
+      if (btn) handleAction(btn.dataset.act, m, btn, true);
     });
 
     // Remote images only exist in the HTML part, so the banner goes with it.
@@ -1129,6 +1192,10 @@ App.reader = (function () {
     // Both menus are anchored to a toolbar button that is about to be replaced.
     closeMoveMenu();
     if (App.reminders) App.reminders.close();
+    // Every body frame goes with them, and a discarded document sends no
+    // mouseout — so the peek would otherwise stand there naming a link that is
+    // no longer under the pointer, or on screen at all.
+    if (App.linkpeek) App.linkpeek.hide();
     pin = pinLast ? {} : null;
     // A redraw remounts every body frame, so the pane is unmeasured again until
     // they land. The chip stays down in the meantime rather than counting

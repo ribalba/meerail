@@ -150,6 +150,10 @@
         <p>No message selected</p>
       </div>
       <div class="reader-content" id="reader-content" hidden></div>
+      <!-- Where the link under the pointer actually goes. Fixed to the foot of
+           the pane and filled in by app.linkpeek.js; inside the section because
+           that is what it belongs to, not because it is laid out by it. -->
+      <div class="link-peek" id="link-peek" hidden></div>
     </section>
   </div>
 
@@ -658,18 +662,24 @@
         </div>
         <div class="compose-row"><label>To</label>
           <input id="compose-to" type="text" placeholder="recipient@example.com, …" autocomplete="off" />
+          <!-- Out of the tab ring on purpose: Tab walks the fields a message is
+               written into — To, whichever extra rows are open, Subject, body —
+               and a folded-away row is an offer, not a field. Alt+Shift+C/B is
+               the keyboard's way to them; see app.keys.js. -->
           <span class="compose-toggles">
-            <button type="button" class="compose-toggle" id="compose-cc-toggle" aria-expanded="false"
-                    aria-controls="compose-cc">Cc</button>
-            <button type="button" class="compose-toggle" id="compose-bcc-toggle" aria-expanded="false"
-                    aria-controls="compose-bcc">Bcc</button>
+            <button type="button" class="compose-toggle" id="compose-cc-toggle" tabindex="-1"
+                    aria-expanded="false" aria-controls="compose-cc"
+                    title="Add a Cc line (⌥/Alt ⇧ C)">Cc</button>
+            <button type="button" class="compose-toggle" id="compose-bcc-toggle" tabindex="-1"
+                    aria-expanded="false" aria-controls="compose-bcc"
+                    title="Add a Bcc line (⌥/Alt ⇧ B)">Bcc</button>
           </span></div>
         <div class="compose-row" id="compose-cc-row" hidden><label>Cc</label>
           <input id="compose-cc" type="text" autocomplete="off" /></div>
         <div class="compose-row" id="compose-bcc-row" hidden><label>Bcc</label>
           <input id="compose-bcc" type="text" autocomplete="off" /></div>
         <div class="compose-row compose-suggest-row" id="compose-suggest-row" hidden>
-          <label>Also</label>
+          <label title="↓ from a recipient field reaches these; ←/→ walk them">Also</label>
           <div class="compose-suggest" id="compose-suggest"></div></div>
         <div class="compose-row"><label>Subject</label>
           <input id="compose-subject" type="text" autocomplete="off" /></div>
@@ -773,6 +783,7 @@
   <script src="/static/js/app.conn.js"></script>
   <script src="/static/js/app.markdown.js"></script>
   <script src="/static/js/app.highlight.js"></script>
+  <script src="/static/js/app.linkpeek.js"></script>
   <script src="/static/js/app.autocomplete.js"></script>
   <!-- Ahead of the reader and the list: both call into it while rendering. -->
   <script src="/static/js/app.reminders.js"></script>

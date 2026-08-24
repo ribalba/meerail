@@ -9,6 +9,14 @@ App.conn = App.conn || {
   init() {}, fail() {}, ok() {}, whenRestored() {}, isDown: () => false,
 };
 
+// Which copy of a message an action moves, as a query fragment — and nothing
+// at all when the caller did not name one, which is the server's spelling of
+// "every folder this message is in". `lead` is the separator the route needs,
+// which differs only because /move already carries a parameter of its own.
+function sourceParam(mailboxId, lead) {
+  return mailboxId == null ? "" : `${lead}source_mailbox_id=${mailboxId}`;
+}
+
 // --- API client ---
 App.api = {
   async ensureSession() {
@@ -200,10 +208,20 @@ App.api = {
 
   markSeen(id, seen) { return this.post(`/api/messages/${id}/mark?seen=${seen ? 1 : 0}`); },
   flagMsg(id, flagged) { return this.post(`/api/messages/${id}/flag?flagged=${flagged ? 1 : 0}`); },
-  trashMsg(id, sourceMailboxId) { return this.post(`/api/messages/${id}/trash?source_mailbox_id=${sourceMailboxId}`); },
-  archiveMsg(id, sourceMailboxId) { return this.post(`/api/messages/${id}/archive?source_mailbox_id=${sourceMailboxId}`); },
+  // The source folder is which copy of the message moves, and leaving it out is
+  // how a caller says "the message, wherever it is filed". Both are needed: a
+  // swipe on a list row means the copy in the folder that row was listed from,
+  // while the trash icon on a message card means the mail — and on a label
+  // server the same mail is also sitting in \All and under every label it
+  // wears. See app/routers/actions.py::_message_move.
+  trashMsg(id, sourceMailboxId) {
+    return this.post(`/api/messages/${id}/trash${sourceParam(sourceMailboxId, "?")}`);
+  },
+  archiveMsg(id, sourceMailboxId) {
+    return this.post(`/api/messages/${id}/archive${sourceParam(sourceMailboxId, "?")}`);
+  },
   moveMsg(id, mailboxId, sourceMailboxId) {
-    return this.post(`/api/messages/${id}/move?mailbox_id=${mailboxId}&source_mailbox_id=${sourceMailboxId}`);
+    return this.post(`/api/messages/${id}/move?mailbox_id=${mailboxId}${sourceParam(sourceMailboxId, "&")}`);
   },
   // Whole-conversation versions: the server works out which messages and which
   // folders, so nothing ingested since the reader opened is left behind.
