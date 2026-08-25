@@ -1079,6 +1079,27 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
    line is better than a Send button pushed off the edge. */
 .compose-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-top: .4rem; }
 .compose-status { flex: 1; color: var(--text-muted); font-size: .84rem; }
+/* The shortcut strip under the send buttons. One horizontal line of hints that
+   wraps when the window is dragged narrow, quiet enough to read straight past
+   once the keys are known — it is a reminder, not a control, so it never takes
+   focus and nothing in it is clickable. Same key caps as the sidebar cheat
+   sheet, a size down: this sits under a window, not in a column of its own. */
+.compose-keys {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: .2rem .85rem;
+  margin-top: .5rem; padding-top: .45rem; border-top: 1px solid var(--border);
+  color: var(--text-muted); font-size: .72rem;
+}
+.compose-keys:empty { display: none; }
+.ck-item { display: inline-flex; align-items: baseline; gap: .3rem; white-space: nowrap; }
+.compose-keys kbd {
+  font-family: var(--font); font-size: .68rem; color: var(--text); background: var(--bg);
+  border: 1px solid var(--border-strong); border-bottom-width: 2px;
+  border-radius: 5px; padding: .05rem .3rem;
+}
+/* A key that would do nothing at this moment — the suggestion hints while the
+   history has nobody to offer. Dimmed rather than hidden so the strip does not
+   reflow every time a recipient is typed. */
+.ck-item.off { opacity: .45; }
 /* Outlined alternative to .btn-primary. The composer swaps the two classes
    between its send buttons as the default moves, so they have to match in
    metrics or a button would resize as it changes rank — hence the transparent
@@ -1974,6 +1995,9 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
   /* No room for a footnote next to the field: the From still switches itself,
      it just does so silently rather than squeezing the dropdown to a stub. */
   .compose-note { display: none; }
+  /* Nine hints about keys there is no keyboard for, between the send buttons
+     and the home indicator. Gone for the same reason the sidebar sheet is. */
+  .compose-keys { display: none; }
   .modal { width: min(480px, 94vw); max-height: 88vh; }
 
   /* Attachment viewer. Covers everything rather than living in the reading

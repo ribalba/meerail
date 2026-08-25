@@ -26,6 +26,36 @@ App.compose = (function () {
   const $ = (s) => document.querySelector(s);
   const HTML_KEY = "meerail.compose.html";
 
+  // --- The shortcut strip along the bottom of the window ------------------
+  // The sidebar cheat sheet is behind the backdrop for as long as a draft is
+  // up, and half of these keys are the composer's own and never appear in it
+  // anyway — so the window says what it answers to itself. Order follows the
+  // way a message is written: fill the headers, reach the offers, send it.
+  //
+  // `ck` marks the hints that only mean something while there are suggestions
+  // on screen; setSuggestions dims those.
+  const KEYS = [
+    { show: "⇥", label: "Next field" },
+    // Only from a header field — in the message itself ↵ is a new line, which
+    // is why the hint says where it applies rather than just "Message".
+    { show: "↵", label: "Header → message" },
+    { show: "⌥/Alt ⇧ C/B", label: "Cc / Bcc" },
+    { show: "⌥/Alt ⇧ S", label: "Suggested people", ck: "suggest" },
+    { show: "←/→ ↵", label: "Walk / add a suggestion", ck: "suggest" },
+    { show: "⌘/Ctrl ↵", label: "Send" },
+    // The plain-Send key: ⌘↵ presses whichever button is the primary one, and
+    // behind a thread that is Send & Archive. This one only ever sends.
+    { show: "⌥/Alt ↵", label: "Send without archiving" },
+    { show: "⌥/Alt C", label: "Next parked draft" },
+    { show: "Esc", label: "Minimize" },
+  ];
+
+  function renderKeys() {
+    $("#compose-keys").innerHTML = KEYS.map((k) =>
+      `<span class="ck-item"${k.ck ? ` data-ck="${k.ck}"` : ""}>
+        <kbd>${App.esc(k.show)}</kbd>${App.esc(k.label)}</span>`).join("");
+  }
+
   // One entry per sendable address: the account primary plus its extra
   // "send as" addresses (Proton aliases). Drives the From dropdown.
   //
@@ -250,6 +280,12 @@ App.compose = (function () {
     const host = $("#compose-suggest");
     suggestItems = items;
     $("#compose-suggest-row").hidden = !items.length;
+    // The footer hints for reaching and picking an offer mean nothing while
+    // there are none. Dimmed rather than dropped: the strip keeps its shape as
+    // suggestions come and go with each recipient typed, and the key stays on
+    // screen to be learned for the draft that does have people to offer.
+    document.querySelectorAll('#compose-keys [data-ck="suggest"]').forEach((el) =>
+      el.classList.toggle("off", !items.length));
     // tabindex="-1" on every chip: these are offers, and a row of them between
     // the recipients and the subject turned Tab from To into a walk past
     // everyone the history could think of before it reached the message. Tab
@@ -304,6 +340,23 @@ App.compose = (function () {
     return !!first;
   }
 
+  // Alt+Shift+S, from app.keys.js. ↓ only reaches the chips from a recipient
+  // field, and by the time the offers are worth taking the caret is usually
+  // further down the draft — ↓ out of the subject would be a step backwards,
+  // and out of the body it belongs to the text. So there is one key that gets
+  // here from anywhere in the composer. Pressed again on a chip it hands the
+  // caret back, the way Alt+Shift+C folds away the row it just opened: a
+  // shortcut reached for by mistake leaves the draft as it found it.
+  function focusSuggestions() {
+    if (suggestButtons().includes(document.activeElement)) {
+      recipientInput().focus();
+      return;
+    }
+    // Nothing to offer, so nothing happens — and the footer says so before the
+    // key is pressed by dimming the hint (see setSuggestions).
+    enterSuggestions();
+  }
+
   function onSuggestKey(e) {
     const btns = suggestButtons();
     const i = btns.indexOf(document.activeElement);
@@ -348,6 +401,47 @@ App.compose = (function () {
     if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
     if (e.key === "Enter") { e.preventDefault(); body.focus(false); }
     else if (offers && e.key === "ArrowDown" && enterSuggestions()) e.preventDefault();
+  }
+
+  // --- Keeping Tab inside the window --------------------------------------
+  // Tab off the last send button used to leave the composer altogether: the
+  // focus went to whatever the browser found behind the backdrop, and from
+  // where the writer sits that is focus disappearing — the draft is still the
+  // only thing on screen and nothing in it is lit any more. So the ring closes
+  // on itself, and it closes onto From rather than onto the first tabbable
+  // thing in the window, which is the minimize button: From is the top of the
+  // message, and one lap of the composer should be one lap of the mail. The
+  // two window buttons keep their place ahead of it — one Shift+Tab back from
+  // From — so discarding a draft stays something hands on the keyboard can do.
+  //
+  // Read off the DOM on every press rather than kept in a list: which rows are
+  // open, which of the three send buttons are drawn, and how many attachments
+  // have a remove button all change while the window is up.
+  const TABBABLE = 'button, select, input, a[href], [contenteditable]:not([contenteditable="false"])';
+
+  function tabRing() {
+    return Array.from($("#compose-window").querySelectorAll(TABBABLE)).filter((el) =>
+      // offsetParent is null for anything display:none — a folded-away Cc row,
+      // the hidden file input, a send button that cannot act on this draft.
+      // tabindex="-1" is the deliberate exclusions: the Cc/Bcc toggles and the
+      // suggestion chips, which have their own keys.
+      !el.disabled && el.getAttribute("tabindex") !== "-1" && el.offsetParent !== null);
+  }
+
+  function onTab(e) {
+    if (e.key !== "Tab" || e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
+    const ring = tabRing();
+    const i = ring.indexOf(document.activeElement);
+    // Not on the ring: a suggestion chip, which is off it on purpose and whose
+    // Tab carries on to Subject by itself. Nothing to wrap.
+    if (i < 0) return;
+    if (!e.shiftKey && i === ring.length - 1) {
+      e.preventDefault();
+      $("#compose-from").focus();
+    } else if (e.shiftKey && i === 0) {
+      e.preventDefault();
+      ring[ring.length - 1].focus();
+    }
   }
 
   async function suggestRelated() {
@@ -937,6 +1031,7 @@ App.compose = (function () {
 
   async function init() {
     body = App.markdown.editor($("#compose-body"));
+    renderKeys();
     $("#compose-close").innerHTML = App.icon("close", 18);
     $("#compose-minimize").innerHTML = App.icon("minimize", 18);
     $("#compose-attach").innerHTML = App.icon("paperclip", 18);
@@ -974,6 +1069,9 @@ App.compose = (function () {
     // Deliberately no backdrop click handler: clicking outside the window
     // leaves the composer exactly as it is. Minimizing is the − button's job.
     $("#compose-head").addEventListener("pointerdown", startDrag);
+    // On the window, not the fields: the last stop on the ring is a send
+    // button, and the first is the minimize button in the header.
+    $("#compose-window").addEventListener("keydown", onTab);
 
     const modal = $("#compose-modal");
     modal.addEventListener("dragenter", (e) => {
@@ -1010,7 +1108,7 @@ App.compose = (function () {
   return {
     init, openNew, openReply, openWithBody, close, sendNow, sendDefault, sendAndArchive,
     sendAndTicket,
-    minimize, cycle, focusExtra,
+    minimize, cycle, focusExtra, focusSuggestions,
     htmlDefault, setHtmlDefault,     // the settings modal owns the checkbox, not the state
     isOpen: () => !$("#compose-modal").hidden,
     refreshAccounts: async () => {

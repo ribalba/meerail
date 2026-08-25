@@ -1116,3 +1116,167 @@ def test_an_action_from_before_nesting_still_works():
     """A queue row written by an older server carries only `name`."""
     client = _create({"name": "Receipts"})
     assert client.created == ["Receipts"]
+
+
+# --- deletes, several at a time ----------------------------------------------
+#
+# The UI queues one delete per message emptied out of Trash, so the queue only
+# ever holds them in bulk. Doing that conversation once per message is what left
+# an emptied Trash of nine hundred grinding through a pass at a time — see the
+# comment above _drain_delete_batch.
+
+
+class DeleteClient:
+    """Records the commands a delete run actually sends."""
+
+    def __init__(self, epoch=EPOCH, uidplus=True, expunge_error=None):
+        self._epoch = epoch
+        self._uidplus = uidplus
+        self._expunge_error = expunge_error
+        self.selected = []
+        self.flagged = []
+        self.expunged = []
+
+    def select_folder(self, folder, **_kw):
+        self.selected.append(folder)
+        return {b"UIDVALIDITY": self._epoch}
+
+    def has_capability(self, name):
+        return self._uidplus if name == "UIDPLUS" else True
+
+    def delete_messages(self, uids):
+        self.flagged.append(list(uids))
+
+    def expunge(self, uids=None):
+        if self._expunge_error is not None and len(uids or []) > 1:
+            raise self._expunge_error
+        self.expunged.append(list(uids or []))
+
+
+class DeleteBridge:
+    acc = Account()
+
+    def __init__(self, client):
+        self._client = client
+
+    def ops(self):
+        return self._client
+
+
+def _trashed(uid, folder="Trash", epoch=EPOCH):
+    return Action(type_="delete",
+                  payload={"uid": uid, "folder": folder, "uidvalidity": epoch})
+
+
+def test_deletes_out_of_one_folder_go_as_a_single_expunge():
+    """The point of the batch. Fifty messages emptied out of Trash are one
+    SELECT and one EXPUNGE, not fifty of each — which on a server that throttles
+    is the difference between a pass that finishes and one that does not."""
+    actions = [_trashed(uid) for uid in (11, 12, 13)]
+    client = DeleteClient()
+    db = DB(actions)
+
+    applied, failed, sent = agent_actions.drain_actions(db, DeleteBridge(client), AccountRow())
+
+    assert (applied, failed, sent) == (3, 0, 0)
+    assert client.selected == ["Trash"]
+    assert client.flagged == [[11, 12, 13]]
+    assert client.expunged == [[11, 12, 13]]
+    assert [a.status for a in actions] == ["done", "done", "done"]
+
+
+def test_a_delete_run_stops_at_a_different_folder():
+    """Two folders cannot share a SELECT, and a UID means nothing outside the
+    one it was read in."""
+    actions = [_trashed(11), _trashed(12), _trashed(21, folder="Spam")]
+    client = DeleteClient()
+    db = DB(actions)
+
+    agent_actions.drain_actions(db, DeleteBridge(client), AccountRow())
+
+    assert client.selected == ["Trash", "Spam"]
+    assert client.expunged == [[11, 12], [21]]
+
+
+def test_a_delete_run_stops_at_a_new_uid_epoch():
+    """A UID is only unique within one UIDVALIDITY. Rows queued under different
+    epochs name different messages and cannot be expunged in one command — the
+    one whose epoch no longer matches has to be refused on its own."""
+    actions = [_trashed(11), _trashed(12), _trashed(13, epoch=EPOCH + 1)]
+    client = DeleteClient()
+    db = DB(actions)
+
+    applied, failed, sent = agent_actions.drain_actions(db, DeleteBridge(client), AccountRow())
+
+    assert client.expunged == [[11, 12]]           # the stale one is not in it
+    assert (applied, failed, sent) == (2, 0, 0)
+    assert actions[2].status == "stale"
+
+
+def test_a_batched_expunge_that_fails_is_retried_one_at_a_time():
+    """One command covering fifty UIDs fails as a unit, and the answer does not
+    say which UID caused it. Marking all fifty failed would record fifty
+    attempts and fifty backoffs for one bad number, so the group falls back to
+    the path the drain used before it — where the failure lands on the row that
+    caused it and the rest still go through."""
+    actions = [_trashed(11), _trashed(12)]
+    client = DeleteClient(expunge_error=IMAPClient.Error("EXPUNGE failed"))
+    db = DB(actions)
+
+    applied, failed, sent = agent_actions.drain_actions(db, DeleteBridge(client), AccountRow())
+
+    # Retried singly, and singly they succeed.
+    assert (applied, failed, sent) == (2, 0, 0)
+    assert client.expunged == [[11], [12]]
+    assert [a.status for a in actions] == ["done", "done"]
+    # One attempt each — the attempt that succeeded. The failed batch charged
+    # neither of them, which is the point: a backoff apiece for one bad UID is
+    # what marking the whole group failed would have cost.
+    assert [a.attempts for a in actions] == [1, 1]
+
+
+def test_a_batch_never_reorders_the_queue_around_a_send(failing_send, capsys):
+    """due_queue puts sends first on purpose — mail that has been waiting since
+    Friday does not queue behind an hour of deletes. Gathering deletes from
+    across the queue to make a bigger batch would undo that, so only a
+    consecutive run is ever taken."""
+    send, first, second = Action(), _trashed(11), _trashed(12)
+    client = DeleteClient()
+    db = DB([send, first, second])
+
+    agent_actions.drain_actions(db, DeleteBridge(client), AccountRow())
+
+    assert client.expunged == [[11, 12]]
+    assert send.status == "pending"                   # tried, failed, still queued
+    assert "arne@example.com" in capsys.readouterr().out
+
+
+def test_a_batch_refuses_a_server_that_cannot_aim_an_expunge():
+    """A bare EXPUNGE takes every \\Deleted message in the folder, including
+    ones another client flagged. Batching does not become the reason to reach
+    for it — the refusal is the same one a single delete makes, and it happens
+    before the \\Deleted flag goes on."""
+    actions = [_trashed(11), _trashed(12)]
+    client = DeleteClient(uidplus=False)
+    db = DB(actions)
+
+    applied, failed, sent = agent_actions.drain_actions(db, DeleteBridge(client), AccountRow())
+
+    assert (applied, failed, sent) == (0, 2, 0)
+    assert client.flagged == []                       # nothing left flagged behind
+    assert client.expunged == []
+    assert [a.status for a in actions] == ["pending", "pending"]
+
+
+def test_an_action_another_agent_holds_is_not_expunged_with_the_batch():
+    """The lease is per row inside a batch too: a row this pass does not hold is
+    not one it may act on, however convenient it would be to include."""
+    first, second = _trashed(11), _trashed(12)
+    client = DeleteClient()
+    db = DB([first, second], claimed=[first])         # the other agent has the second
+
+    applied, failed, sent = agent_actions.drain_actions(db, DeleteBridge(client), AccountRow())
+
+    assert (applied, failed, sent) == (1, 0, 0)
+    assert client.expunged == [[11]]
+    assert second.attempts == 0                       # untouched, not failed

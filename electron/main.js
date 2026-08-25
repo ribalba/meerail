@@ -7,14 +7,63 @@
  * Point it at a non-default server with MEERAIL_URL:
  *   MEERAIL_URL=http://localhost:8000 npm start
  *
+ * Accept a certificate nothing on this machine trusts, for that server only:
+ *   MEERAIL_TRUST_CERT=/path/to/certs/cert.pem npm start
+ *
  * Override the spellchecker languages with MEERAIL_SPELLCHECK_LANGS:
  *   MEERAIL_SPELLCHECK_LANGS=en-GB,fr npm start
  */
 const { app, BrowserWindow, clipboard, shell, Menu, MenuItem } = require("electron");
+const fs = require("fs");
 const path = require("path");
 
-const APP_URL = (process.env.MEERAIL_URL || "http://localhost:8000").replace(/\/+$/, "");
-const APP_ORIGIN = new URL(APP_URL).origin;
+/* Where the server is. Not a constant, because of the upgrade in
+ * upgradeToHttps() below: a server with `password` set speaks TLS and nothing
+ * else on its port, and following it there has to take the origin the window
+ * checks its links against along with it.
+ */
+let appUrl = (process.env.MEERAIL_URL || "http://localhost:8000").replace(/\/+$/, "");
+let appOrigin = new URL(appUrl).origin;
+
+/* One certificate to accept for that origin whatever this machine thinks of it.
+ *
+ * Chromium gives the desktop app no way past a certificate warning: the load
+ * fails where a browser would have asked, so a self-signed certificate — the
+ * one docker-compose.tls.yml writes into ./certs — locks the app out entirely.
+ * The other way in is the machine's trust store, which is a different chore on
+ * each platform and trusts the certificate for the whole machine. This trusts
+ * exactly the certificate in this file, and only for the server the app was
+ * pointed at. Give it an absolute path: a packaged app does not start in the
+ * directory you launched it from.
+ */
+const PINNED_CERT = readPinnedCert(process.env.MEERAIL_TRUST_CERT);
+
+function readPinnedCert(file) {
+  if (!file) return null;
+  try {
+    const der = derOf(fs.readFileSync(file, "utf8"));
+    if (!der) throw new Error("no PEM certificate in it");
+    return der;
+  } catch (err) {
+    console.warn(`MEERAIL_TRUST_CERT: ignoring ${file} — ${err.message}`);
+    return null;
+  }
+}
+
+// The base64 body of a PEM certificate, armour and line breaks taken out, so
+// that two spellings of the same certificate compare equal.
+function derOf(pem) {
+  const m = /-----BEGIN CERTIFICATE-----([\s\S]*?)-----END CERTIFICATE-----/.exec(pem || "");
+  return m ? m[1].replace(/\s+/g, "") : null;
+}
+
+function originOf(url) {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+}
 
 // Chromium checks every language in this list at once, so a mail written in
 // German and one written in English are both checked without a manual switch.
@@ -24,11 +73,73 @@ const SPELLCHECK_LANGS = (process.env.MEERAIL_SPELLCHECK_LANGS || "en-US,de-DE")
 let mainWindow = null;
 
 function isInternal(targetUrl) {
-  try {
-    return new URL(targetUrl).origin === APP_ORIGIN;
-  } catch {
-    return false;
-  }
+  return originOf(targetUrl) === appOrigin;
+}
+
+/* Chromium closes the door on an untrusted certificate; PINNED_CERT is the one
+ * key. Compared by the certificate itself rather than by its fingerprint or its
+ * name, so nothing but the file the user named gets in — and only for the
+ * server they pointed the app at, never for a link that led somewhere else.
+ */
+app.on("certificate-error", (event, _webContents, url, _error, certificate, callback) => {
+  const trusted = Boolean(PINNED_CERT)
+    && originOf(url) === appOrigin
+    && derOf(certificate.data) === PINNED_CERT;
+  if (trusted) event.preventDefault();
+  callback(trusted);
+});
+
+/* A server with `password` set does not answer over plaintext at all (README:
+ * "HTTPS without a proxy in front"), and the app's default URL is the plaintext
+ * one — so turning the password on made the desktop app report a server that was
+ * not running, or leave a blank window. Issue #15. Both ways out are the same
+ * move: take the same address over TLS, and take the origin the window checks
+ * its links against along with it, or every click in the app would leave for
+ * the system browser.
+ *
+ * Upward only, and once.
+ */
+// How a TLS socket turns a plaintext request away: uvicorn's answers to one are
+// ERR_EMPTY_RESPONSE and ERR_CONNECTION_RESET, and the others are the same
+// hangup told slightly differently. A server that is simply not there says
+// ERR_CONNECTION_REFUSED and is not in this list, which is the point of it.
+const TLS_SHAPED = new Set([
+  "ERR_EMPTY_RESPONSE", "ERR_CONNECTION_RESET", "ERR_CONNECTION_CLOSED",
+  "ERR_INVALID_HTTP_RESPONSE",
+]);
+let upgraded = false;
+
+function httpsForm() {
+  return `https://${appUrl.slice("http://".length)}`;
+}
+
+function adoptHttps() {
+  appUrl = httpsForm();
+  appOrigin = new URL(appUrl).origin;
+  upgraded = true;
+  return appUrl;
+}
+
+/* In this stack there is no plaintext listener to redirect anyone: uvicorn holds
+ * the port with TLS, and an http:// request to it is answered by the connection
+ * being dropped. That is not "the server is down", however much it looks like it
+ * from here, so try TLS before saying so.
+ */
+function upgradeToHttps(errorDescription) {
+  if (upgraded || !appUrl.startsWith("http://") || !TLS_SHAPED.has(errorDescription)) return false;
+  console.log(`${errorDescription} over plaintext — retrying at ${httpsForm()}`);
+  mainWindow.loadURL(adoptHttps());
+  return true;
+}
+
+/* Where TLS is terminated somewhere in front of the server, there *is* a
+ * plaintext listener, and it answers with a redirect to https:// on the same
+ * host. That redirect is the app moving, not a link leading off it — so follow
+ * it in the same sense: adopt the origin Chromium is already on its way to.
+ */
+function followHttpsRedirect(url) {
+  if (upgraded || !appUrl.startsWith("http://")) return;
+  if (originOf(url) === originOf(httpsForm())) adoptHttps();
 }
 
 function createWindow() {
@@ -57,7 +168,7 @@ function createWindow() {
   // refetching the asset set on launch costs nothing worth keeping.
   const win = mainWindow;
   win.webContents.session.clearCache()
-    .finally(() => { if (!win.isDestroyed()) win.loadURL(APP_URL); });
+    .finally(() => { if (!win.isDestroyed()) win.loadURL(appUrl); });
 
   // Links to other origins open in the system browser, never a child window.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -70,11 +181,15 @@ function createWindow() {
       shell.openExternal(url);
     }
   });
+  mainWindow.webContents.on("will-redirect", (_e, url) => followHttpsRedirect(url));
 
-  // If the server is down, show a retry screen instead of a blank window.
-  mainWindow.webContents.on("did-fail-load", (_e, errorCode, _desc, validatedURL) => {
-    if (errorCode === -3 || !isInternal(validatedURL || APP_URL)) return;
-    mainWindow.loadURL(errorPage());
+  // If the page won't load, show a screen that says why instead of a blank
+  // window. -3 is ERR_ABORTED, which is what a navigation replaced by another
+  // one reports; it is not a failure anyone needs to see.
+  mainWindow.webContents.on("did-fail-load", (_e, errorCode, desc, validatedURL) => {
+    if (errorCode === -3 || !isInternal(validatedURL || appUrl)) return;
+    if (upgradeToHttps(desc)) return;
+    mainWindow.loadURL(errorPage(desc));
   });
 
   trackForeground(mainWindow);
@@ -204,7 +319,36 @@ function setUpSpellCheck(win) {
   });
 }
 
-function errorPage() {
+/* The screen the window falls back to, saying which failure this was.
+ *
+ * A certificate the machine does not trust used to land here as "can't reach
+ * the server", which sent people looking at a server that was running fine and
+ * answering. It is the one failure the shell cannot offer a way past, so it is
+ * the one that has to explain itself.
+ */
+function errorPage(errorDescription) {
+  const cert = /^ERR_CERT/.test(errorDescription || "");
+  const heading = cert
+    ? "meerail's certificate isn't trusted"
+    : "Can't reach the meerail server";
+  let body = `<p>Couldn't connect to <code>${appOrigin}</code>. Start it with
+       <code>docker compose up -d</code> and try again.</p>`;
+  if (cert) {
+    body = `<p>The server at <code>${appOrigin}</code> is answering, but it presented a
+       certificate nothing on this machine trusts (<code>${esc(errorDescription)}</code>), and the
+       desktop app has no "proceed anyway" the way a browser does.</p>
+       <p>Point it at that certificate with
+       <code>MEERAIL_TRUST_CERT=/path/to/certs/cert.pem</code>, or trust the certificate on
+       this machine — see <em>HTTPS without a proxy in front</em> in the README.</p>`;
+  } else if (upgraded) {
+    // The dead end issue #15 is about: a password turned the HTTPS requirement
+    // on, and nothing was put on the other side of it.
+    body = `<p>meerail requires HTTPS here, and nothing answered at
+       <code>${appOrigin}</code> (<code>${esc(errorDescription)}</code>).</p>
+       <p>That requirement comes from <code>password</code> being set, which means something has
+       to be serving TLS. <code>docker-compose.tls.yml</code> in the repo root is the smallest
+       way to arrange it — see <em>HTTPS without a proxy in front</em> in the README.</p>`;
+  }
   const html = `<!DOCTYPE html><html><head><meta charset="utf-8" />
     <style>
       body{margin:0;height:100vh;display:flex;align-items:center;justify-content:center;
@@ -215,12 +359,17 @@ function errorPage() {
         padding:.7rem 1.3rem;background:#1d6ff2;color:#fff;margin-top:1rem}
       code{background:#e6e8eb;padding:.15rem .4rem;border-radius:5px}
     </style></head><body><div class="card">
-      <h1>Can't reach the meerail server</h1>
-      <p>Couldn't connect to <code>${APP_ORIGIN}</code>. Start it with
-      <code>docker compose up -d</code> and try again.</p>
-      <button onclick="location.href='${APP_URL}'">Retry</button>
+      <h1>${heading}</h1>
+      ${body}
+      <button onclick="location.href='${appUrl}'">Retry</button>
     </div></body></html>`;
   return "data:text/html;charset=utf-8," + encodeURIComponent(html);
+}
+
+// Chromium's own wording, and it never contains markup — but it is put into a
+// page, and text that goes into a page gets escaped.
+function esc(text) {
+  return String(text || "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
 }
 
 function buildMenu() {
@@ -233,7 +382,7 @@ function buildMenu() {
       label: "View",
       submenu: [
         { label: "Home", accelerator: "CmdOrCtrl+Shift+H",
-          click: () => mainWindow && mainWindow.loadURL(APP_URL) },
+          click: () => mainWindow && mainWindow.loadURL(appUrl) },
         { role: "reload" }, { role: "forceReload" }, { type: "separator" },
         { role: "resetZoom" }, { role: "zoomIn" }, { role: "zoomOut" }, { type: "separator" },
         { role: "togglefullscreen" }, { role: "toggleDevTools" },

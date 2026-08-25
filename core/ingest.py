@@ -608,6 +608,59 @@ def unplaced_uids(db, mailbox: Mailbox, present_uids: list[int]) -> list[int]:
     return [uid for uid in present_uids if uid not in placed]
 
 
+def uids_with_write_in_flight(db, account: Account, mailbox: Mailbox) -> set[int]:
+    """The UIDs this folder lists that a queued move or delete is about to take.
+
+    ``has_move_in_flight`` answers the same question one message at a time, and
+    to answer it needs a Message-ID — which costs a header fetch for every UID
+    asked about. That is affordable for the handful of placements a normal pass
+    finds unplaced, and not affordable at all for a folder whose contents have
+    just been emptied into the queue: an emptied Trash then spends every pass
+    fetching a thousand headers only to be told, a thousand times, that all of
+    them are on their way out. On a server that throttles, that is the pass.
+
+    The queue already names them without any of it. An action carrying a folder
+    and a UID says exactly which placement it is about to remove, and the epoch
+    it read the number under says whether that name still means anything
+    (mailops.uid_ref). So the cheap half of the question is asked here, in one
+    query, before anything is fetched.
+
+    It is only the cheap half, deliberately. What survives this still goes
+    through has_move_in_flight, which stays the answer for every row a UID
+    cannot match: an action queued under an older epoch, one whose folder was
+    renamed under it, or a message the server lists here under a UID the queue
+    never recorded. This narrows the fetch; it does not decide anything on its
+    own.
+    """
+    if mailbox.uidvalidity is None:
+        return set()          # no epoch to check a UID against; ask the slow way
+    # A move spells the source folder "from_folder" and everything else spells
+    # it "folder" (mailops.uid_ref). A payload missing the key reads as NULL
+    # here, so coalesce picks whichever one the row actually carries.
+    source = func.coalesce(PendingAction.payload["from_folder"].astext,
+                           PendingAction.payload["folder"].astext)
+    rows = db.scalars(
+        select(PendingAction.payload["uid"].astext).where(
+            PendingAction.account_id == account.id,
+            PendingAction.type.in_(("move", "delete")),
+            # The rule move_in_flight applies, written out for this query:
+            # queued or being applied right now, and not so far into the
+            # refusals that the local view has stopped being the one believed.
+            PendingAction.status.not_in(("done",) + store.SETTLED),
+            PendingAction.attempts < store.STUCK_AFTER,
+            source == mailbox.imap_name,
+            PendingAction.payload["uidvalidity"].astext == str(mailbox.uidvalidity),
+        )
+    ).all()
+    out: set[int] = set()
+    for raw in rows:
+        try:
+            out.add(int(raw))
+        except (TypeError, ValueError):
+            continue          # a payload that does not carry a number names nothing
+    return out
+
+
 def has_move_in_flight(db, account: Account, message_id: str | None,
                        headers: bytes | None = None, date=None) -> bool:
     """Is this message — one the folder lists and we hold no placement for — in

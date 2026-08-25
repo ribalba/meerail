@@ -684,7 +684,7 @@
         <div class="compose-row" id="compose-bcc-row" hidden><label>Bcc</label>
           <input id="compose-bcc" type="text" autocomplete="off" /></div>
         <div class="compose-row compose-suggest-row" id="compose-suggest-row" hidden>
-          <label title="↓ from a recipient field reaches these; ←/→ walk them">Also</label>
+          <label title="Alt+Shift+S, or ↓ from a recipient field, reaches these; ←/→ walk them">Also</label>
           <div class="compose-suggest" id="compose-suggest"></div></div>
         <div class="compose-row"><label>Subject</label>
           <input id="compose-subject" type="text" autocomplete="off" /></div>
@@ -714,6 +714,12 @@
           <button id="compose-send-archive" class="btn-primary" hidden
                   title="Send, then archive the whole conversation (Ctrl+Enter)">Send &amp; Archive</button>
         </div>
+        <!-- Every key this window answers to, along the bottom of it. The
+             sidebar cheat sheet is behind the backdrop while a draft is up, and
+             several of these are the composer's own and are not in it at all.
+             Written by app.compose.js from one list, which is also what dims
+             the suggestion hints when there is nothing to suggest. -->
+        <div class="compose-keys" id="compose-keys"></div>
       </div>
     </div>
   </div>

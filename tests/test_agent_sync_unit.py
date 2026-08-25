@@ -212,6 +212,7 @@ class RecheckIngest:
     def update_flags(self, *_a): pass
     def prune_vanished(self, *_a): pass
     def unplaced_uids(self, *_a): return []
+    def uids_with_write_in_flight(self, *_a, **_kw): return set()
     def has_move_in_flight(self, *_a, **_kw): return False
     def prune_mailboxes(self, _db, _account, names): self.pruned.append(names)
     def deferred_folders(self, _db, _account): return []
@@ -766,13 +767,16 @@ class GappyBridge:
         return {u: {"raw": b"the whole message", "flags": {"seen": True}} for u in uids}
 
 
-def _gap_spy(monkeypatch, missing=(2, 3), in_flight=()):
+def _gap_spy(monkeypatch, missing=(2, 3), in_flight=(), queued=()):
     spy = IngestSpy()
     spy.pruned = []
     spy.placed = []
     spy.update_flags = lambda *_a: None
     spy.prune_vanished = lambda _db, _mb, uids: spy.pruned.append(list(uids))
     spy.unplaced_uids = lambda _db, _mb, _uids: list(missing)
+    # ``queued`` is what the queue can name by UID alone, before a fetch;
+    # ``in_flight`` is what only a Message-ID can answer, after one.
+    spy.uids_with_write_in_flight = lambda _db, _acc, _mb: set(queued)
     spy.has_move_in_flight = (lambda _db, _acc, message_id, **_kw:
                               message_id in in_flight)
     spy.store_message = (lambda _db, _acc, _mb, uid, _f, _raw, **_kw:
@@ -821,6 +825,64 @@ def test_a_message_being_moved_is_not_dragged_back_into_the_folder_it_left(monke
     agent_sync._reconcile(CountingDB(), GappyBridge(), object(), Mailbox(), 100)
 
     assert spy.placed == [3]                     # 2 is still on its way out
+
+
+def test_mail_the_queue_can_name_is_never_fetched_to_be_asked_about(monkeypatch):
+    """The prefilter, and the reason it exists. has_move_in_flight needs a
+    Message-ID, and a Message-ID costs a header fetch — so a Trash the user has
+    just emptied was re-fetched in full on every pass, a header per message on
+    its way out, all of them then discarded by the guard.
+
+    The queue already names those by folder and UID. Asking it first means the
+    fetch never happens at all."""
+    spy = _gap_spy(monkeypatch, missing=(2, 3), queued={2, 3})
+    bridge = GappyBridge()
+
+    agent_sync._reconcile(CountingDB(), bridge, object(), Mailbox(), 100)
+
+    assert bridge.fetched == []                  # not one header asked for
+    assert spy.placed == []
+
+
+def test_the_prefilter_only_narrows_what_is_fetched(monkeypatch):
+    """It is the cheap half of the question, not a replacement for the other
+    half: a UID the queue does not name is still fetched and still put to
+    has_move_in_flight, which is the answer for a row queued under an older
+    epoch or against a folder that has been renamed under it."""
+    spy = _gap_spy(monkeypatch, missing=(2, 3), queued={2}, in_flight={"m3"})
+    bridge = GappyBridge()
+
+    agent_sync._reconcile(CountingDB(), bridge, object(), Mailbox(), 100)
+
+    assert bridge.fetched == [[3]]               # 2 was answered without asking
+    assert spy.placed == []                      # and 3 was answered after
+
+
+def test_mail_queued_to_leave_is_not_reported_as_a_backlog(monkeypatch, capsys):
+    """The count is of what this sweep still has to repair. Reporting a queue
+    that is draining as a repair falling behind described the healthy case as a
+    fault — and on an emptied Trash it printed the same alarming line every
+    thirty seconds for hours."""
+    monkeypatch.setattr(agent_sync, "_RESTORE_PER_PASS", 1)
+    spy = _gap_spy(monkeypatch, missing=(2, 3), queued={2, 3})
+
+    agent_sync._reconcile(CountingDB(), GappyBridge(), object(), Mailbox(), 100,
+                          email="user@example.com")
+
+    assert spy.placed == []
+    assert "still missing locally" not in capsys.readouterr().out
+
+
+def test_a_real_backlog_is_still_reported(monkeypatch, capsys):
+    """The other half of it: mail that genuinely has no placement and no queued
+    action behind it is still counted and still said out loud."""
+    monkeypatch.setattr(agent_sync, "_RESTORE_PER_PASS", 1)
+    _gap_spy(monkeypatch, missing=(2, 3))
+
+    agent_sync._reconcile(CountingDB(), GappyBridge(), object(), Mailbox(), 100,
+                          email="user@example.com")
+
+    assert "1 more message(s)" in capsys.readouterr().out
 
 
 def test_a_whole_chunk_being_moved_costs_no_write(monkeypatch):

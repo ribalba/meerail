@@ -6,6 +6,18 @@
 MEERAIL_URL ?= http://localhost:8000
 export MEERAIL_URL
 
+# A certificate to accept for that server even though this machine has no reason
+# to — ./certs/cert.pem, if the server is running docker-compose.tls.yml. Empty
+# for the ordinary install, where there is no TLS to vouch for. An absolute path:
+# an installed app does not start in the directory you typed make in.
+#   make start MEERAIL_TRUST_CERT=$PWD/../certs/cert.pem
+MEERAIL_TRUST_CERT ?=
+export MEERAIL_TRUST_CERT
+
+# Written into the launcher only when it is set, so the ordinary install has
+# nothing extra in its Exec line.
+TRUST_ENV := $(if $(MEERAIL_TRUST_CERT),MEERAIL_TRUST_CERT=$(MEERAIL_TRUST_CERT) ,)
+
 NPM ?= npm
 
 # Where `distinstall` puts things. Everything lands under the user's own dirs,
@@ -79,7 +91,7 @@ distinstall-linux: dist
 		'Name=meerail' \
 		'GenericName=Email Client' \
 		'Comment=Desktop wrapper for the meerail email client.' \
-		'Exec=env MEERAIL_URL=$(MEERAIL_URL) $(APP_IMAGE) %U' \
+		'Exec=env MEERAIL_URL=$(MEERAIL_URL) $(TRUST_ENV)$(APP_IMAGE) %U' \
 		'TryExec=$(APP_IMAGE)' \
 		'Icon=meerail' \
 		'Terminal=false' \
@@ -120,12 +132,13 @@ distinstall-macos: dist
 	ditto "$$src" "$(MAC_APP)"; \
 	ln -sfn "$(MAC_APP)/Contents/MacOS/meerail" "$(BIN_DIR)/meerail"; \
 	echo "Installed. Launch from Spotlight or Launchpad, or run 'meerail' (needs $(BIN_DIR) on PATH)."; \
-	if [ "$(MEERAIL_URL)" != "http://localhost:8000" ]; then \
+	if [ "$(MEERAIL_URL)" != "http://localhost:8000" ] || [ -n "$(MEERAIL_TRUST_CERT)" ]; then \
 		echo; \
-		echo "Note: MEERAIL_URL is not baked into the bundle — macOS does not give a"; \
-		echo "      Finder launch your shell environment, so the app menu starts it on"; \
-		echo "      the default http://localhost:8000. To reach $(MEERAIL_URL),"; \
-		echo "      run 'meerail' from a shell that has MEERAIL_URL set."; \
+		echo "Note: this environment is not baked into the bundle — macOS does not give"; \
+		echo "      a Finder launch your shell environment, so the app menu starts on the"; \
+		echo "      default http://localhost:8000 and trusts no certificate of its own."; \
+		echo "      Run 'meerail' from a shell that has MEERAIL_URL / MEERAIL_TRUST_CERT"; \
+		echo "      set to reach $(MEERAIL_URL)."; \
 	fi
 
 distuninstall-macos:

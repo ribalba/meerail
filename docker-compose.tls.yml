@@ -34,14 +34,19 @@
 #     certificate into ./certs.
 #
 #   * The Electron app cannot click through a certificate warning — Chromium
-#     fails the load outright (ERR_CERT_AUTHORITY_INVALID) and you get the
-#     "Can't reach the meerail server" page with no way past it. For the desktop
-#     app the certificate has to be trusted by the machine, not accepted per
-#     visit: ./certs/cert.pem is written for you to import (macOS Keychain,
-#     Windows certificate store, `certutil -d sql:$HOME/.pki/nssdb -A -t "C,,"
-#     -n meerail -i certs/cert.pem` for Chromium and Electron on Linux). Or use
-#     mkcert, which does both stores in one command, and drop its output in as
-#     below.
+#     fails the load outright where a browser would have asked. It finds the
+#     server by itself: pointed at http:// on this port it is answered with a
+#     dropped connection rather than a redirect, and retries the same address
+#     over TLS. The certificate is the part it has to be given, either as
+#     MEERAIL_TRUST_CERT=/absolute/path/to/certs/cert.pem — that one certificate
+#     for that one server, nothing else — or through the machine's trust store.
+#     What to get right there is that this is a server certificate and not a CA:
+#     `certutil -d sql:$HOME/.pki/nssdb -A -t "P,," -n meerail -i certs/cert.pem`
+#     on Linux, Always Trust against SSL in the macOS Keychain, the Windows
+#     "Trusted People" store. Filed as a CA instead (NSS "C,,", Trusted Root
+#     Certification Authorities) it is turned down for not being one, with
+#     ERR_CERT_INVALID. Or use mkcert, which runs a real local CA and does the
+#     stores for you, and drop its output in as below.
 #
 # ./certs is a bind mount, so the pair is yours to look at, to import, and to
 # replace: put your own cert.pem and key.pem there and this file will leave them

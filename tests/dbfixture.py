@@ -258,6 +258,19 @@ def unplaced_uids(email: str, folder: str, uids: list[int]) -> list[int]:
         return ingest.unplaced_uids(db, mailbox, uids)
 
 
+def uids_with_write_in_flight(email: str, folder: str) -> set[int]:
+    """The UIDs the queue can name as leaving this folder, without a fetch — the
+    prefilter the repair sweep runs before it asks the server for anything."""
+    with session() as db:
+        account = ingest.get_or_create_account(db, email)
+        # Looked up, not registered: _mailbox upserts, and the upsert would
+        # write the folder's UID epoch back to the default — which is the one
+        # thing this query turns on.
+        mailbox = db.query(Mailbox).filter(Mailbox.account_id == account.id,
+                                           Mailbox.imap_name == folder).one()
+        return ingest.uids_with_write_in_flight(db, account, mailbox)
+
+
 def move_in_flight(email: str, message_id: str | None, headers: bytes | None = None,
                    date=None) -> bool:
     """The question the repair asks before putting a placement back. ``headers``

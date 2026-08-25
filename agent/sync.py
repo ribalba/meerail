@@ -432,6 +432,20 @@ def _restore_unplaced(db, bridge: Bridge, account, mailbox, uids: list[int], bat
     missing = ingest.unplaced_uids(db, mailbox, uids)
     if not missing:
         return 0
+    # Most of them the queue can name outright, without asking the server for a
+    # single header. A folder the user has just emptied is otherwise re-fetched
+    # in full on every pass — a header for each message on its way out, all of
+    # them discarded by the has_move_in_flight check below — which on a server
+    # that throttles is the whole pass. See ingest.uids_with_write_in_flight for
+    # why this narrows the work rather than replacing that check.
+    in_flight = ingest.uids_with_write_in_flight(db, account, mailbox)
+    if in_flight:
+        missing = [uid for uid in missing if uid not in in_flight]
+        if not missing:
+            return 0
+    # Counted after the filter on purpose: mail that is queued to leave this
+    # folder is not "still missing locally", and reporting it as a backlog to
+    # be restored described the queue draining as a repair falling behind.
     deferred = max(0, len(missing) - _RESTORE_PER_PASS)
     missing = missing[:_RESTORE_PER_PASS]
 

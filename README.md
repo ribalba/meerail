@@ -461,18 +461,40 @@ something other than `localhost`.
 Two things it cannot do for you. **Set `hsts_max_age_days = 0`** while the certificate is
 self-signed: HSTS promises a browser will not offer a way past a bad certificate, and that
 promise outlives the certificate you later regenerate. And **the desktop app cannot click
-through a warning at all** — Chromium fails the load and you get "Can't reach the meerail
-server" — so for Electron the certificate has to be trusted by the machine rather than accepted
-per visit. Import `certs/cert.pem` into the macOS Keychain or the Windows certificate store; on
-Linux, Chromium and Electron read NSS:
+through a warning at all** — Chromium fails the load where a browser would have asked — so the
+certificate has to be arranged for it up front.
+
+The URL is not the part you have to arrange: the shell sees that the port it was pointed at in
+plaintext is speaking TLS instead, and retries the same address over HTTPS on its own, so an
+installed launcher still pointing at `http://localhost:8000` needs no rebuild. That leaves the
+certificate, and the short way is to hand the app that one certificate and nothing else:
 
 ```bash
-certutil -d sql:$HOME/.pki/nssdb -A -t "C,," -n meerail -i certs/cert.pem
+MEERAIL_TRUST_CERT=/path/to/meerail/certs/cert.pem meerail
 ```
 
+It is then accepted for that server and for nothing else — not for the machine, not for another
+site the app is sent to. Give it an absolute path: a packaged app does not start in the
+directory you launched it from. `make distinstall MEERAIL_TRUST_CERT=...` writes it into the
+desktop launcher on Linux.
+
+The other way is the machine's own trust store, which is also what gets the certificate accepted
+in the browsers without clicking. The thing to know is that `cert.pem` is a **server
+certificate, not a CA**: filed as a certificate authority — `-t "C,,"` in NSS, *Trusted Root
+Certification Authorities* on Windows — it is turned down for not being one
+(`ERR_CERT_AUTHORITY_INVALID` becomes `ERR_CERT_INVALID`, which is no better). On Linux,
+Chromium and Electron read NSS, where the trust bit for "this exact certificate is fine" is `P`:
+
+```bash
+certutil -d sql:$HOME/.pki/nssdb -A -t "P,," -n meerail -i certs/cert.pem
+```
+
+Its equivalents are the macOS Keychain with *Always Trust* against SSL, and the Windows
+**Trusted People** store.
+
 [`mkcert`](https://github.com/FiloSottile/mkcert) is the shortcut for all of this: it runs a
-local CA, installs it into both the system store and NSS, and issues a certificate you can put
-straight into `./certs`.
+local CA — a real one, so it is imported as a CA everywhere — installs it into both the system
+store and NSS, and issues a certificate you can put straight into `./certs`.
 
 ## Configuration
 

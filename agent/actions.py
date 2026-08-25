@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import threading
 import time
+from contextlib import ExitStack
 from datetime import timedelta
 
 from sqlalchemy import and_, case, func, or_, select, update
@@ -418,11 +419,16 @@ def _copy_landed(c, uid: int, to_folder: str, message_id: str | None,
 
 
 def _remove_message(c, uid: int) -> None:
-    """Take one message out of the selected folder, and only that one.
+    """One message, by the same rules as _remove_messages."""
+    _remove_messages(c, [uid])
+
+
+def _remove_messages(c, uids: list[int]) -> None:
+    """Take these messages out of the selected folder, and only these.
 
     A bare EXPUNGE removes every message in the folder carrying \\Deleted, not
-    just this one — including messages another client flagged and has not
-    expunged yet. That is somebody's mail destroyed by a keypress that named a
+    just the ones named here — including messages another client flagged and has
+    not expunged yet. That is somebody's mail destroyed by a keypress that named a
     different message, and there is no undo for it. UID EXPUNGE (RFC 4315,
     advertised as UIDPLUS) is the only form that can be aimed, so where the
     server does not offer it this refuses rather than guesses.
@@ -441,8 +447,8 @@ def _remove_message(c, uid: int) -> None:
             "server does not advertise UIDPLUS, so this message cannot be expunged "
             "on its own — a folder-wide EXPUNGE would take every other \\Deleted "
             "message in the folder with it")
-    c.delete_messages([uid])
-    c.expunge([uid])
+    c.delete_messages(uids)
+    c.expunge(uids)
 
 
 def _uidvalidity(info) -> int | None:
@@ -1028,6 +1034,13 @@ def drain_actions(db, bridge, account) -> tuple[int, int, int]:
     and settling in the same small transaction means a pass killed at action
     thirty cannot take the record of the twenty-nine before it down with it —
     including the "done" on a message that has already been handed to SMTP.
+
+    A run of deletes out of one folder is the exception, and only because the
+    server has already made it one: they go out as a single STORE and EXPUNGE,
+    so they succeed or fail together and there is no per-row outcome to record
+    separately. Being killed between that EXPUNGE and its commit leaves them
+    leased and retried, and the retry names UIDs the server no longer has, which
+    it answers by doing nothing. See _drain_delete_batch.
     """
     now = utcnow()
     queued = due_queue(db, account.id, now)
@@ -1035,69 +1048,211 @@ def drain_actions(db, bridge, account) -> tuple[int, int, int]:
     applied = failed = 0
     sends = 0       # send actions tried
     sent = 0        # ...and the ones the server took
-    for row in queued:
-        action = _lease(db, row.id, now)
-        if action is None:
+    i = 0
+    while i < len(queued):
+        run = _delete_run(queued, i)
+        rows, i = queued[i:i + run], i + run
+        if len(rows) > 1:
+            a, f = _drain_delete_batch(db, bridge, account, rows, now)
+            applied += a
+            failed += f
             continue
-        is_send = action.type == "send"
-        sends += is_send
-        try:
-            # The lease is kept alive for as long as this takes, so that "no
-            # agent has touched this in fifteen minutes" stays a statement about
-            # a dead agent rather than about a large attachment.
-            with _LeaseKeeper(action.id):
-                apply_action(db, bridge, account, action)
-            _settle(db, action, True)
-            applied += 1
-            sent += is_send
-            # Only sends get a line of their own. A flag or a move is the tail
-            # end of something the user watched happen in the UI; a send is the
-            # one action whose success they have no other way to confirm, and
-            # "did that mail actually go out on Friday" is a question the log
-            # should be able to answer months later.
-            if is_send:
-                rcpt = ", ".join((action.payload or {}).get("rcpt_to") or []) or "(no recipients)"
-                log.ok(f"sent to {rcpt}", getattr(bridge.acc, "email", None))
-        except smtp.PartlyRefused as e:
-            # Delivered — to everyone the server would take. Settled as a success
-            # for exactly that reason: retrying would send it a second time to
-            # the people who did get it, for the sake of the ones no number of
-            # attempts will reach. The refusals ride along on the message.
-            _settle(db, action, True, repr(e))
-            applied += 1
-            sent += is_send
-            log.warn(f"{_describe(action)}: {e}", getattr(bridge.acc, "email", None))
-        except smtp.Delivered as e:
-            # The server may have it and cannot be asked. Neither answer is
-            # available, so neither is invented: the row is parked and the
-            # Outbox says what happened, because "send it again" is a decision
-            # with a duplicate on one side of it and a lost message on the other,
-            # and it is not the agent's to make.
-            _settle_unknown(db, bridge.acc, action, e)
-            sent += is_send
-        except StaleUid as e:
-            # Not a failure to retry: the message this names cannot be addressed
-            # again, by this pass or any later one.
-            _settle_stale(db, bridge.acc, action, e)
-        except Refused as e:
-            # Also not a failure to retry, for the other reason: the server has
-            # answered, and the answer is not going to change. Counted with
-            # neither the applied nor the failed, because it is neither — it has
-            # reported itself in full and in the user's terms already.
-            _settle_refused(db, bridge.acc, action, e)
-        except Exception as e:  # noqa: BLE001
-            _settle(db, action, False, repr(e))
-            failed += 1
-            # After _settle: the attempt count it writes is what the log line
-            # reports, and the backoff is computed from it.
-            _log_failure(bridge.acc, action, e)
-        db.commit()
+        a, f, s, t = _drain_one(db, bridge, account, rows[0], now)
+        applied += a
+        failed += f
+        sends += s
+        sent += t
     # One event for the drain, not one per message: the UI reads this as "the
     # outbox changed, re-read the count". Only when a send was actually tried —
     # a pass that pushed nothing but flags leaves the outbox exactly as it was.
     if sends:
         events.publish({"type": "outbox", "sent": applied, "failed": failed})
     return applied, failed, sent
+
+
+def _drain_one(db, bridge, account, row: PendingAction, now) -> tuple[int, int, int, int]:
+    """Take one row and apply it. Returns (applied, failed, sends, sent).
+
+    The lease and the work are split across this and _drain_leased because the
+    batched delete needs the second half on its own: it has already taken the
+    leases for a whole group before it knows whether it can use them (see
+    _drain_delete_batch).
+    """
+    action = _lease(db, row.id, now)
+    if action is None:
+        return 0, 0, 0, 0
+    return _drain_leased(db, bridge, account, action)
+
+
+def _drain_leased(db, bridge, account, action: PendingAction) -> tuple[int, int, int, int]:
+    """Apply and settle an action this pass already holds the lease on."""
+    applied = failed = sent = 0
+    is_send = action.type == "send"
+    sends = int(is_send)
+    try:
+        # The lease is kept alive for as long as this takes, so that "no
+        # agent has touched this in fifteen minutes" stays a statement about
+        # a dead agent rather than about a large attachment.
+        with _LeaseKeeper(action.id):
+            apply_action(db, bridge, account, action)
+        _settle(db, action, True)
+        applied += 1
+        sent += is_send
+        # Only sends get a line of their own. A flag or a move is the tail
+        # end of something the user watched happen in the UI; a send is the
+        # one action whose success they have no other way to confirm, and
+        # "did that mail actually go out on Friday" is a question the log
+        # should be able to answer months later.
+        if is_send:
+            rcpt = ", ".join((action.payload or {}).get("rcpt_to") or []) or "(no recipients)"
+            log.ok(f"sent to {rcpt}", getattr(bridge.acc, "email", None))
+    except smtp.PartlyRefused as e:
+        # Delivered — to everyone the server would take. Settled as a success
+        # for exactly that reason: retrying would send it a second time to
+        # the people who did get it, for the sake of the ones no number of
+        # attempts will reach. The refusals ride along on the message.
+        _settle(db, action, True, repr(e))
+        applied += 1
+        sent += is_send
+        log.warn(f"{_describe(action)}: {e}", getattr(bridge.acc, "email", None))
+    except smtp.Delivered as e:
+        # The server may have it and cannot be asked. Neither answer is
+        # available, so neither is invented: the row is parked and the
+        # Outbox says what happened, because "send it again" is a decision
+        # with a duplicate on one side of it and a lost message on the other,
+        # and it is not the agent's to make.
+        _settle_unknown(db, bridge.acc, action, e)
+        sent += is_send
+    except StaleUid as e:
+        # Not a failure to retry: the message this names cannot be addressed
+        # again, by this pass or any later one.
+        _settle_stale(db, bridge.acc, action, e)
+    except Refused as e:
+        # Also not a failure to retry, for the other reason: the server has
+        # answered, and the answer is not going to change. Counted with
+        # neither the applied nor the failed, because it is neither — it has
+        # reported itself in full and in the user's terms already.
+        _settle_refused(db, bridge.acc, action, e)
+    except Exception as e:  # noqa: BLE001
+        _settle(db, action, False, repr(e))
+        failed += 1
+        # After _settle: the attempt count it writes is what the log line
+        # reports, and the backoff is computed from it.
+        _log_failure(bridge.acc, action, e)
+    db.commit()
+    return applied, failed, sends, sent
+
+
+# --- deletes, several at a time ----------------------------------------------
+#
+# One SELECT, one STORE and one EXPUNGE for a run of deletes out of the same
+# folder, in place of that conversation per message.
+#
+# The queue only ever holds deletes in bulk — the UI queues one for every
+# message emptied out of Trash, so the unit the user works in is "everything in
+# here" and the unit the drain worked in was one. An emptied Trash of nine
+# hundred is nine hundred SELECTs of a folder that has nine hundred messages in
+# it, and on a server that starts throttling part way through, a pass then
+# spends twenty minutes on the fifty deletes it is allowed and never reaches the
+# folder walk at all. The account goes quiet, and the UI, which judges an agent
+# by when it last heard from one, reports it as not running.
+#
+# Nothing about the safety of a single delete is given up for it. The UID epoch
+# is still checked against the SELECT this pass has just made, one command
+# before anything is removed — once, because within a selected mailbox
+# UIDVALIDITY cannot change under the connection, so the check the group shares
+# is the same check each of them would have made. The EXPUNGE is still aimed by
+# UID (see _remove_messages), and each row is still leased and settled on its
+# own, in its own transaction.
+
+# The most UIDs one STORE and one EXPUNGE are allowed to name. The queue window
+# is _PER_PASS, so today this only ever caps a group that is already bounded; it
+# is written down so that a larger window later does not silently become a
+# command naming a thousand UIDs, which is a line some servers answer by closing
+# the connection.
+_DELETE_BATCH = 50
+
+
+def _delete_key(action: PendingAction) -> tuple | None:
+    """What two deletes must agree on to share a SELECT: the folder, and the UID
+    epoch they were queued under.
+
+    None for anything this must not batch — another type, or a payload missing
+    one of the three things a delete is. Those go down the single path, where
+    _select_verified refuses them one at a time and says why.
+    """
+    if action.type != "delete":
+        return None
+    p = action.payload or {}
+    if p.get("folder") is None or p.get("uid") is None or p.get("uidvalidity") is None:
+        return None
+    return (p["folder"], p["uidvalidity"])
+
+
+def _delete_run(queued: list[PendingAction], start: int) -> int:
+    """How many actions from ``start`` are deletes that can share one SELECT.
+
+    Only a *consecutive* run, never a gather across the queue: the order
+    due_queue returns is the order the pass has decided on (sends first, then
+    oldest), and reordering the queue to make a bigger batch would put a delete
+    in front of a send that has been waiting since Friday.
+    """
+    key = _delete_key(queued[start])
+    if key is None:
+        return 1
+    end = start
+    while (end + 1 < len(queued)
+           and end + 1 - start < _DELETE_BATCH
+           and _delete_key(queued[end + 1]) == key):
+        end += 1
+    return end - start + 1
+
+
+def _drain_delete_batch(db, bridge, account, rows: list[PendingAction],
+                        now) -> tuple[int, int]:
+    """Apply a run of deletes as one conversation. Returns (applied, failed).
+
+    Every row is leased first and separately. A lease is a claim the Outbox can
+    see and refuse against (see _lease), and one taken on behalf of a group
+    would be a claim on rows this pass may not actually hold: another agent, or
+    a user pressing Cancel, can take any of them out from under this one between
+    due_queue and here.
+
+    A failure is not attributed. One STORE and one EXPUNGE covering fifty UIDs
+    fail as a unit, and which UID the server objected to is not in the answer —
+    so marking all fifty failed would record fifty attempts, and fifty backoffs,
+    for one bad number. Instead the group falls back to what the drain did
+    before it: each row applied on its own, where the failure lands on the row
+    that caused it and the other forty-nine still go through. That costs one
+    wasted round trip on the rare pass that hits it, and is the whole reason
+    batching cannot lose a delete that would otherwise have been applied.
+    """
+    leased = [a for a in (_lease(db, row.id, now) for row in rows) if a is not None]
+    if not leased:
+        return 0, 0
+    if len(leased) == 1:
+        applied, failed, _sends, _sent = _drain_leased(db, bridge, account, leased[0])
+        return applied, failed
+    try:
+        # A keeper each, for the same reason there is a lease each: the renewals
+        # have to keep every row in the group alive, not just the first.
+        with ExitStack() as keepers:
+            for action in leased:
+                keepers.enter_context(_LeaseKeeper(action.id))
+            c = bridge.ops()
+            _select_verified(db, c, leased[0], (leased[0].payload or {})["folder"])
+            _remove_messages(c, [(a.payload or {})["uid"] for a in leased])
+    except Exception:  # noqa: BLE001 — see the docstring; the retry reports it
+        applied = failed = 0
+        for action in leased:
+            a, f, _sends, _sent = _drain_leased(db, bridge, account, action)
+            applied += a
+            failed += f
+        return applied, failed
+    for action in leased:
+        _settle(db, action, True)
+    db.commit()
+    return len(leased), 0
 
 
 # --- mail that is still waiting ----------------------------------------------

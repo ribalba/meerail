@@ -20,6 +20,7 @@ import pytest
 import dbfixture
 from core import ingest
 from core.config import get_settings
+from core.mail import store
 from core.mail.parse import parse_email
 from conftest import status_for
 from helpers import api, api_bytes, build_png, make_message
@@ -558,6 +559,75 @@ def test_a_move_still_landing_is_not_read_as_a_gap_to_repair(account):
     dbfixture.apply_actions(email, minutes_ago=60)
     assert dbfixture.move_in_flight(email, mid) is False
     assert dbfixture.unplaced_uids(email, "INBOX", [1]) == [1]   # now safe to repair
+
+
+def test_an_emptied_trash_is_answered_by_the_queue_without_a_fetch(account):
+    """What the repair sweep has to know before it asks the server for anything.
+
+    has_move_in_flight can only answer per message and only from a Message-ID,
+    which costs a header fetch each. On an emptied Trash that is a fetch for
+    every message on its way out, on every pass, all of them thrown away by the
+    answer — and against a server that throttles, that is the whole pass. The
+    queue already names them by folder and UID.
+    """
+    email = account["email"]
+    mid = f"doomed-{uuid.uuid4().hex}@t"
+    dbfixture.ingest_raw_message(
+        email, make_message(f"<{mid}>", "Subject DOOMED", "x@y.com", email, "body", T0),
+        uid=7, folder="Trash", role_hint="\\Trash")
+
+    # Nothing queued yet: the message is in Trash and staying there.
+    assert dbfixture.uids_with_write_in_flight(email, "Trash") == set()
+
+    trash_id = _mb(email, "Trash")["id"]
+    code, body = api("POST", "/api/messages/bulk/empty-trash",
+                     {"mailbox_id": trash_id, "confirm": True})
+    assert code == 200, body
+
+    # The placement is gone locally and the server still lists the UID, so the
+    # sweep reads it as a gap — and the queue can say it is not one, by number,
+    # before a single header is fetched.
+    assert dbfixture.unplaced_uids(email, "Trash", [7]) == [7]
+    assert dbfixture.uids_with_write_in_flight(email, "Trash") == {7}
+
+
+def test_a_delete_that_has_stopped_landing_stops_holding_the_repair_off(account):
+    """The same rule move_in_flight applies, and for the same reason: nothing
+    retires a failing action, so "still queued" is an answer that never ends. A
+    delete the server has refused for long enough is not a delete about to land,
+    and going on treating it as one hides a divergence rather than reporting it.
+    """
+    email = account["email"]
+    mid = f"stuck-{uuid.uuid4().hex}@t"
+    dbfixture.ingest_raw_message(
+        email, make_message(f"<{mid}>", "Subject STUCK", "x@y.com", email, "body", T0),
+        uid=8, folder="Trash", role_hint="\\Trash")
+    trash_id = _mb(email, "Trash")["id"]
+    assert api("POST", "/api/messages/bulk/empty-trash",
+               {"mailbox_id": trash_id, "confirm": True})[0] == 200
+    assert dbfixture.uids_with_write_in_flight(email, "Trash") == {8}
+
+    dbfixture.fail_actions(email, attempts=store.STUCK_AFTER)
+    assert dbfixture.uids_with_write_in_flight(email, "Trash") == set()
+
+
+def test_a_delete_queued_in_an_older_epoch_is_left_to_the_slow_path(account):
+    """A UID only names a message within one UIDVALIDITY. A row carrying an
+    older one names nothing in the folder the server is serving now, so it must
+    not be read as "uid 9 is leaving" — the number belongs to whatever message
+    inherited it. The prefilter declines to answer and the fetch decides."""
+    email = account["email"]
+    mid = f"epoch-{uuid.uuid4().hex}@t"
+    dbfixture.ingest_raw_message(
+        email, make_message(f"<{mid}>", "Subject EPOCH", "x@y.com", email, "body", T0),
+        uid=9, folder="Trash", role_hint="\\Trash")
+    trash_id = _mb(email, "Trash")["id"]
+    assert api("POST", "/api/messages/bulk/empty-trash",
+               {"mailbox_id": trash_id, "confirm": True})[0] == 200
+    assert dbfixture.uids_with_write_in_flight(email, "Trash") == {9}
+
+    dbfixture.register_folder(email, "Trash", uidvalidity=2)
+    assert dbfixture.uids_with_write_in_flight(email, "Trash") == set()
 
 
 def test_a_move_of_mail_with_no_message_id_is_not_undone_by_the_repair(account):

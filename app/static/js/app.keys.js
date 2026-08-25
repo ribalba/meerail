@@ -214,6 +214,11 @@ App.keys = (function () {
         // not tab stops, which leaves this as the only way to those rows for
         // hands that never touch the mouse.
         { show: "⌥/Alt ⇧ C/B", label: "Cc / Bcc line" },
+        // Same again for the "Also" row of suggested recipients: the chips are
+        // out of the tab ring too, and ↓ only reaches them from a recipient
+        // field. The composer's own footer lists this beside the keys that are
+        // only its; this row is here so the sheet is not missing one.
+        { show: "⌥/Alt ⇧ S", label: "Suggested recipients" },
         { keys: ["/"], show: "/", label: "Search", run: () => App.search.focusInput() },
         { show: "⌘/Ctrl ↵", label: "Send message" },
         // Handled ahead of the table in handle() — modified keys never reach it.
@@ -299,16 +304,19 @@ App.keys = (function () {
       return;
     }
     // Alt+Shift+C/B open the composer's Cc and Bcc rows and put the caret in
-    // them. The buttons that do the same thing sit outside the tab ring — Tab
-    // in the composer walks the fields a message is written into and nothing
-    // else — so this is the keyboard's way to them. Ahead of Alt+C below,
-    // which would otherwise answer Alt+Shift+C with a different draft, and
-    // swallowed rather than passed on when no composer is open: a shortcut for
-    // a window that is not there does nothing.
-    if (e.altKey && !mod && e.shiftKey && (e.code === "KeyC" || e.code === "KeyB")) {
+    // them; Alt+Shift+S puts it on the first suggested recipient. All three
+    // stand for things outside the tab ring — Tab in the composer walks the
+    // fields a message is written into and nothing else — so this is the
+    // keyboard's way to them. Ahead of Alt+C below, which would otherwise
+    // answer Alt+Shift+C with a different draft, and swallowed rather than
+    // passed on when no composer is open: a shortcut for a window that is not
+    // there does nothing.
+    if (e.altKey && !mod && e.shiftKey
+        && (e.code === "KeyC" || e.code === "KeyB" || e.code === "KeyS")) {
       if (!App.compose.isOpen()) return;
       e.preventDefault();
-      App.compose.focusExtra(e.code === "KeyC" ? "cc" : "bcc");
+      if (e.code === "KeyS") App.compose.focusSuggestions();
+      else App.compose.focusExtra(e.code === "KeyC" ? "cc" : "bcc");
       return;
     }
     // Alt+C brings the next minimized draft up, parking whatever is in the
