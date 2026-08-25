@@ -93,8 +93,12 @@ def list_mailboxes(db: DBSession = Depends(get_db)):
     ).all():
         counts[mid] = (int(total), int(unread))
 
+    # Messages, not placements: the Flagged list is a list of flagged mail (see
+    # app/routers/messages.py::list_messages), and on a label server one such
+    # mail is filed in two or three folders at once. Counting the placements
+    # made this number say four where the list had three rows in it.
     flagged_total = db.scalar(
-        select(func.count()).select_from(MessageLocation)
+        select(func.count(func.distinct(MessageLocation.message_pk)))
         .where(MessageLocation.flagged.is_(True), MessageLocation.deleted.is_(False))
     ) or 0
 

@@ -1360,3 +1360,78 @@ def test_search_counts_a_thread_by_what_opening_it_would_show(account):
 
     _, after = api("GET", f"/api/search?q={tok}&account_id={aid}")
     assert after["rows"][0]["thread_count"] == 1
+
+
+# --- What the Flagged list is a list of ---------------------------------------
+
+
+def _flagged():
+    _, body = api("GET", "/api/messages?scope=flagged&limit=50")
+    return body
+
+
+def _thread_messages(email, aid, tok):
+    """Every message of the seeded conversation, oldest first."""
+    _, results = api("GET", f"/api/search?q={tok}&account_id={aid}")
+    _, thread = api("GET", f"/api/threads/{results['rows'][0]['thread_id']}?account_id={aid}")
+    return sorted(thread["messages"], key=lambda m: m["date"])
+
+
+def test_flagged_lists_the_messages_flagged_not_the_conversations(account):
+    """github.com/ribalba/meerail/issues/21.
+
+    A folder list is a list of conversations, because mail arrives into one and
+    a reply belongs to the thread it answers. A flag is not like that: it is put
+    on one message, by hand. Rolled up the same way, flagging a second message
+    in a conversation that was already in here changed nothing on screen — the
+    row was already there, standing for the other one — and the report was of a
+    message that showed a flag in the inbox and could not be found in Flagged.
+    """
+    email, aid = account["email"], account["id"]
+    tok = "FLAGLIST" + uuid.uuid4().hex[:6]
+    _seed_reply_thread(email, tok)
+    first, reply = _thread_messages(email, aid, tok)
+
+    api("POST", f"/api/messages/{reply['id']}/flag?flagged=1")
+    assert [r["id"] for r in _flagged()["rows"]] == [reply["id"]]
+
+    # The second flag, on the older message of the same conversation.
+    api("POST", f"/api/messages/{first['id']}/flag?flagged=1")
+    listing = _flagged()
+    assert [r["id"] for r in listing["rows"]] == [reply["id"], first["id"]]
+    assert listing["total"] == 2
+    # Both rows say what they are: the flag that put them here, and the size of
+    # the conversation the reader will open around them.
+    assert all(r["flagged"] and r["thread_count"] == 2 for r in listing["rows"])
+
+    # And the count beside the list agrees with the list.
+    _, boxes = api("GET", "/api/mailboxes")
+    assert boxes["smart"]["flagged_total"] == 2
+
+    # Unflagging takes that message out of the list and leaves the other.
+    api("POST", f"/api/messages/{reply['id']}/flag?flagged=0")
+    assert [r["id"] for r in _flagged()["rows"]] == [first["id"]]
+
+
+def test_flagged_lists_a_labelled_message_once(account):
+    """One mail, several folders, one row.
+
+    On Proton and Gmail every message is also in \\All, so the placement a flag
+    is written to is two or three rows rather than one. The list is of messages,
+    so the same mail must not arrive in it twice — and the folder the row names
+    has to be one the mail is really filed in, not the bucket everything is in.
+    """
+    email, aid = account["email"], account["id"]
+    tok = "FLAGLBL" + uuid.uuid4().hex[:6]
+    _seed_reply_thread(email, tok, label_server=True)
+    first, _ = _thread_messages(email, aid, tok)
+
+    api("POST", f"/api/messages/{first['id']}/flag?flagged=1")
+
+    listing = _flagged()
+    assert [r["id"] for r in listing["rows"]] == [first["id"]]
+    assert listing["total"] == 1
+    assert listing["rows"][0]["mailbox_role"] == "inbox"
+
+    _, boxes = api("GET", "/api/mailboxes")
+    assert boxes["smart"]["flagged_total"] == 1

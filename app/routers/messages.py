@@ -8,7 +8,7 @@ import zipfile
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from sqlalchemy import func, or_, select, tuple_
+from sqlalchemy import case, func, or_, select, tuple_
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session as DBSession
 
@@ -118,7 +118,19 @@ def list_messages(
     Unread/flagged are rolled up across the thread's messages *in this folder*,
     so a conversation reads as unread while any part of it is — which is what
     the badge in the sidebar counts too.
+
+    Flagged is the one scope that is not a list of conversations — see
+    ``by_message`` below.
     """
+    # Flagged is a list of *messages*. A folder holds conversations, so its list
+    # collapses to one row each; a flag is put on a single mail, by hand, and
+    # the list of them is the list of those mails. Rolled up like a folder it
+    # showed one row per conversation, so flagging a second message in a
+    # conversation already in here changed nothing on screen — the row was
+    # already there, standing for a different mail — and the message just
+    # flagged could not be found anywhere (issue #21).
+    by_message = scope == "flagged"
+
     # Messages that never got threaded stand alone rather than collapsing into
     # one "no thread" pile.
     thread_key = func.coalesce(Message.thread_id, func.concat("msg:", Message.id)).label("thread_key")
@@ -165,21 +177,40 @@ def list_messages(
     # DISTINCT ON keeps the first row per (account, thread) under this ORDER BY,
     # i.e. the newest message of each conversation. The outer query then sorts
     # those representatives by date, since DISTINCT ON dictates the inner order.
-    reps = j.distinct(Message.account_id, thread_key).order_by(
-        Message.account_id, thread_key, Message.date_sent.desc().nulls_last(), Message.id.desc()
-    ).subquery()
+    #
+    # By message where the list is of messages, and still DISTINCT: the rows are
+    # placements, and a label server files one mail in several folders at once —
+    # deduping on the mail is what keeps a flagged message that is in INBOX and
+    # in \All from arriving here twice. Which placement speaks for it decides
+    # only the folder the row names, so the real folder wins over the \All
+    # bucket every message on such a server is also in.
+    if by_message:
+        reps = j.distinct(Message.id).order_by(
+            Message.id, case((Mailbox.role == "all", 1), else_=0), MessageLocation.mailbox_id
+        ).subquery()
+    else:
+        reps = j.distinct(Message.account_id, thread_key).order_by(
+            Message.account_id, thread_key, Message.date_sent.desc().nulls_last(), Message.id.desc()
+        ).subquery()
 
     total = db.scalar(select(func.count()).select_from(reps))
     rows = db.execute(
-        select(reps).order_by(reps.c.date_sent.desc().nulls_last()).limit(limit).offset(offset)
+        # The id breaks a tie on the date, so that paging cannot show one row
+        # twice and skip another: mail imported in a batch commonly shares a
+        # timestamp, and without a total order the pages need not agree on
+        # which of those rows came first.
+        select(reps).order_by(reps.c.date_sent.desc().nulls_last(), reps.c.id.desc())
+        .limit(limit).offset(offset)
     ).all()
 
     # Unread/flagged roll up over the *folder-filtered* set: a conversation
     # reads as unread while any part of it here is, which is what the sidebar
-    # badge counts too.
+    # badge counts too. Not for a list of messages, though — there the row is
+    # one mail and says how that mail is flagged and whether it has been read,
+    # which is what an empty rollup leaves the row dict below reading off it.
     keys = {(r.account_id, r.thread_key) for r in rows}
     rollup: dict[tuple[int, str], tuple[bool, bool]] = {}
-    if keys:
+    if keys and not by_message:
         grouped = j.with_only_columns(
             Message.account_id, thread_key,
             func.bool_or(MessageLocation.seen.is_(False)),
