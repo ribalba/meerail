@@ -67,6 +67,25 @@ def test_file_supplies_every_section(config):
     assert s.store_raw_mime is False                                        # [agent]
 
 
+def test_the_pool_budget_is_off_by_default_and_settable_in_the_file(config):
+    """[database] pool_size / max_overflow reach core/database.py.
+
+    CONFIG names neither, so both come back as the sentinels that mean "size it
+    from what this process actually runs" — 0 and -1, kept apart because 0 is a
+    real max_overflow ("never open more than the pool keeps") and would be
+    swallowed by a single sentinel.
+    """
+    s = load()
+    assert (s.db_pool_size, s.db_max_overflow) == (0, -1)
+
+    config.write_text(CONFIG.replace(
+        'url = "postgresql+psycopg://file@filehost/filedb"',
+        'url = "postgresql+psycopg://file@filehost/filedb"\npool_size = 7\nmax_overflow = 0',
+    ))
+    s = load()
+    assert (s.db_pool_size, s.db_max_overflow) == (7, 0)
+
+
 def test_defaults_fill_the_gaps(config):
     # Not mentioned anywhere in CONFIG.
     assert load().poll_interval == 30

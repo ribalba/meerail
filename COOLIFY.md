@@ -56,16 +56,68 @@ In the resource's **Environment Variables** tab:
 
 | Variable | |
 | --- | --- |
-| `POSTGRES_PASSWORD` | **Required.** Generate a long random one. Coolify refuses the deploy while it is empty — the compose file marks it `:?` because the shipped laptop default (`meerail`) is public knowledge. |
+| `POSTGRES_PASSWORD` | **Required.** Coolify refuses the deploy while it is empty — the compose file marks it `:?` because the shipped laptop default (`meerail`) is public knowledge. Generate it with `python -c "import secrets;print(secrets.token_urlsafe(32))"` and **use nothing but letters, digits and `- _ . ~`**: this value is interpolated into `DATABASE_URL`, which is a URL, so an `@` or a `%` in it is read as URL structure and the stack fails to start in a way that does not mention passwords at all. See [`failed to resolve host '...@db'`](#failed-to-resolve-host-db). |
 | `SERVER_PASSWORD` | **Required.** This is the password the web UI asks for. Also marked `:?`: an empty one means no auth at all, which is correct for localhost and wrong for a public hostname. Setting it also turns on the HTTPS requirement — with a password configured, meerail serves *nothing* over a plaintext connection, not just the login route. On this stack that means Traefik plus `TRUSTED_PROXIES` below; without them the app cannot tell an encrypted request from a plaintext one and answers every request with a 421 saying so. |
 | `API_TOKEN` | Optional, empty by default. Set it only if something other than a browser needs the API (`Authorization: Bearer <token>`); the UI password is not accepted for that. |
 | `SERVICE_PASSWORD_64_MEERAIL` | Leave it alone — Coolify generates it once and reuses it forever. It signs session cookies, so changing it logs every browser out. |
 | `POSTGRES_USER`, `POSTGRES_DB` | Optional, default `meerail`. |
 | `SESSION_MAX_AGE_DAYS` | Optional, default 30. |
-| `TRUSTED_PROXIES` | Optional, and already set to the private ranges Docker hands out — which is where Coolify's Traefik reaches this container from. It is what makes the app see the *browser* rather than the proxy: without it the session cookie is issued without `Secure` (TLS ends at Traefik, so every request looks like plain HTTP) and the login rate limiter counts one attacker's five wrong passwords against everyone behind the proxy. Narrow it to your project network's own CIDR if you would rather be exact; never widen it to `*` where anything untrusted shares the network. |
+| `TRUSTED_PROXIES` | Optional, and already set to the private ranges Docker hands out — which is where Coolify's Traefik reaches this container from. It is what makes the app see the *browser* rather than the proxy: without it the session cookie is issued without `Secure` (TLS ends at Traefik, so every request looks like plain HTTP) and the login rate limiter counts one attacker's five wrong passwords against everyone behind the proxy. Leave the field empty and take the default; see [What to set `TRUSTED_PROXIES` to](#what-to-set-trusted_proxies-to) for narrowing it, and for why `meerail.toml` cannot set it on this stack. |
 | `HSTS_MAX_AGE_DAYS` | Optional, default 365. How long a browser remembers to reach this hostname over HTTPS only, which is what removes the *first* plaintext request rather than turning it away. It is a promise with a duration — a browser that has been here will refuse plain HTTP to this name, and refuse to let you click past a bad certificate, for this long. Set it to 0 while you are still moving the install between hostnames. |
 | `MAX_REQUEST_BYTES` | Optional, default 8 MB. Ceiling on ordinary (JSON) request bodies, applied before the body is read and before it is authenticated. Uploads to the composer get `max_attachment_bytes` instead. Leave it unless something legitimate is being refused with a 413. |
 | `DEFAULT_SEARCH_YEARS`, `CONTACTS_SCAN_YEARS` | Optional; see [README § Configuration](README.md#configuration). |
+
+### What to set `TRUSTED_PROXIES` to
+
+**Leave it empty in the Coolify UI.** The compose file already gives it
+`10.0.0.0/8,172.16.0.0/12,192.168.0.0/16` — the private ranges Docker hands out
+on its own networks, which is where Coolify's Traefik reaches this container
+from. There is no address to look up and nothing to type; an empty field in the
+Environment Variables tab means the compose default applies.
+
+Note that this is one of the settings that cannot be set in `meerail.toml` on
+this stack. The compose file puts `TRUSTED_PROXIES` in the server's environment,
+and the environment wins over the file — so a value written into the agent's
+`coolify/meerail.toml` is read and then overridden. The Coolify UI is the only
+place to change it here.
+
+Those three ranges are wide on purpose, because Docker picks the project
+network's subnet itself and renumbers it when the resource is recreated. They
+are safe here because nothing else can reach the server: it uses `expose`, not
+`ports`, so port 8000 exists only on the project network, and the only thing on
+that network besides meerail's own services is the proxy. What the setting
+grants is the right to rewrite a request's apparent source and scheme with
+`X-Forwarded-For` / `X-Forwarded-Proto`, and only something that can already
+open a connection to port 8000 can send those headers at all.
+
+If you would rather be exact, read the subnet off the project network and use
+that one CIDR:
+
+```bash
+ssh root@your-coolify-host
+
+# The project network is the one the server container is attached to.
+docker inspect <server-container> \
+  --format '{{range $net, $_ := .NetworkSettings.Networks}}{{$net}}{{println}}{{end}}'
+docker network inspect <that-network> \
+  --format '{{range .IPAM.Config}}{{.Subnet}}{{println}}{{end}}'
+```
+
+Set `TRUSTED_PROXIES` to the subnet it prints (something like
+`10.0.1.0/24`) and redeploy. Expect to revisit it: Coolify creates a fresh
+network when the resource is destroyed and recreated, and the new one may not
+have the same subnet — at which point the exact value is wrong and the wide
+default would still have been right.
+
+Never set it to `*`. That trusts whatever opens the connection, on a host where
+you may later run something you did not write on the same Docker bridge.
+
+**Whether it is working**, once the domain is up: the server's log lines carry
+the client address, and with the setting live that address is your browser's
+public IP rather than a `10.` or `172.` one. Getting a 421 from every request —
+the response body names this variable — means the opposite: the request arrived
+over HTTPS, the app could not confirm it, and it will not hand out the UI or a
+session until it can.
 
 ## 3. Give the server a domain
 
@@ -270,6 +322,59 @@ docker run --rm --entrypoint bash -v <volume>:/root \
 
 ## Troubleshooting Postgres
 
+### `failed to resolve host '...@db'`
+
+```
+sqlalchemy.exc.OperationalError: (psycopg.OperationalError)
+failed to resolve host 'U7…FhXWG@db': [Errno -2] Name or service not known
+ERROR:    Application startup failed. Exiting.
+```
+
+Not DNS, and nothing to do with the compose network. `POSTGRES_PASSWORD`
+contains an `@`, and `DATABASE_URL` is a URL: the parser splits on the *first*
+`@` it finds, so the tail of your password gets read as the hostname. The
+password is in the error message — that is the giveaway, and it is also a reason
+to scrub the log line before pasting it anywhere.
+
+`%` does the same damage more quietly. It introduces a percent-escape, so a
+password containing `%0f` arrives at Postgres with a literal `0x0F` byte in place
+of those three characters, and the connection is refused for a reason that names
+nothing.
+
+**Do not percent-encode `POSTGRES_PASSWORD` in Coolify.** That variable is used
+twice on this stack — as the literal password `initdb` gives the `meerail` role,
+and interpolated into the two `DATABASE_URL` lines — so encoding it changes the
+first and cancels out in the second, leaving the two sides disagreeing about what
+the password even is.
+
+Set it to a password of letters, digits and `- _ . ~` only:
+
+```bash
+python -c "import secrets;print(secrets.token_urlsafe(32))"
+```
+
+`token_urlsafe` emits exactly that alphabet, which is why it is the generator
+named here.
+
+Then deal with the database that already exists, because `POSTGRES_PASSWORD` is
+applied by `initdb` and only on the first start against an empty volume —
+changing it in Coolify changes what the clients send and nothing about what the
+server expects. If the deploy never got as far as syncing mail, deleting the
+`pg-data` volume and redeploying is the shortest way out:
+
+```bash
+ssh root@your-coolify-host
+docker volume ls --filter name=pg-data
+docker volume rm <the one for this resource>   # the stack must be stopped
+```
+
+If there is mail in it already, change the role instead — no dump, no data loss:
+
+```bash
+docker exec -it <db-container> \
+  psql -U meerail -d meerail -c "ALTER USER meerail WITH PASSWORD '<the new one>';"
+```
+
 ### `password authentication failed for user "meerail"`
 
 ```
@@ -310,11 +415,14 @@ If it succeeds and only the *agent* is failing, check `DATABASE_URL` on the agen
 service itself — the environment is what it uses, and the Storages file cannot
 override it (see step 6).
 
-Third possibility, if both look right: the password contains a URL metacharacter.
-`DATABASE_URL` is a URL, so `@`, `:`, `/`, `?`, `#`, `[` and `]` inside the password
-are parsed as structure — an `@` in particular silently truncates the host. Either
-percent-encode it in the compose file or use a password of letters, digits and
-`- _ . ~` only.
+Third possibility, if both look right: the password contains a URL
+metacharacter. `DATABASE_URL` is a URL, so `@`, `:`, `/`, `?`, `#`, `[`, `]` and
+`%` inside the password are read as structure rather than as password. An `@`
+usually fails loudly and elsewhere — see [`failed to resolve host
+'...@db'`](#failed-to-resolve-host-db) above — but a `%` lands here instead: the
+client sends a password that is not the one you typed, and Postgres says only
+that it was wrong. Use a password of letters, digits and `- _ . ~` only; that
+section explains why percent-encoding is not the fix on this stack.
 
 ### The agent logs authentication failures
 

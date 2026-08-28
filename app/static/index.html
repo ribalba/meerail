@@ -135,8 +135,28 @@
           <span id="mobile-back-label">Inbox</span>
         </button>
       </div>
-      <!-- Thread action bar — always present, acts on the newest message -->
-      <div class="reader-bar" id="reader-bar"></div>
+      <!-- Thread action bar — always present, acts on the newest message. Split
+           in two because only half of it is redrawn: renderBar() owns the verbs
+           and rewrites them on every flag, fold and thread open, while the find
+           box has to keep the query and the caret through all of that. -->
+      <div class="reader-bar" id="reader-bar">
+        <div class="tb-actions" id="reader-actions"></div>
+        <!-- Find inside the open conversation. The browser's own Ctrl+F cannot
+             see into the body iframes, which is where most of a message is, so
+             the reader runs the find itself — see App.reader's find section. -->
+        <div class="reader-find" id="reader-find" hidden>
+          <span class="find-icon" aria-hidden="true"></span>
+          <input id="reader-find-input" type="text" placeholder="Find in thread"
+            aria-label="Find in this conversation" autocomplete="off" spellcheck="false" />
+          <span class="find-count" id="reader-find-count" aria-live="polite"></span>
+          <button class="find-nav find-prev" id="reader-find-prev" type="button"
+            title="Previous match (Shift+Enter)" aria-label="Previous match" disabled></button>
+          <button class="find-nav find-next" id="reader-find-next" type="button"
+            title="Next match (Enter)" aria-label="Next match" disabled></button>
+          <button class="find-nav find-clear" id="reader-find-clear" type="button"
+            title="Clear (Esc)" aria-label="Clear find" hidden></button>
+        </div>
+      </div>
       <!-- "There is more of this conversation above you." The pane opens on the
            newest message, so a long thread hides its history off the top with
            nothing to show for it. Zero-height and sticky, so the chip floats

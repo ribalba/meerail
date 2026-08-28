@@ -13,6 +13,14 @@ App.reader = (function () {
   // read live off the search box so a rerender mid-typing keeps marking the
   // term you actually opened the conversation on.
   let marks = [];
+  // ...and the find box in the action bar, which is the same idea at thread
+  // scope. It wins over the search while it has a query in it, so what is lit
+  // is always the last thing you asked for; emptying the box puts the search's
+  // own hits back rather than leaving the thread dark.
+  let findQ = "";
+  let findMarks = [];
+  let hits = [];    // every lit mark in the thread, in reading order
+  let hitAt = -1;   // which of them the find box is standing on
   // Which messages have actually been on screen, by id. A thread opens on its
   // newest message, so everything earlier is off the top of the pane with
   // nothing to say so — this is what the "earlier messages" chip counts. It has
@@ -27,6 +35,12 @@ App.reader = (function () {
   let renderId = 0;    // which draw a body frame belongs to — see mountFrame()
   let frames = 0;      // its frames mounted but not yet measured
   let settled = false; // ...so nothing in the pane is where it will end up yet
+
+  // Which patterns the thread is painted with right now. Everything that marks
+  // asks here rather than reading `marks`, so a message drawn mid-find — a
+  // folded one opening, a body switched to plain text — comes up lit the same
+  // way as the ones already on screen.
+  function marksNow() { return findMarks.length ? findMarks : marks; }
 
   // Every action — toolbar or keyboard — applies to the newest message in the
   // conversation. That is the one you are replying to, and it keeps the single
@@ -136,7 +150,7 @@ App.reader = (function () {
   function landOn() {
     const host = document.getElementById("reader-content");
     if (!host) return;
-    scrollToMsg((marks.length && host.querySelector(".thread-msg.has-hit"))
+    scrollToMsg((marksNow().length && host.querySelector(".thread-msg.has-hit"))
       || host.lastElementChild, false);
   }
 
@@ -153,6 +167,9 @@ App.reader = (function () {
   function settle() {
     settled = true;
     updateEarlier();
+    // The bodies mark themselves as they load, so until the last frame is up
+    // the find box has been counting a thread it could only half see.
+    if (findQ) { collectHits(); renderFind(); }
   }
 
   // The chip that floats under the action bar: how many messages sit above
@@ -212,12 +229,28 @@ App.reader = (function () {
 
     frame.style.width = scale < 1 ? want + "px" : "";
     frame.style.transform = scale < 1 ? `scale(${scale})` : "";
+    // Kept because it cannot be asked for again: the width this was measured
+    // against is the one the line above just overwrote, so a second call would
+    // compare the mail's width with itself, answer "it fits", and drop the
+    // scaling. refitFrame() and the find box's hitTop() read it back instead.
+    frame.dataset.scale = String(scale);
     // Height comes after the width, so it is measured against the reflowed
     // document rather than the squeezed one.
     const h = doc.documentElement.scrollHeight + 4;
     frame.style.height = h + "px";
     // A transform is drawn small but laid out full size, so without this the
     // message trails a gap the height of everything the scale took off.
+    frame.style.marginBottom = scale < 1 ? -h * (1 - scale) + "px" : "";
+  }
+
+  // Re-measures a frame that has already been fitted once. Only the height:
+  // marking a term cannot change how wide the mail wants to be, but it can put
+  // one more line on the end of a paragraph, and a frame is only as tall as it
+  // was last measured — the tail of the message would simply be clipped off.
+  function refitFrame(frame, doc) {
+    const scale = Number(frame.dataset.scale) || 1;
+    const h = doc.documentElement.scrollHeight + 4;
+    frame.style.height = h + "px";
     frame.style.marginBottom = scale < 1 ? -h * (1 - scale) + "px" : "";
   }
 
@@ -237,7 +270,7 @@ App.reader = (function () {
         const doc = frame.contentDocument;
         // Marked before the height is measured, so a term that wraps a line
         // does not leave the frame short by one.
-        if (App.highlight.mark(doc.body, marks) && onHit) onHit();
+        if (App.highlight.mark(doc.body, marksNow()) && onHit) onHit();
         fitFrame(frame, doc);
         // Once you click inside a message body the iframe owns the keyboard and
         // shortcuts would silently stop working. Forward them back out — this
@@ -433,8 +466,11 @@ App.reader = (function () {
 
   function renderBar() {
     const bar = document.getElementById("reader-bar");
+    // The verbs only — the find box beside them is wired once and left alone,
+    // or a redraw mid-search would take the caret out of it.
+    const acts = document.getElementById("reader-actions");
     const m = targetMsg();
-    bar.innerHTML = BAR_BUTTONS.filter(
+    acts.innerHTML = BAR_BUTTONS.filter(
       (b) => (!b.tasks || tasksOn()) && (!b.ai || aiOn())
     ).map((b) => {
       if (b.sep) return `<span class="tb-sep"></span>`;
@@ -455,9 +491,189 @@ App.reader = (function () {
     // place you look while reading, and it tints the whole bar with it, since
     // a chip alone is small enough to miss when your eyes are on the message.
     bar.classList.toggle("kb-on", keyFocus);
-    if (keyFocus) bar.insertAdjacentHTML("afterbegin",
+    if (keyFocus) acts.insertAdjacentHTML("afterbegin",
       `<span class="tb-keys" title="Arrow keys scroll this thread — Esc goes back to the list"
         >↑↓<span class="tb-keys-label">scroll</span></span>`);
+    // Whether there is a thread to look in is the same question the verbs above
+    // just answered, so the box is drawn from here too.
+    renderFind();
+  }
+
+  // --- Find in this thread ---
+  //
+  // The browser's own Ctrl+F is no use here: an HTML mail is rendered inside a
+  // sandboxed iframe, and the page's find does not reach into one — so on a
+  // thread the word is plainly in, the built-in find reports nothing. This is
+  // that find, done over the same text nodes app.highlight already knows how to
+  // walk, iframes included.
+  //
+  // It re-marks in place rather than going through rerender(). A redraw
+  // remounts every body frame, which would throw the reading position and a
+  // second of loading away on each keystroke.
+
+  function findInput() { return document.getElementById("reader-find-input"); }
+
+  // The roots renderMsg marks, and the only ones re-marking may touch. The
+  // toolbars are ours and would light up on "reply"; the quoted attachment hits
+  // arrive from the server pre-marked, and unmarking those would throw away the
+  // only evidence the reader has that a PDF is why the thread matched.
+  function markRoots(wrap) {
+    const out = [];
+    const head = wrap.querySelector(".msg-head");
+    if (head) out.push({ root: head });
+    const md = wrap.querySelector(".msg-body-md");
+    if (md) out.push({ root: md });
+    for (const frame of wrap.querySelectorAll(".msg-body-frame")) {
+      let doc = null;
+      // A frame that has not loaded yet has no body to mark — it marks itself
+      // from marksNow() when it lands. Wrapped because a frame mid-navigation
+      // throws rather than answering null.
+      try { doc = frame.contentDocument; } catch (_) { /* not ours to read */ }
+      if (doc && doc.body) out.push({ root: doc.body, frame });
+    }
+    return out;
+  }
+
+  // Repaints the whole open thread from marksNow(). Called when the query
+  // changes — including to nothing, which is what puts the opening search's
+  // hits back.
+  function remark() {
+    const pats = marksNow();
+    for (const wrap of document.querySelectorAll("#reader-content .thread-msg")) {
+      let n = 0;
+      for (const { root, frame } of markRoots(wrap)) {
+        App.highlight.unmark(root);
+        n += App.highlight.mark(root, pats);
+        // A marked term can wrap a line that used to fit, which makes the
+        // document taller than the frame was measured for — so measure again.
+        if (frame) refitFrame(frame, root.ownerDocument);
+      }
+      // Text the server quoted out of an attachment counts as a hit too, but
+      // only for the search that found it: a find typed in here never looked
+      // inside the PDF.
+      const att = !findMarks.length && wrap.querySelector(".att-hits");
+      wrap.classList.toggle("has-hit", n > 0 || !!att);
+    }
+  }
+
+  // Read back off the document rather than remembered from the last marking
+  // pass: a frame that finished loading, a message unfolded, a body switched to
+  // plain text all add marks without going through remark().
+  function collectHits() {
+    hits = [];
+    for (const wrap of document.querySelectorAll("#reader-content .thread-msg")) {
+      for (const { root, frame } of markRoots(wrap)) {
+        for (const el of root.querySelectorAll("mark.hit")) hits.push({ el, frame });
+      }
+    }
+    // Where the marker is, asked of the marks themselves — the element it was
+    // on may have been redrawn out from under us since.
+    hitAt = hits.findIndex((h) => h.el.classList.contains("hit-on"));
+    return hits;
+  }
+
+  // Where a hit sits in the pane's coordinates. A body frame is scaled down
+  // when the mail was laid out wider than the pane (see fitFrame), and the
+  // marks inside it are positioned in the document's own unscaled coordinates.
+  // Points within a transformed box run from its transformed top edge at the
+  // transform's scale, whatever the transform-origin happens to be, so the two
+  // compose without needing to know which corner it grew from.
+  function hitTop(h) {
+    const top = h.el.getBoundingClientRect().top;
+    if (!h.frame) return top;
+    return h.frame.getBoundingClientRect().top + top * (Number(h.frame.dataset.scale) || 1);
+  }
+
+  function goToHit(i) {
+    if (!hits.length) return;
+    for (const h of hits) h.el.classList.remove("hit-on");
+    hitAt = (i % hits.length + hits.length) % hits.length;
+    const h = hits[hitAt];
+    h.el.classList.add("hit-on");
+    const p = pane();
+    if (p) {
+      // A little further down than scrollToMsg puts a message: a match landing
+      // hard against the action bar is difficult to read, and the line above it
+      // is usually the half of the sentence that says what it means.
+      const top = hitTop(h) - p.getBoundingClientRect().top;
+      p.scrollTo({ top: Math.max(0, p.scrollTop + top - stuckTop() - 60), behavior: "smooth" });
+    }
+    renderFind();
+  }
+
+  // Walks the matches, wrapping at both ends — the last one is the one before
+  // the first, which is how a find box gets you back to the top of a long
+  // thread without a second keystroke.
+  function stepHit(dir) {
+    collectHits();
+    if (!hits.length) return renderFind();
+    goToHit(hitAt < 0 ? (dir > 0 ? 0 : hits.length - 1) : hitAt + dir);
+  }
+
+  // The box's own state: the tally, and which of its buttons have work to do.
+  function renderFind() {
+    const box = document.getElementById("reader-find");
+    if (!box) return;
+    // Away entirely with no conversation open. The verbs beside it go disabled
+    // instead, so the bar keeps its shape as you move around — but a greyed
+    // text field reads as something broken rather than as something waiting.
+    box.hidden = !currentThread;
+    box.classList.toggle("has-q", !!findQ);
+    box.classList.toggle("no-hits", !!findQ && !hits.length);
+    // "1/12" before you have stepped anywhere, because that is where the jump
+    // on the last keystroke already put you.
+    box.querySelector(".find-count").textContent =
+      !findQ ? "" : hits.length ? `${Math.max(hitAt, 0) + 1}/${hits.length}` : "0";
+    for (const b of box.querySelectorAll(".find-prev, .find-next")) b.disabled = !hits.length;
+    box.querySelector(".find-clear").hidden = !findQ;
+  }
+
+  // The one way the query changes. Keyword rules whatever the search box is set
+  // to: a regex typed into a box this small, against a thread you can see all
+  // of, is not what anyone means by "find this word".
+  function setFind(q) {
+    findQ = (q || "").trim();
+    findMarks = findQ ? App.highlight.patterns(findQ, "keyword") : [];
+    remark();
+    collectHits();
+    // Straight to the first match, the way every find box does — typing is the
+    // whole gesture, and asking for a second keystroke to be shown the thing
+    // you just asked for reads as the box not having worked.
+    if (findQ && hits.length) goToHit(0); else renderFind();
+  }
+
+  function clearFind() {
+    const input = findInput();
+    if (input) input.value = "";
+    setFind("");
+  }
+
+  // A new conversation is a new place to look, so the box does not carry the
+  // last one's query into it. Straight to the state rather than through
+  // setFind(), which would re-mark a thread that is about to be redrawn anyway.
+  function resetFind() {
+    findQ = "";
+    findMarks = [];
+    hits = [];
+    hitAt = -1;
+    const input = findInput();
+    if (input) input.value = "";
+  }
+
+  // Ctrl/Cmd+F, from app.keys.js. Answers false when the key is not ours to
+  // take — no thread to look in, or the caret is in some other field, where
+  // find-the-page is still what it should mean. Selects rather than merely
+  // focusing, so pressing it again types over the last query the way it does
+  // everywhere else.
+  function focusFind() {
+    const input = findInput();
+    if (!currentThread || !input) return false;
+    const at = document.activeElement;
+    if (at && at !== input
+        && (at.tagName === "INPUT" || at.tagName === "TEXTAREA" || at.isContentEditable)) return false;
+    input.focus();
+    input.select();
+    return true;
   }
 
   // Owned here, and re-rendered from the flag, so a redraw of the bar cannot
@@ -959,7 +1175,7 @@ App.reader = (function () {
             <div class="${detailClass}"${detailTitle}>${
               shut ? App.esc(snippet) : detail(openTo)}</div>
           </div>
-          <span class="msg-folders"></span>
+          <span class="msg-folders" data-nohit></span>
           <div class="msg-date-full${shut ? "" : " selectable"}">${App.esc(App.fmtDateFull(m.date))}</div>
           <span class="msg-chevron">${App.icon("chevron", 16)}</span>
         </div>
@@ -969,11 +1185,12 @@ App.reader = (function () {
     // Participants are part of what search matched on, so the header is marked
     // too — including the collapsed snippet, which is often the only text a
     // folded message shows.
-    if (App.highlight.mark(head, marks)) wrap.classList.add("has-hit");
+    if (App.highlight.mark(head, marksNow())) wrap.classList.add("has-hit");
     // Filled in after the marking, not before it: the folder's name is ours
     // rather than the sender's, so a search for "invoices" must not light up
     // every card filed under Invoices — nor have that card count as a message
-    // the search matched.
+    // the search matched. The chip carries data-nohit as well, for the find
+    // box, which re-marks a head that is already holding its folders.
     head.querySelector(".msg-folders").innerHTML = where;
     const toggle = () => {
       if (collapsed.has(m.id)) collapsed.delete(m.id); else collapsed.add(m.id);
@@ -1008,7 +1225,7 @@ App.reader = (function () {
         if (full) allTo.add(m.id); else allTo.delete(m.id);
         detailEl.innerHTML = detail(full);
         detailEl.title = full ? "Hide the full recipient list" : "Show every recipient";
-        App.highlight.mark(detailEl, marks);
+        App.highlight.mark(detailEl, marksNow());
       };
       detailEl.setAttribute("role", "button");
       detailEl.setAttribute("tabindex", "0");
@@ -1066,7 +1283,7 @@ App.reader = (function () {
       // the sender's to sanitize.
       body.className = "msg-body-md";
       body.innerHTML = App.markdown.toHtml(m.body_plain);
-      if (App.highlight.mark(body, marks)) wrap.classList.add("has-hit");
+      if (App.highlight.mark(body, marksNow())) wrap.classList.add("has-hit");
     } else {
       body.className = "msg-body-text";
       // Switched to plain on a message that is all pictures and layout: there
@@ -1256,6 +1473,7 @@ App.reader = (function () {
     }
     if (request !== openRequest) return;
     marks = search ? App.highlight.patterns(search.q, search.mode) : [];
+    resetFind();
     currentThread = data;
     imagesFor = new Set();
     plainFor = new Set();
@@ -1283,6 +1501,7 @@ App.reader = (function () {
     openRequest += 1;
     currentThread = null;
     marks = [];
+    resetFind();
     viewed = new Set();
     keyFocus = false;
     rerender();
@@ -1351,6 +1570,51 @@ App.reader = (function () {
     const btn = e.target.closest("[data-act]");
     if (btn) handleAction(btn.dataset.act, targetMsg(), btn);
   });
+
+  // The find box is outside the half renderBar() redraws, so it is wired here
+  // once for the life of the app rather than on every draw.
+  (function wireFind() {
+    const box = document.getElementById("reader-find");
+    const input = findInput();
+    box.querySelector(".find-icon").innerHTML = App.icon("search", 14);
+    box.querySelector(".find-prev").innerHTML = App.icon("chevron", 14);
+    box.querySelector(".find-next").innerHTML = App.icon("chevron", 14);
+    box.querySelector(".find-clear").innerHTML = App.icon("close", 14);
+
+    // Marking a long thread walks every text node in it, iframes included, so
+    // the pass waits out a run of typing rather than running per letter.
+    let typing = null;
+    const soon = () => {
+      clearTimeout(typing);
+      typing = setTimeout(() => setFind(input.value), 140);
+    };
+    input.addEventListener("input", soon);
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        // Swallowed rather than passed on: the global Escape steps out of the
+        // reading pane, which is not what the key means with a caret in a box
+        // inside it. Back to the thread, unlit, in one press.
+        e.preventDefault();
+        e.stopPropagation();
+        clearFind();
+        input.blur();
+        return;
+      }
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      clearTimeout(typing);
+      // Enter before the pause has run out means "now" — walking the matches
+      // only starts once the ones you typed are actually on screen.
+      if (input.value.trim() !== findQ) setFind(input.value);
+      else stepHit(e.shiftKey ? -1 : 1);
+    });
+    box.querySelector(".find-prev").addEventListener("click", () => stepHit(-1));
+    box.querySelector(".find-next").addEventListener("click", () => stepHit(1));
+    box.querySelector(".find-clear").addEventListener("click", () => {
+      clearFind();
+      input.focus();
+    });
+  })();
   renderBar();
 
   // The chip goes to the oldest message you have not seen, so a conversation
@@ -1379,6 +1643,11 @@ App.reader = (function () {
   // thread open — both the bar and the per-message toolbars carry one.
   return { openThread, clear, action, scrollBy, scrollEnd, scrollMsg, setKeyFocus, renderEmpty,
     redraw: () => rerender(), isOpen: () => !!currentThread,
+    // Find in thread, for app.keys.js: Ctrl/Cmd+F puts the caret in the box,
+    // and Escape takes a find back down before it starts stepping out of panes
+    // — which it has to be asked about, since the query can still be lit with
+    // the caret long gone from the box.
+    focusFind, clearFind, findActive: () => !!findQ,
     // How many messages the open conversation holds — App.ai says so before it
     // sends any of them to a provider.
     threadSize: () => (currentThread ? (currentThread.messages || []).length : 0),

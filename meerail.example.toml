@@ -39,6 +39,23 @@
 # contract, not ours), so that one value genuinely does live in two places.
 url = "postgresql+psycopg://meerail:meerail@127.0.0.1:5432/meerail"
 
+# How many Postgres connections each process may hold. Left out, they are worked
+# out from what the process actually runs — the agent from its thread count (two
+# per account plus the indexer), the server from the fact that a request hands
+# its connection straight back — and that is the right answer on almost every
+# install. Set them when the database has a connection budget those numbers
+# overshoot: a shared Postgres, or one left at a low max_connections.
+#
+# The ceiling for one process is pool_size + max_overflow, plus one more that is
+# held outside the pool to listen for change notifications. Both processes read
+# this section, so a value here applies to each of them separately.
+#
+#   pool_size = 5        # kept open between bursts
+#   max_overflow = 10    # opened on demand above that, closed on the way back
+#
+# GET /healthz reports what the server is holding right now, which is where to
+# look first if a connection count seems wrong.
+
 
 # --- server -------------------------------------------------------------------
 [server]

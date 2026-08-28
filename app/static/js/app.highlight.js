@@ -41,6 +41,17 @@ App.highlight = (function () {
   // visible or breaks the element outright.
   const SKIP = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEXTAREA", "MARK"]);
 
+  // Text the reader wrote onto the card rather than text the sender wrote: a
+  // folder chip, say. Marking it would light up every message filed under
+  // "Invoices" for a search for the word — and, worse, count that card as one
+  // the search matched. Opted into with data-nohit by whoever draws it, since
+  // only they know which of the two it is.
+  function marking(node) {
+    const p = node.parentNode;
+    if (!p || SKIP.has(p.nodeName)) return false;
+    return !(p.closest && p.closest("[data-nohit]"));
+  }
+
   function spans(text, pats) {
     const found = [];
     for (const p of pats) {
@@ -69,8 +80,8 @@ App.highlight = (function () {
   function mark(root, pats) {
     if (!root || !pats.length) return 0;
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-      acceptNode: (n) => (n.parentNode && SKIP.has(n.parentNode.nodeName)) || !n.nodeValue.trim()
-        ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
+      acceptNode: (n) => marking(n) && n.nodeValue.trim()
+        ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT,
     });
     // Collected before mutating: splitting text nodes underneath a live walker
     // makes it revisit the halves it just produced.
@@ -99,9 +110,27 @@ App.highlight = (function () {
     return count;
   }
 
-  // The iframe bodies are srcdoc documents and inherit nothing from mail.css,
-  // so they need their own copy of the one rule that matters.
-  const FRAME_CSS = `mark.hit{background:#ffd84d;color:#1d1d1f;border-radius:2px;padding:0 1px}`;
+  /* Takes the marks back off, leaving the text as it was found. The halves a
+     mark was cut out of are rejoined rather than left as neighbouring text
+     nodes, or the next pass could not match a term that straddles the seam —
+     which is exactly what happens when you type one more letter into the find
+     box and every word grows by one. */
+  function unmark(root) {
+    if (!root || !root.querySelectorAll) return;
+    for (const el of root.querySelectorAll("mark.hit")) {
+      const parent = el.parentNode;
+      if (!parent) continue;
+      parent.replaceChild((el.ownerDocument || document).createTextNode(el.textContent), el);
+      parent.normalize();
+    }
+  }
 
-  return { patterns, mark, FRAME_CSS };
+  // The iframe bodies are srcdoc documents and inherit nothing from mail.css,
+  // so they need their own copy of the rules that matter. `.hit-on` is the one
+  // match the find box is standing on, told apart from the rest the way every
+  // find bar tells it — same mark, a different colour.
+  const FRAME_CSS = `mark.hit{background:#ffd84d;color:#1d1d1f;border-radius:2px;padding:0 1px}`
+    + `mark.hit.hit-on{background:#ff8a3d;box-shadow:0 0 0 2px #ff8a3d}`;
+
+  return { patterns, mark, unmark, FRAME_CSS };
 })();

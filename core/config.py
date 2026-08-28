@@ -242,6 +242,8 @@ class AccountConfig(BaseModel):
 _SECTION_KEYS: dict[str, dict[str, str]] = {
     "database": {
         "url": "database_url",
+        "pool_size": "db_pool_size",
+        "max_overflow": "db_max_overflow",
     },
     "server": {
         "secret_key": "secret_key",
@@ -391,6 +393,16 @@ class Settings(BaseSettings):
     # --- [database] -----------------------------------------------------------
     # The only channel between the agent and the web app.
     database_url: str = "postgresql+psycopg://meerail:meerail@localhost:5432/meerail"
+
+    # How many Postgres connections this process keeps open, and how many more it
+    # may take on top of that during a burst. Zero and -1 mean "work it out from
+    # what this process actually runs" — core/database.py explains the two shapes
+    # and why the agent's and the server's are not the same number. Set them only
+    # to hold the database to a budget the automatic numbers overshoot; the
+    # ceiling for one process is pool_size + max_overflow, plus one LISTEN
+    # connection that is held outside the pool.
+    db_pool_size: int = 0        # 0 = automatic
+    db_max_overflow: int = -1    # -1 = automatic (0 legitimately means "no burst")
 
     # --- [server] -------------------------------------------------------------
     # Secret used to encrypt server-side stored credentials and sign tokens.

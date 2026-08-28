@@ -10,7 +10,7 @@ from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from . import events, journal, transport
 from core.config import get_settings, trusted_proxy_hosts
-from core.database import engine, init_db
+from core.database import dispose_pool, engine, init_db, pool_status
 from core.version import VERSION
 from .limits import MaxBodySize
 from .routers import (
@@ -50,10 +50,17 @@ async def lifespan(_app: FastAPI):
     after the last — the replacement for the ``on_event`` hooks, which FastAPI
     has deprecated.
 
-    Nothing is torn down on the way out. The three tasks below are daemons of
-    the process, not of any request, and the loops they run are all written to
-    be killed at any point (each commits per unit of work); cancelling them here
+    The tasks below are not torn down on the way out. They are daemons of the
+    process, not of any request, and the loops they run are all written to be
+    killed at any point (each commits per unit of work); cancelling them here
     would only add a shutdown path with nothing to do in it.
+
+    The connection pool is the exception, and the reason there is a shutdown path
+    at all. Letting the process fall over with connections still open leaves
+    every one of them on the database server until Postgres notices for itself
+    that nobody is on the other end — so a stack that is brought up and down a
+    few times runs with several dead generations of this process still counted
+    against max_connections. See core/database.dispose_pool.
     """
     # Staging for outgoing attachments — the only thing left on disk, and the
     # server is the only process that writes it (core/config.py says why the
@@ -82,6 +89,7 @@ async def lifespan(_app: FastAPI):
               f"{journal.instance_name()!r}", flush=True)
         _spawn(journal_loop())
     yield
+    dispose_pool()
 
 # One version number for the whole project, read from the VERSION file at the
 # repository root (core/version.py) — the same one the images are tagged with.
@@ -294,7 +302,11 @@ def healthz() -> dict:
     # The database name (never the URL — that carries the password) lets the
     # test suite refuse to assert against a production server; see
     # tests/conftest.py::pytest_configure.
-    return {"ok": True, "database": engine.url.database}
+    # The pool figures say what this process is holding right now, which is the
+    # half of "why does the database have so many connections" that
+    # pg_stat_activity cannot answer: it sees sockets, not which pool they came
+    # from or whether anything ever handed them back. See core/database.
+    return {"ok": True, "database": engine.url.database, "pool": pool_status()}
 
 
 class NoCacheStatic(StaticFiles):

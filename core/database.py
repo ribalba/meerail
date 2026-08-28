@@ -1,3 +1,4 @@
+import os
 import random
 import re
 import time
@@ -14,13 +15,134 @@ settings = get_settings()
 # check_same_thread=False only matters for SQLite; harmless to compute regardless.
 connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
 
+# --- the connection pool ------------------------------------------------------
+#
+# Sized per process, because the agent and the server want opposite shapes and
+# SQLAlchemy's defaults (keep 5, borrow 10 more) are only one of them.
+#
+# The agent's need is countable: one sync thread per account, each holding a
+# Session for a whole pass (agent/sync.py); a lease-keeper thread beside it on a
+# connection of its own for as long as an action is in flight (agent/actions.py);
+# and one indexer thread for every account at once (agent/sync.py). NOTIFY
+# publishes borrow from the pool too, but they run on those same threads, so they
+# add nothing to the count. That is 2·accounts + 1, which on any install with
+# more than two accounts is more than the default pool keeps — so every pass was
+# opening real Postgres backends for the overflow and closing them again on the
+# way out. The pool is sized to hold the whole steady state instead, and the
+# burst above it is small: needing it means threads this arithmetic does not know
+# about, which is worth finding out about rather than absorbing silently.
+#
+# The server's need is not countable. It is request-driven, and its routes are
+# ordinary `def` functions, so FastAPI runs them in Starlette's threadpool and a
+# burst of browsers wants far more connections at once than any process should
+# hold between bursts. It gets the opposite shape — keep few, burst wide, hand
+# back — which is what the defaults already described; they are written out here
+# so that the ceiling is a stated number rather than a library's opinion.
+#
+# Neither figure includes the LISTEN connection each process holds *outside* the
+# pool (app/events.py, agent/commands.py): one more per process, by design, and
+# the reason a healthy install shows one connection more than this arithmetic.
+_IS_AGENT = os.environ.get("MEERAIL_ROLE") == "agent"
+
+
+def pool_shape(is_agent: bool, accounts: int,
+               pool_size: int = 0, max_overflow: int = -1) -> tuple[int, int]:
+    """(kept, burst) for this process — the arithmetic described above.
+
+    `pool_size` of 0 and `max_overflow` below 0 mean "decide it here"; anything
+    else is a budget somebody set in [database] and is passed straight through.
+    Zero is a legitimate max_overflow — "never open more than the pool keeps" —
+    which is why its sentinel is -1 rather than 0.
+    """
+    if is_agent:
+        # +2 rather than +1: the indexer, and one spare so that an account thread
+        # publishing an event while every other thread is mid-pass does not have
+        # to open a connection to do it. The floor matters for a one-shot run
+        # (--backfill-previews, --requeue-abandoned) against a config with no
+        # accounts in it, which would otherwise ask for a pool of two.
+        kept, burst = max(5, 2 * accounts + 2), 4
+    else:
+        kept, burst = 5, 10
+    return (pool_size if pool_size > 0 else kept,
+            max_overflow if max_overflow >= 0 else burst)
+
+
+_pool_size, _max_overflow = pool_shape(
+    _IS_AGENT, len(settings.accounts), settings.db_pool_size, settings.db_max_overflow
+)
+
+# How long a pooled connection may live before it is retired and replaced.
+#
+# pool_pre_ping already catches a connection the *server* has closed, because
+# that arrives as an error on the next statement. It cannot catch one the
+# network dropped silently — a NAT table that forgot the flow, a restarted
+# firewall — because from this side nothing happened at all. Postgres keeps that
+# backend, counted against max_connections, until its own TCP keepalives give up
+# on a client that is no longer there, which is hours by default. Retiring
+# connections on a half-hour clock bounds how long a pool can go on believing in
+# one. Only the pooled connections are covered; each process's LISTEN connection
+# reconnects on its own loop.
+_POOL_RECYCLE_SECONDS = 1800
+
+# SQLite takes none of this: its pool is a different class with a different
+# signature, and passing QueuePool's arguments to it is an error rather than a
+# no-op. Nothing runs meerail on SQLite, but core/database.py is imported by
+# tests that do, and the special case costs a line.
+_pool_kwargs: dict[str, int] = {}
+if not settings.database_url.startswith("sqlite"):
+    _pool_kwargs = {
+        "pool_size": _pool_size,
+        "max_overflow": _max_overflow,
+        "pool_recycle": _POOL_RECYCLE_SECONDS,
+    }
+
 engine = create_engine(
     settings.database_url,
     connect_args=connect_args,
     future=True,
     pool_pre_ping=True,  # recycle stale connections (long-lived sync + IDLE sessions)
+    **_pool_kwargs,
 )
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+
+
+def pool_status() -> dict[str, int | str]:
+    """What this process is holding, for /healthz.
+
+    The question this answers is the one that is otherwise only answerable from
+    inside Postgres, and then only as a total across every process connected to
+    it: of the connections attributed to this machine, how many belong to *this*
+    process, and is the number the pool was told to keep the number it is
+    keeping. `checked_out` climbing and staying up is what a leak looks like from
+    here; `overflow` sitting at its ceiling is what an undersized pool looks
+    like. Neither is visible in pg_stat_activity, which sees only sockets.
+    """
+    pool = engine.pool
+    try:
+        return {
+            "size": pool.size(),
+            "checked_out": pool.checkedout(),
+            "overflow": pool.overflow(),
+            "max_overflow": _max_overflow,
+        }
+    except AttributeError:
+        # Not a QueuePool — SQLite, in a test.
+        return {"size": "n/a"}
+
+
+def dispose_pool() -> None:
+    """Close every pooled connection this process holds. Never raises.
+
+    Called on the way out of both processes. Without it the backends stay on the
+    database server until Postgres works out for itself that the client is gone,
+    and a restart loop — the ordinary shape of a `docker compose up` while an
+    agent is mid-pass — leaves each dead generation counted against
+    max_connections for as long as that takes.
+    """
+    try:
+        engine.dispose()
+    except Exception:  # noqa: BLE001 — the process is ending either way
+        pass
 
 
 class Base(DeclarativeBase):

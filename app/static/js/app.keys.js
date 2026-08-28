@@ -220,6 +220,10 @@ App.keys = (function () {
         // only its; this row is here so the sheet is not missing one.
         { show: "⌥/Alt ⇧ S", label: "Suggested recipients" },
         { keys: ["/"], show: "/", label: "Search", run: () => App.search.focusInput() },
+        // Display-only, like the other modified keys — handled ahead of the
+        // table in handle(), since this one has to work with the caret already
+        // in the find box, where pressing it again means "type over that".
+        { show: "⌘/Ctrl F", label: "Find in thread" },
         { show: "⌘/Ctrl ↵", label: "Send message" },
         // Handled ahead of the table in handle() — modified keys never reach it.
         { show: "⌘/Ctrl A", label: "Select all in list" },
@@ -271,6 +275,11 @@ App.keys = (function () {
     // A pending bulk selection is the most recent thing you set up, so it is
     // the first thing Escape should take back.
     if (App.bulk.isActive()) return App.bulk.clear();
+    // A find still lit in the thread is the most recent thing you set up in
+    // this pane, so Escape takes that back before it gives up the pane itself.
+    // (Escape with the caret still in the box never reaches here — app.reader
+    // handles it there, so that press also puts the caret back on the thread.)
+    if (App.reader.findActive()) return App.reader.clearFind();
     // Hand the arrows back to the list before Escape starts closing things:
     // leaving a thread you were reading is the smaller, more likely intent.
     if (leaveReader()) return;
@@ -338,6 +347,18 @@ App.keys = (function () {
       if (isTyping(e.target) || isTyping(document.activeElement)) return;
       if (!App.bulk.selectAllLoaded()) return;         // empty list — let the browser have it
       e.preventDefault();
+      return;
+    }
+
+    // Ctrl/Cmd+F finds inside the open conversation. Taken from the browser
+    // because the browser's own find cannot see into the body iframes — which
+    // is where most of an HTML mail is — so the built-in one reports nothing on
+    // a thread the word is plainly in. Handed straight back when there is no
+    // thread, or when the caret is in some other field: App.reader decides
+    // that and says so by answering false, and an unclaimed Ctrl+F still opens
+    // the browser's find bar.
+    if (mod && !e.altKey && (e.key === "f" || e.key === "F")) {
+      if (App.reader.focusFind()) e.preventDefault();
       return;
     }
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import sys
 import threading
 from pathlib import Path
@@ -59,6 +60,13 @@ def main() -> int:
     if args.config:
         os.environ["MEERAIL_CONFIG"] = args.config
 
+    # Same rule, same reason: core/database.py sizes its connection pool at
+    # import time, and the agent's shape is not the server's — it runs a known
+    # number of threads that each hold a connection for a whole pass, rather than
+    # serving a burst of requests that hand theirs straight back. Saying which
+    # process this is has to happen before anything imports that module.
+    os.environ["MEERAIL_ROLE"] = "agent"
+
     if config_file_path() is None and LEGACY_AGENT_CONFIG.exists():
         print(f"{LEGACY_AGENT_CONFIG} is no longer read — the server and the agent now "
               f"share one {DEFAULT_CONFIG_PATH}.\n"
@@ -80,7 +88,7 @@ def main() -> int:
 
     import commands
     import log
-    from core.database import init_db
+    from core.database import init_db, pool_shape
     from core.version import VERSION
     from sync import index_once, run_account_forever, run_indexer_forever, sync_once
 
@@ -183,6 +191,16 @@ def main() -> int:
     threads.append(indexer)
     log.info(f"meerail-agent running for {len(cfg.accounts)} account(s): "
              f"{', '.join(a.email for a in cfg.accounts)}. Ctrl-C to stop.")
+    # Said at startup because it is the answer to a question that otherwise gets
+    # asked from the wrong end. "The database has fifty connections" is counted
+    # in Postgres, which sees sockets and not which process each one belongs to;
+    # this is the same number stated by the process that will open them, before
+    # it does. The +1 is the LISTEN connection commands.start() holds outside the
+    # pool. Both numbers are settable in [database] — see core/database.py.
+    kept, burst = pool_shape(is_agent=True, accounts=len(cfg.accounts),
+                             pool_size=cfg.db_pool_size, max_overflow=cfg.db_max_overflow)
+    log.info(f"database pool: {kept} connection(s) kept, up to {burst} more under "
+             f"load, plus 1 for change notifications")
     try:
         for t in threads:
             t.join()
@@ -191,5 +209,42 @@ def main() -> int:
     return 0
 
 
+def _exit_on_sigterm(_signum, _frame) -> None:
+    """Turn `docker compose stop` into an ordinary unwind.
+
+    Python's default SIGTERM handling kills the process where it stands, which
+    skips every `finally` in it — including the one below that hands this
+    process's Postgres connections back. That is the restart path, so it is
+    exactly the case where leaving them behind costs something: the connections
+    stay on the database server until Postgres works out on its own that the
+    client is gone, and until it does, the agent that has just started is sharing
+    max_connections with the one that has just stopped.
+
+    Raising SystemExit instead unwinds the main thread normally. The sync threads
+    are daemons and need no part in this: each commits per unit of work, so there
+    is nothing in flight that a graceful stop would save.
+    """
+    raise SystemExit(0)
+
+
+def _dispose_pool() -> None:
+    """Hand this process's Postgres connections back before it goes.
+
+    Read out of sys.modules rather than imported, because half the entry points
+    above return before core.database is ever loaded at all — a bad config, a
+    legacy config file, no accounts — and importing it from an exit path would
+    build an engine, and run the settings load behind it, purely to dispose of
+    something that was never there.
+    """
+    module = sys.modules.get("core.database")
+    if module is not None:
+        module.dispose_pool()
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    signal.signal(signal.SIGTERM, _exit_on_sigterm)
+    try:
+        code = main()
+    finally:
+        _dispose_pool()
+    raise SystemExit(code)

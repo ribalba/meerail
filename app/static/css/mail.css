@@ -587,6 +587,9 @@ body.resizing { cursor: col-resize; user-select: none; }
    repeated inside the body iframes (App.highlight.FRAME_CSS) — srcdoc
    documents inherit nothing from this sheet. */
 mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1px; }
+/* The one match the find box is standing on. The ring is what makes it findable
+   at a glance in a message where half the words are already yellow. */
+mark.hit.hit-on { background: #ff8a3d; box-shadow: 0 0 0 2px #ff8a3d; }
 /* Which message the term is in, readable before you have scrolled into it. */
 .thread-msg.has-hit { border-color: var(--accent); }
 
@@ -690,6 +693,36 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
    visible from wherever in the thread you are actually reading; the chip leads
    it and says which keys are meant. */
 .reader-bar.kb-on { background: var(--accent-weak); border-bottom-color: var(--accent-soft); }
+/* The verbs. Their own box because renderBar() rewrites it wholesale and the
+   find box next door has to survive that with its query and caret intact — and
+   because on a phone it is the verbs that scroll, not the field. */
+.tb-actions { display: flex; align-items: center; gap: .15rem; flex: 1 1 auto; min-width: 0; }
+/* Find in thread. Quiet until you are in it: the bar is a row of verbs, and a
+   field with a border around it would read as the loudest thing on it. */
+.reader-find { flex: 0 0 auto; display: flex; align-items: center; gap: .1rem;
+  margin-left: .5rem; padding: 0 .2rem 0 .45rem; border-radius: 7px;
+  background: var(--bg-elev); border: 1px solid transparent; }
+.reader-find:focus-within { border-color: var(--accent); }
+/* Both of these are put away with the hidden attribute, which a display of its
+   own would otherwise win against. */
+.reader-find[hidden], .find-nav[hidden] { display: none; }
+.find-icon { display: flex; color: var(--text-faint); }
+.reader-find input { width: 96px; border: none; background: none; color: var(--text);
+  font: inherit; font-size: .82rem; padding: .3rem .35rem; min-width: 0; }
+.reader-find input:focus { outline: none; }
+/* Room for a longer query once there is one to read back — a find you are
+   standing in is worth more of the bar than a placeholder is. */
+.reader-find:focus-within input, .reader-find.has-q input { width: 140px; }
+.find-count { font-size: .72rem; color: var(--text-muted); white-space: nowrap;
+  font-variant-numeric: tabular-nums; }
+/* "0" rather than an empty box: a query that matches nothing has to say so, or
+   it reads as the find not having run. */
+.reader-find.no-hits .find-count { color: var(--danger); }
+.find-nav { background: none; border: none; color: var(--text-muted); cursor: pointer;
+  padding: .2rem; border-radius: 5px; display: flex; }
+.find-nav:hover:not(:disabled) { background: var(--bg); color: var(--text); }
+.find-nav:disabled { opacity: .3; cursor: default; }
+.find-prev svg { transform: rotate(180deg); }
 .tb-keys { flex: 0 0 auto; display: flex; align-items: center; gap: .3rem;
   margin-right: .3rem; font-size: .8rem; line-height: 1; color: var(--accent);
   background: var(--bg); border: 1px solid var(--accent-soft); border-radius: 999px;
@@ -1912,10 +1945,16 @@ mark.hit { background: #ffd84d; color: #1d1d1f; border-radius: 2px; padding: 0 1
     padding: 0 .9rem; background: var(--bg); border-bottom: 1px solid var(--border);
     position: sticky; top: 0; z-index: 6; }
   .reading-pane .reader-bar { top: 44px; }
-  /* Ten actions do not fit across a phone; let the bar scroll rather than
-     wrap, which would change its height and break the offset above. */
-  .reader-bar { overflow-x: auto; scrollbar-width: none; }
-  .reader-bar::-webkit-scrollbar { display: none; }
+  /* Ten actions do not fit across a phone; let them scroll rather than wrap,
+     which would change the bar's height and break the offset above. Only the
+     verbs move — a find box you had to scroll the bar sideways to reach would
+     be a find box nobody finds. */
+  .tb-actions { overflow-x: auto; scrollbar-width: none; }
+  .tb-actions::-webkit-scrollbar { display: none; }
+  /* Which leaves it the narrowest thing that still shows a word you typed. */
+  .reader-find { margin-left: .35rem; }
+  .reader-find input { width: 72px; }
+  .reader-find:focus-within input, .reader-find.has-q input { width: 96px; }
   /* The per-message row carries labels as well as icons, which at this width
      squeezes "Reply All" onto two lines. Drop to icons only, like the bar above
      it — the labels are bare text nodes with no element to hide, so the size
