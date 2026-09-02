@@ -275,11 +275,12 @@ App.keys = (function () {
     // A pending bulk selection is the most recent thing you set up, so it is
     // the first thing Escape should take back.
     if (App.bulk.isActive()) return App.bulk.clear();
-    // A find still lit in the thread is the most recent thing you set up in
-    // this pane, so Escape takes that back before it gives up the pane itself.
+    // A find still lit in the thread — or, on a phone, still standing open over
+    // the verbs — is the most recent thing you set up in this pane, so Escape
+    // takes that back before it gives up the pane itself.
     // (Escape with the caret still in the box never reaches here — app.reader
     // handles it there, so that press also puts the caret back on the thread.)
-    if (App.reader.findActive()) return App.reader.clearFind();
+    if (App.reader.findActive()) return App.reader.closeFind();
     // Hand the arrows back to the list before Escape starts closing things:
     // leaving a thread you were reading is the smaller, more likely intent.
     if (leaveReader()) return;

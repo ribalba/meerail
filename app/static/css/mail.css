@@ -706,6 +706,13 @@ mark.hit.hit-on { background: #ff8a3d; box-shadow: 0 0 0 2px #ff8a3d; }
 /* Both of these are put away with the hidden attribute, which a display of its
    own would otherwise win against. */
 .reader-find[hidden], .find-nav[hidden] { display: none; }
+/* Both belong to the phone's version of the find — the button that opens the
+   box and the button that puts it away. Up here the box is simply out. Down to
+   the bar for the selector, and again in the media query below: .tb-btn is
+   further down this sheet and would otherwise win the display back.
+   The [hidden] pair goes with them for the same reason. */
+.reader-bar .find-toggle, .reader-bar .find-close,
+.reader-bar .find-toggle[hidden], .reader-bar .find-close[hidden] { display: none; }
 .find-icon { display: flex; color: var(--text-faint); }
 .reader-find input { width: 96px; border: none; background: none; color: var(--text);
   font: inherit; font-size: .82rem; padding: .3rem .35rem; min-width: 0; }
@@ -1951,10 +1958,30 @@ mark.hit.hit-on { background: #ff8a3d; box-shadow: 0 0 0 2px #ff8a3d; }
      be a find box nobody finds. */
   .tb-actions { overflow-x: auto; scrollbar-width: none; }
   .tb-actions::-webkit-scrollbar { display: none; }
-  /* Which leaves it the narrowest thing that still shows a word you typed. */
-  .reader-find { margin-left: .35rem; }
-  .reader-find input { width: 72px; }
-  .reader-find:focus-within input, .reader-find.has-q input { width: 96px; }
+  /* And the find stops being a field on the bar at all. Even at its narrowest
+     it took the width of four verbs, and the verbs were already scrolling —
+     so down here it is a button, and the box opens over them. Which one is
+     showing is `find-open`, set by app.reader.js; the button that toggles it
+     stays put beside the scroller, where a find has to be to be found. */
+  /* The rule against it says it does not move with them: the verbs scroll
+     under it, and one of them ends up against its edge whichever way the row
+     is pushed. */
+  .reader-bar .find-toggle { display: flex; flex: 0 0 auto; margin-left: .25rem;
+    padding-left: .55rem; border-left: 1px solid var(--border); border-radius: 0 6px 6px 0; }
+  .reader-bar .find-toggle[hidden] { display: none; }
+  .reader-bar:not(.find-open) .reader-find { display: none; }
+  .reader-bar.find-open .tb-actions, .reader-bar.find-open .find-toggle { display: none; }
+  /* Open, it is the bar: all of the width for the query, and its own way out.
+     The clear button goes — the close beside it already empties the box, and
+     the two crosses would sit a finger's width apart. */
+  .reader-find { flex: 1 1 auto; min-width: 0; margin-left: 0; }
+  .reader-find input, .reader-find:focus-within input, .reader-find.has-q input {
+    /* 16px, or iOS zooms the page in on focus and never zooms back out. */
+    width: auto; flex: 1 1 auto; font-size: 16px; }
+  .find-clear { display: none; }
+  .reader-bar.find-open .find-close { display: flex; flex: 0 0 auto; padding: .5rem .3rem .5rem .45rem; }
+  /* Fingertips, not a mouse pointer. */
+  .find-nav { padding: .4rem; }
   /* The per-message row carries labels as well as icons, which at this width
      squeezes "Reply All" onto two lines. Drop to icons only, like the bar above
      it — the labels are bare text nodes with no element to hide, so the size

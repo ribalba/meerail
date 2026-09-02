@@ -19,6 +19,9 @@ App.reader = (function () {
   // own hits back rather than leaving the thread dark.
   let findQ = "";
   let findMarks = [];
+  // Is the box on screen? Only ever false below the phone breakpoint, where it
+  // lives behind a button rather than on the bar — see openFind().
+  let findOpen = false;
   let hits = [];    // every lit mark in the thread, in reading order
   let hitAt = -1;   // which of them the find box is standing on
   // Which messages have actually been on screen, by id. A thread opens on its
@@ -618,6 +621,16 @@ App.reader = (function () {
     // instead, so the bar keeps its shape as you move around — but a greyed
     // text field reads as something broken rather than as something waiting.
     box.hidden = !currentThread;
+    // The phone's half of it: which of the two — button or box — the bar is
+    // showing. Painted here for every width, and simply ignored by the CSS
+    // above the breakpoint, where both are always out.
+    const toggle = document.getElementById("reader-find-toggle");
+    const open = findOpen && !!currentThread;
+    document.getElementById("reader-bar").classList.toggle("find-open", open);
+    if (toggle) {
+      toggle.hidden = !currentThread;
+      toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    }
     box.classList.toggle("has-q", !!findQ);
     box.classList.toggle("no-hits", !!findQ && !hits.length);
     // "1/12" before you have stepped anywhere, because that is where the jump
@@ -648,12 +661,31 @@ App.reader = (function () {
     setFind("");
   }
 
+  // Out from behind the button, on a phone. A no-op anywhere wider, where the
+  // box is on the bar to begin with and the flag decides nothing.
+  function openFind() {
+    if (findOpen) return;
+    findOpen = true;
+    renderFind();
+  }
+
+  // ...and back behind it. The query goes with it: marks left lit under a
+  // closed box, with the tally that explains them gone, read as the thread
+  // having been highlighted by something else.
+  function closeFind() {
+    findOpen = false;
+    const input = findInput();
+    if (input) input.blur();
+    clearFind();
+  }
+
   // A new conversation is a new place to look, so the box does not carry the
   // last one's query into it. Straight to the state rather than through
   // setFind(), which would re-mark a thread that is about to be redrawn anyway.
   function resetFind() {
     findQ = "";
     findMarks = [];
+    findOpen = false;
     hits = [];
     hitAt = -1;
     const input = findInput();
@@ -671,6 +703,9 @@ App.reader = (function () {
     const at = document.activeElement;
     if (at && at !== input
         && (at.tagName === "INPUT" || at.tagName === "TEXTAREA" || at.isContentEditable)) return false;
+    // A keyboard on a phone is a keyboard: the shortcut opens the box first
+    // rather than putting the caret in something nobody can see.
+    openFind();
     input.focus();
     input.select();
     return true;
@@ -1580,6 +1615,18 @@ App.reader = (function () {
     box.querySelector(".find-prev").innerHTML = App.icon("chevron", 14);
     box.querySelector(".find-next").innerHTML = App.icon("chevron", 14);
     box.querySelector(".find-clear").innerHTML = App.icon("close", 14);
+    const close = document.getElementById("reader-find-close");
+    close.innerHTML = App.icon("close", 18);
+    // The phone's button. Same gesture both ways round, so a find opened by
+    // mistake takes one tap to undo.
+    const toggle = document.getElementById("reader-find-toggle");
+    toggle.innerHTML = App.icon("search", 18);
+    toggle.addEventListener("click", () => {
+      if (findOpen) return closeFind();
+      openFind();
+      input.focus();
+    });
+    close.addEventListener("click", closeFind);
 
     // Marking a long thread walks every text node in it, iframes included, so
     // the pass waits out a run of typing rather than running per letter.
@@ -1596,8 +1643,7 @@ App.reader = (function () {
         // inside it. Back to the thread, unlit, in one press.
         e.preventDefault();
         e.stopPropagation();
-        clearFind();
-        input.blur();
+        closeFind();
         return;
       }
       if (e.key !== "Enter") return;
@@ -1645,9 +1691,9 @@ App.reader = (function () {
     redraw: () => rerender(), isOpen: () => !!currentThread,
     // Find in thread, for app.keys.js: Ctrl/Cmd+F puts the caret in the box,
     // and Escape takes a find back down before it starts stepping out of panes
-    // — which it has to be asked about, since the query can still be lit with
-    // the caret long gone from the box.
-    focusFind, clearFind, findActive: () => !!findQ,
+    // — which it has to be asked about, since the query can still be lit, or
+    // the box still standing open on a phone, with the caret long gone from it.
+    focusFind, clearFind, closeFind, findActive: () => !!findQ || findOpen,
     // How many messages the open conversation holds — App.ai says so before it
     // sends any of them to a provider.
     threadSize: () => (currentThread ? (currentThread.messages || []).length : 0),

@@ -144,6 +144,13 @@
         <!-- Find inside the open conversation. The browser's own Ctrl+F cannot
              see into the body iframes, which is where most of a message is, so
              the reader runs the find itself — see App.reader's find section. -->
+        <!-- Phone widths park the box behind this button: a field sitting in
+             the bar costs it four verbs' worth of width, and the verbs are
+             what the bar is for. Hidden above the breakpoint, where both
+             fit — mail.css does that swap, app.reader.js holds the state. -->
+        <button class="tb-btn find-toggle" id="reader-find-toggle" type="button"
+          title="Find in thread" aria-label="Find in this conversation"
+          aria-expanded="false" hidden></button>
         <div class="reader-find" id="reader-find" hidden>
           <span class="find-icon" aria-hidden="true"></span>
           <input id="reader-find-input" type="text" placeholder="Find in thread"
@@ -156,6 +163,12 @@
           <button class="find-nav find-clear" id="reader-find-clear" type="button"
             title="Clear (Esc)" aria-label="Clear find" hidden></button>
         </div>
+        <!-- The way back out, for the phone: the box is the whole bar while it
+             is open, so something has to hand the verbs back. Outside the field
+             rather than in it, where it would be a second cross a finger's
+             width from Clear and mean something else. -->
+        <button class="tb-btn find-close" id="reader-find-close" type="button"
+          title="Close find" aria-label="Close find"></button>
       </div>
       <!-- "There is more of this conversation above you." The pane opens on the
            newest message, so a long thread hides its history off the top with
