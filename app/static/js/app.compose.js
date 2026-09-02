@@ -221,13 +221,33 @@ App.compose = (function () {
   // nothing and would just churn requests letter by letter. Cc/Bcc are read
   // from the fields, which showExtra() empties when it folds them away — an
   // invisible recipient must not steer the From either.
+  // The address a token names: itself, or the one inside it if the token was
+  // pasted as "Name <addr>".
+  function tokenAddress(token) {
+    const angled = token.match(/<([^>]+)>/);
+    return (angled ? angled[1] : token).trim();
+  }
+
+  // One recipients field, split into the addresses it names and the tokens that
+  // are not addresses at all. Both halves matter at send time: `ok` is what goes
+  // on the wire, and `bad` is why the send stops — see send().
+  function fieldAddresses(sel) {
+    const ok = [];
+    const bad = [];
+    for (const token of parseAddrs($(sel).value)) {
+      const address = tokenAddress(token);
+      if (ADDRESS_RE.test(address)) ok.push(address);
+      else bad.push(token);
+    }
+    return { ok, bad };
+  }
+
   function recipientAddresses() {
     const out = [];
     for (const sel of ["#compose-to", "#compose-cc", "#compose-bcc"]) {
-      for (const token of parseAddrs($(sel).value)) {
-        const angled = token.match(/<([^>]+)>/);           // "Name <addr>", if pasted that way
-        const address = (angled ? angled[1] : token).trim().toLowerCase();
-        if (ADDRESS_RE.test(address) && !out.includes(address)) out.push(address);
+      for (const address of fieldAddresses(sel).ok) {
+        const lc = address.toLowerCase();
+        if (!out.includes(lc)) out.push(lc);
       }
     }
     return out;
@@ -916,8 +936,21 @@ App.compose = (function () {
 
   async function send(after) {
     const status = $("#compose-status");
-    const to = parseAddrs($("#compose-to").value);
-    if (!to.length) { status.textContent = "Add at least one recipient."; return false; }
+    const to = fieldAddresses("#compose-to");
+    const cc = fieldAddresses("#compose-cc");
+    const bcc = fieldAddresses("#compose-bcc");
+    // Checked here rather than left to the server, which answers a recipient it
+    // cannot parse with a 422 naming a field index — and a single stray token
+    // (a lone quote left behind while typing a name, a half-finished address)
+    // fails the whole send with nothing on screen to say which one. The From
+    // suggestion has always skipped these tokens silently; the send must not,
+    // because a mistyped address is a recipient the author meant to have.
+    const bad = [...to.bad, ...cc.bad, ...bcc.bad];
+    if (bad.length) {
+      status.textContent = `Not an email address: ${bad.join(", ")}`;
+      return false;
+    }
+    if (!to.ok.length) { status.textContent = "Add at least one recipient."; return false; }
     status.textContent = "Sending…";
     let sentWord = "Sent ✓";
     busy(true);
@@ -931,7 +964,7 @@ App.compose = (function () {
       const res = await App.api.sendMail({
         account_id: from.account_id,
         from_address: from.address,
-        to, cc: parseAddrs($("#compose-cc").value), bcc: parseAddrs($("#compose-bcc").value),
+        to: to.ok, cc: cc.ok, bcc: bcc.ok,
         subject: $("#compose-subject").value,
         body_text: text,
         body_html: htmlMode && text.trim() ? App.markdown.toMail(text) : "",

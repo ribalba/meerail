@@ -9,6 +9,27 @@ App.conn = App.conn || {
   init() {}, fail() {}, ok() {}, whenRestored() {}, isDown: () => false,
 };
 
+// What to put in front of a person when a request came back a failure. Almost
+// every route answers with `detail` as a sentence, and that sentence is the
+// whole of it. FastAPI's own body validation is the exception: a 422 answers
+// with a *list* of field errors instead, and handing that array to `new Error`
+// stringifies it to "[object Object]" — so the caller shows the user a failure
+// with no reason in it, and the only readable copy of what went wrong is in
+// the browser console. Flatten it to the field and the reason instead.
+App.errorText = function (detail, fallback) {
+  if (typeof detail === "string") return detail;
+  if (!Array.isArray(detail)) return fallback || "Request failed";
+  const parts = detail.map((e) => {
+    // "body" leads every location and names nothing the user can act on; what
+    // is left is the field, and for a list the index of the item in it.
+    const where = (Array.isArray(e && e.loc) ? e.loc : [])
+      .filter((p) => p !== "body" && p !== "query" && p !== "path").join(".");
+    const why = (e && e.msg) || "is not valid";
+    return where ? `${where}: ${why}` : why;
+  }).filter(Boolean);
+  return parts.length ? parts.join("; ") : (fallback || "Request failed");
+};
+
 // Which copy of a message an action moves, as a query fragment — and nothing
 // at all when the caller did not name one, which is the server's spelling of
 // "every folder this message is in". `lead` is the separator the route needs,
@@ -104,7 +125,7 @@ App.api = {
     if (!res.ok) {
       let detail = res.statusText;
       try { detail = (await res.json()).detail || detail; } catch (_) {}
-      const err = new Error(detail);
+      const err = new Error(App.errorText(detail, res.statusText));
       // The code rides along because one caller has to tell two kinds of "no"
       // apart: deleting a folder answers 409 with what is inside it when it has
       // not been confirmed yet, which is a question to put to the user rather
