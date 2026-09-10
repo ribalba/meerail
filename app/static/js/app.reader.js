@@ -67,6 +67,15 @@ App.reader = (function () {
         img{max-width:100%;height:auto}
         a{color:#1d6ff2}
         table{max-width:100%}
+        /* Outlook and gromox quote a plain-text reply as one <pre> per source
+           line, so a single unwrapped 500-character paragraph asks for a 4500px
+           document and fitFrame() scales the whole message down to 17% to fit
+           it. body's overflow-wrap cannot reach inside white-space:pre, and of
+           the wide things mail carries, <pre> is the one that can reflow without
+           losing anything: a table at that width really is that shape, a quoted
+           paragraph never was. Code in mail wraps instead of scrolling,
+           which beats a nested scrollbar in a frame with scrolling="no". */
+        pre{white-space:pre-wrap;overflow-wrap:break-word}
         blockquote{margin:0 0 0 .8em;padding-left:.8em;border-left:3px solid #d2d2d7;color:#555}
         ${App.highlight.FRAME_CSS}
       </style></head><body>${html || ""}</body></html>`;
