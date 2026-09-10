@@ -23,6 +23,7 @@ App.compose = (function () {
   let suggestItems = [];   // the co-recipients currently offered, so a park can keep them
   let htmlMode = false;    // send a formatted copy alongside the plain text
   let minimized = [];      // parked drafts, oldest first — see "Minimize" below
+  let parked = false;      // the draft on screen came off the bar — see makeRoom()
   const $ = (s) => document.querySelector(s);
   const HTML_KEY = "meerail.compose.html";
 
@@ -545,6 +546,7 @@ App.compose = (function () {
     clearTimeout(suggestTimer);      // nothing to suggest to a discarded draft
     discardStaged();
     dropFocus();
+    parked = false;
     $("#compose-modal").hidden = true;
   }
 
@@ -592,6 +594,7 @@ App.compose = (function () {
   // parked lands in the composer it belongs to.
   function apply(s) {
     draftGeneration = s.generation;
+    parked = true;                     // off the bar, and it belongs back on it
     staged = s.staged;
     replyTo = s.replyTo;
     references = s.references;
@@ -624,9 +627,14 @@ App.compose = (function () {
   // Hand the window over to another draft. Whatever is in it is parked, unless
   // there is nothing in it worth parking — an untouched composer is not a draft
   // and would only leave an empty chip behind.
+  //
+  // A draft that came off the bar is parked again even when it is empty. The
+  // user put it there, and only a × takes it off: judging it by its contents
+  // meant that bringing up one blank draft after another threw each previous
+  // one away, and the bar emptied as if those drafts had never been parked.
   function makeRoom() {
     if ($("#compose-modal").hidden) return;
-    if (hasDraft()) minimize(); else close();
+    if (parked || hasDraft()) minimize(); else close();
   }
 
   function minimize() {
@@ -639,6 +647,7 @@ App.compose = (function () {
     // still in flight which draft it is landing in.
     staged = [];
     draftGeneration = ++generationSeq;
+    parked = false;                    // the snapshot is the parked one now
     dropFocus();
     $("#compose-modal").hidden = true;
     renderBar();
@@ -815,6 +824,7 @@ App.compose = (function () {
 
   function openWith(ctx) {
     makeRoom();                 // park whatever was in the window first
+    parked = false;             // a fresh draft, not one back off the bar
     discardStaged();
     replyTo = ctx.in_reply_to || null;
     references = ctx.references || [];
