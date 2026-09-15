@@ -168,7 +168,7 @@ def _get_body(msg: EmailMessage, subtype: str) -> str:
             return strip_nuls(payload.decode("utf-8", "replace"))
 
 
-def html_to_text(html: str, links: bool = False) -> str:
+def html_to_text(html: str, links: bool = False, quotes: bool = False) -> str:
     """Flatten HTML to plain text, keeping the sender's line structure.
 
     ``<br>`` and block boundaries become newlines: a reply quotes this text
@@ -180,15 +180,26 @@ def html_to_text(html: str, links: bool = False) -> str:
     — the convention plain-text mail has always used. It is off by default
     because a snippet is 240 characters of preview and one tracking URL would
     eat all of them; the reader's plain-text view asks for it explicitly.
+
+    With ``quotes`` on, every line inside a ``<blockquote>`` is prefixed with
+    ``> ``, once per level. An HTML-only reply carries the whole conversation
+    as nested blockquotes, and flattened without them a reply to it puts every
+    earlier message at the same depth. Off by default because the body
+    fingerprint (core/bodysig.py) is stored and must not change underneath it.
     """
     if not html:
         return ""
     try:
         tree = HTMLParser(html)
         parts: list[str] = []
-        _flatten(tree.body or tree.root, parts, links)
+        _flatten(tree.body or tree.root, parts, links, quotes)
     except Exception:
         return ""
+    return _settle(parts)
+
+
+def _settle(parts: list[str]) -> str:
+    """Join flattened parts, resolving break markers into newlines."""
     text = _BREAK_RUN_RE.sub(_break_run, "".join(parts))
     return _BLANK_LINES_RE.sub("\n\n", text).strip()
 
@@ -206,7 +217,7 @@ def _break_run(match: re.Match[str]) -> str:
     return "\n" * min(max(lines, 2 if _HARD_BREAK in run else 1), 2)
 
 
-def _flatten(node, parts: list[str], links: bool = False) -> None:
+def _flatten(node, parts: list[str], links: bool = False, quotes: bool = False) -> None:
     for child in node.iter(include_text=True):
         tag = child.tag
         if tag == "-text":
@@ -217,19 +228,29 @@ def _flatten(node, parts: list[str], links: bool = False) -> None:
             continue
         elif tag == "br":
             parts.append("\n")
+        elif tag == "blockquote" and quotes:
+            # Settled on its own first, so the prefix lands on the lines the
+            # quote really has; a nested one arrives here already prefixed.
+            inner: list[str] = []
+            _flatten(child, inner, links, quotes)
+            text = _settle(inner)
+            if text:
+                parts.append(_HARD_BREAK)
+                parts.append("\n".join(("> " + ln).rstrip() for ln in text.split("\n")))
+                parts.append(_HARD_BREAK)
         elif tag in _BLOCK_TAGS:
             mark = _SOFT_BREAK if tag in _TIGHT_TAGS else _HARD_BREAK
             parts.append(mark)
-            _flatten(child, parts, links)
+            _flatten(child, parts, links, quotes)
             parts.append(mark)
         elif tag == "a" and links:
             start = len(parts)
-            _flatten(child, parts, links)
+            _flatten(child, parts, links, quotes)
             href = _spelled_href(child, "".join(parts[start:]))
             if href:
                 parts.append(f" <{href}>")
         else:
-            _flatten(child, parts, links)
+            _flatten(child, parts, links, quotes)
 
 
 def _bare_url(url: str) -> str:

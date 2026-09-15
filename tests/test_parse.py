@@ -294,6 +294,18 @@ def test_html_to_text_keeps_line_structure():
     assert html_to_text("<p>a  <b>b</b>\n  c</p>") == "a b c"
 
 
+def test_html_to_text_quotes_blockquotes_per_level():
+    html = ("<p>new</p><blockquote><p>one</p><p>two</p>"
+            "<blockquote>deep<br>er</blockquote></blockquote>after")
+    # Off by default: the body fingerprint is stored and must not move.
+    assert html_to_text(html) == "new\n\none\n\ntwo\n\ndeep\ner\n\nafter"
+    # A reply to an HTML-only message quotes the conversation with this, so
+    # each earlier message has to keep its own depth.
+    assert html_to_text(html, quotes=True) == (
+        "new\n\n> one\n>\n> two\n>\n> > deep\n> > er\n\nafter")
+    assert html_to_text("<blockquote> </blockquote>x", quotes=True) == "x"
+
+
 def test_html_to_text_spells_out_hrefs():
     html = '<p>See <a href="https://example.com/a?b=1">the docs</a> please</p>'
     # Off by default: snippets and the search corpus must not fill up with URLs.

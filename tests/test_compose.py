@@ -3,6 +3,8 @@
 import uuid
 from datetime import datetime, timedelta, timezone
 from email import message_from_string, policy
+from email.message import EmailMessage
+from email.utils import format_datetime
 
 import dbfixture
 from conftest import ingest_one
@@ -383,6 +385,28 @@ def test_reply_context_prefills_headers(account):
     assert ctx["subject"].startswith("Re:")
     assert ctx["in_reply_to"] == rfc          # the original Message-ID
     assert rfc in ctx["references"]
+
+
+def test_reply_to_html_only_message_keeps_quote_depth(account):
+    """An HTML-only reply carries the thread as nested blockquotes; quoting it
+    must not flatten every earlier message to the same depth."""
+    email, aid = account["email"], account["id"]
+    m = EmailMessage()
+    m["Message-ID"] = f"<htmlquote-{uuid.uuid4().hex}@t>"
+    m["Subject"] = "Nested quotes"
+    m["From"] = "alice@ex.com"
+    m["To"] = email
+    m["Date"] = format_datetime(T0)
+    m.set_content("<p>Third</p><blockquote type=\"cite\"><p>Second</p>"
+                  "<blockquote type=\"cite\"><p>First</p></blockquote></blockquote>",
+                  subtype="html")
+    dbfixture.ingest_raw_message(email, m.as_bytes(), uid=993)
+
+    _, sr = api("GET", f"/api/search?q=Nested&account_id={aid}")
+    mid = next(r["id"] for r in sr["rows"] if r.get("subject") == "Nested quotes")
+
+    _, ctx = api("GET", f"/api/compose/reply-context/{mid}?mode=reply")
+    assert "\n> Third\n>\n> > Second\n> >\n> > > First" in ctx["body_text"]
 
 
 def test_reply_defaults_from_to_the_addressed_alias(account):

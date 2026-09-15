@@ -524,7 +524,7 @@ def reply_context(message_id: int, mode: str = "reply", db: DBSession = Depends(
             "account_id": msg.account_id, "from_address": from_address, "to": [], "cc": [],
             "subject": ("" if normalize_subject(base_subj).startswith("fwd") else "Fwd: ") + base_subj,
             "body_text": f"\n\n---------- Forwarded message ----------\nFrom: {_format_sender(msg)}"
-                         f"\nSubject: {base_subj}\n\n{msg.body_text or html_to_text(msg.body_html)}",
+                         f"\nSubject: {base_subj}\n\n{msg.body_text or html_to_text(msg.body_html, quotes=True)}",
             "in_reply_to": None, "references": [],
             "attachments": attachments, "attachments_missing": missing,
         }
@@ -558,6 +558,6 @@ def _format_sender(msg: Message) -> str:
 def _quote(msg: Message) -> str:
     when = msg.date_sent.strftime("%b %d, %Y at %H:%M") if msg.date_sent else ""
     who = _format_sender(msg)
-    body = msg.body_text or html_to_text(msg.body_html)
+    body = msg.body_text or html_to_text(msg.body_html, quotes=True)
     quoted = "\n".join(("> " + ln).rstrip() for ln in body.splitlines())
     return f"On {when}, {who} wrote:\n{quoted}"

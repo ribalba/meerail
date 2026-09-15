@@ -156,9 +156,12 @@ App.markdown = (function () {
       }
 
       if (RE.quote.test(line)) {                        // quoted reply blocks
+        // One level per blockquote: `>> a` is a quote of a quote, so only one
+        // `>` comes off here and the recursion takes the next. RE.quote's `>+`
+        // would take both and flatten the two into one.
         const inner = [];
         while (i < lines.length && RE.quote.test(lines[i])) {
-          inner.push(RE.quote.exec(lines[i])[3]);
+          inner.push(lines[i].replace(/^\s*>\s?/, ""));
           i++;
         }
         out.push(`<blockquote>${toHtml(inner.join("\n"))}</blockquote>`);
