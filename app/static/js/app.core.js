@@ -336,6 +336,12 @@ App.api = {
     return this.get("/api/compose/sender-for?" + p.toString());
   },
   sendMail(payload) { return this.post("/api/compose/send", payload); },
+  // Drafts the composer keeps while they are written. Rows in meerail's own
+  // database only: none of these touches the mail server's Drafts folder.
+  drafts() { return this.get("/api/compose/drafts"); },
+  createDraft(payload) { return this.post("/api/compose/drafts", payload); },
+  updateDraft(id, payload) { return this.put(`/api/compose/drafts/${id}`, payload); },
+  deleteDraft(id) { return this.del(`/api/compose/drafts/${id}`); },
 
   // The outbox: what has been written here and not yet handed to a mail server.
   // A queue of this app's own, not an IMAP folder, so it has endpoints of its

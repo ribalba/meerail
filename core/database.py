@@ -582,6 +582,12 @@ def init_db() -> None:
             "ALTER TABLE messages ADD COLUMN IF NOT EXISTS body_sig VARCHAR(64)",
             "CREATE INDEX IF NOT EXISTS ix_messages_body_sig_missing "
             "ON messages (id) WHERE body_sig IS NULL",
+            # Composer drafts (app/routers/compose.py, /drafts). No existing row
+            # is a draft, so NULL state and revision 0 are both simply true of
+            # every one of them. Nothing but the drafts endpoints reads either.
+            "ALTER TABLE outbound ADD COLUMN IF NOT EXISTS draft_state JSONB",
+            "ALTER TABLE outbound ADD COLUMN IF NOT EXISTS "
+            "revision INTEGER NOT NULL DEFAULT 0",
         ):
             _run_migration(stmt)
 

@@ -18,7 +18,7 @@ from .routers import (
     outbox, reminders, search, stream, sync, tasks, undo, version,
 )
 from .deps import is_secure_request, require_ui_auth, ui_password
-from .routers.compose import sweep_outbox_staging
+from .staging import sweep_at_startup
 from .workers import body_sig_loop, contacts_loop, journal_loop, reminders_loop, search_index_loop
 
 settings = get_settings()
@@ -66,8 +66,11 @@ async def lifespan(_app: FastAPI):
     # server is the only process that writes it (core/config.py says why the
     # shared loader no longer does).
     settings.outbox_dir.mkdir(parents=True, exist_ok=True)
-    sweep_outbox_staging()
     init_db()
+    # After init_db, not before: the sweep spares the files saved drafts still
+    # reference, and it can only know which those are by reading the drafts.
+    # When it cannot read them it does not sweep at all (see app/staging.py).
+    sweep_at_startup()
     events.set_loop(asyncio.get_running_loop())
     # Mail ingest (and its Tika extraction) runs in the agent; the app only
     # listens for the resulting change notifications.

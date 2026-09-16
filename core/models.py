@@ -796,6 +796,15 @@ class Outbound(Base):
     long that takes and however many attempts it costs. ``error`` alongside it
     is the last thing that went wrong, not a state — the bytes are still here
     and the agent is still going to send them.
+
+    "draft" is the composer's autosave (app/routers/compose.py, /drafts), and it
+    never turns into a queued row in place. Sending builds a fresh queued row
+    from what the composer holds and deletes the draft in the same transaction,
+    so a draft has no raw_mime, no PendingAction and nothing the agent could
+    pick up. Everything else that reads this table either filters on state or
+    reaches a row through the outbound_id of a send action, which a draft never
+    has, and that is what keeps drafts out of the Outbox, its counts and the
+    agent without any of them having to know drafts exist.
     """
 
     __tablename__ = "outbound"
@@ -807,7 +816,7 @@ class Outbound(Base):
     # draft | queued | held | sent. "held" is a send that was cancelled before
     # it went out: still the user's mail, still in the Outbox, but with nothing
     # coming for it until they say so. "error" is historical, as on
-    # PendingAction.status.
+    # PendingAction.status. "draft" is a composer autosave (see the docstring).
     state: Mapped[str] = mapped_column(String(16), default="draft", nullable=False)
 
     to_addrs: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
@@ -820,11 +829,25 @@ class Outbound(Base):
     # Reply/forward threading headers.
     in_reply_to: Mapped[str | None] = mapped_column(String(998))
     references: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
-    # Local paths of attachments staged for this message.
+    # Staged attachments, in two shapes depending on the state. On a queued (or
+    # later) row: the staging ids /send baked into raw_mime, whose files it
+    # removes once the row is committed. On a draft: the composer's chips,
+    # {id, filename, size, content_type}, whose files must still be on disk
+    # for the draft to be sendable, which is why the startup sweep reads them.
     attachments: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
 
     raw_mime: Mapped[str | None] = mapped_column(Text)
     error: Mapped[str | None] = mapped_column(Text)
+
+    # The composer's own state for a draft, stored verbatim and never interpreted
+    # by the server: the chosen From (not validated, since the account's aliases
+    # can change while a draft sits) and whatever UI state the browser wants
+    # back when it reopens the draft. NULL on every row that is not a draft.
+    draft_state: Mapped[dict | None] = mapped_column(JSONB)
+    # Bumped on every draft save. The same draft can be open in two tabs, and a
+    # save carries the revision it was based on, so the second writer finds out
+    # it is overwriting something it never saw instead of silently doing it.
+    revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0")
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)

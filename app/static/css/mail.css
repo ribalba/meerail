@@ -1119,6 +1119,8 @@ mark.hit.hit-on { background: #ff8a3d; box-shadow: 0 0 0 2px #ff8a3d; }
    line is better than a Send button pushed off the edge. */
 .compose-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-top: .4rem; }
 .compose-status { flex: 1; color: var(--text-muted); font-size: .84rem; }
+.compose-saved { flex: 0 0 auto; color: var(--text-muted); font-size: .75rem; white-space: nowrap; }
+.compose-saved:empty { display: none; }
 /* The shortcut strip under the send buttons. One horizontal line of hints that
    wraps when the window is dragged narrow, quiet enough to read straight past
    once the keys are known — it is a reminder, not a control, so it never takes

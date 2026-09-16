@@ -24,6 +24,12 @@ App.compose = (function () {
   let htmlMode = false;    // send a formatted copy alongside the plain text
   let minimized = [];      // parked drafts, oldest first — see "Minimize" below
   let parked = false;      // the draft on screen came off the bar — see makeRoom()
+  let draftKey = null;     // the on-screen draft's lasting identity; see "Drafts that outlive the page"
+  let draftId = null;      // its row on the server, once a save has come back
+  let draftRev = 0;        // that row's revision when this copy last matched it
+  let savedSig = null;     // what the server last took for it (draftPayload, as JSON)
+  let touched = false;     // written in, rather than only opened
+  let sendingKey = null;   // the draft a send is under way for: nothing saves it meanwhile
   const $ = (s) => document.querySelector(s);
   const HTML_KEY = "meerail.compose.html";
 
@@ -87,6 +93,7 @@ App.compose = (function () {
         const [removed] = staged.splice(Number(b.dataset.i), 1);
         renderAttachments();
         if (removed) App.api.deleteAttachment(removed.id).catch(() => {});
+        edited();
       }));
   }
 
@@ -108,12 +115,17 @@ App.compose = (function () {
     if (generation === draftGeneration) {
       staged.push(attachment);
       renderAttachments();
+      edited();
       return true;
     }
     const parked = minimized.find((d) => d.generation === generation);
     if (!parked) return false;
     parked.staged.push(attachment);
     renderBar();                 // the chip counts what it is carrying
+    // A parked draft has no keystrokes coming to save it, so the file that
+    // just landed in it is saved from here.
+    saveDraft(parked.key);
+    persistLocal();
     return true;
   }
 
@@ -544,6 +556,10 @@ App.compose = (function () {
   function close() {
     showDropHint(false);
     clearTimeout(suggestTimer);      // nothing to suggest to a discarded draft
+    // The × is the one way a draft is thrown away, so its saved copies go with
+    // it. After a send there is nothing left to drop: send() already let go.
+    dropDraft(draftKey, draftId);
+    forgetOnScreen();
     discardStaged();
     dropFocus();
     parked = false;
@@ -586,6 +602,7 @@ App.compose = (function () {
       staged, replyTo, references, archiveTicket, fromPinned, htmlMode, lastField,
       prefilledFooter, footerTail, suggestKey, relatedKey,
       suggestions: suggestItems,
+      key: draftKey, draftId, draftRev, savedSig, touched,
     };
   }
 
@@ -605,6 +622,12 @@ App.compose = (function () {
     lastField = s.lastField;
     suggestKey = s.suggestKey;
     relatedKey = s.relatedKey;
+    draftKey = s.key;
+    draftId = s.draftId;
+    draftRev = s.draftRev;
+    savedSig = s.savedSig;
+    touched = s.touched;
+    showSaved("");
     updateSendButtons();
     renderAttachments();
     fillFrom(s.from.account_id, s.from.address);
@@ -641,16 +664,26 @@ App.compose = (function () {
     if ($("#compose-modal").hidden) return;
     showDropHint(false);
     clearTimeout(suggestTimer);        // the lookups resume when it comes back
-    minimized.push(snapshot());
+    const s = snapshot();
+    // Anything on the bar is a draft, however it got there: a reply parked
+    // unread to make room for another one is kept across a reload like any
+    // draft that was typed into.
+    s.touched = true;
+    minimized.push(s);
     // The parked snapshot owns the files now: bumping the generation both stops
     // the next draft's discardStaged() from deleting them and tells an upload
     // still in flight which draft it is landing in.
     staged = [];
     draftGeneration = ++generationSeq;
     parked = false;                    // the snapshot is the parked one now
+    forgetOnScreen();
     dropFocus();
     $("#compose-modal").hidden = true;
     renderBar();
+    // Saved now rather than after the usual pause: nothing more is going to be
+    // typed into it to set that timer off again.
+    saveDraft(s.key);
+    persistLocal();
   }
 
   // Bring one back. Anything already in the window is parked first, so
@@ -674,6 +707,7 @@ App.compose = (function () {
 
   function discard(draft) {
     minimized = minimized.filter((d) => d !== draft);
+    dropDraft(draft.key, draft.draftId);
     for (const attachment of draft.staged) {
       App.api.deleteAttachment(attachment.id).catch(() => {});
     }
@@ -706,6 +740,471 @@ App.compose = (function () {
       .some((s) => $(s).value.trim())
       || body.getText().replace(prefilledFooter, "").trim() !== ""
       || staged.length > 0;
+  }
+
+  // --- Drafts that outlive the page ---------------------------------------
+  // Drafts used to live in this page's memory and nowhere else, so a reload, a
+  // crashed tab or a closed laptop lid lost whatever was being written. Every
+  // draft that has been written in is now kept in two places:
+  //
+  //   * on the server, as an outbound row in state "draft" (see /api/compose/
+  //     drafts in app/routers/compose.py). It is saved a moment after typing
+  //     stops and straight away when the window is minimized, so every browser
+  //     on this install has it, and the drafts come back onto the bar when a
+  //     page loads. Only meerail's database: nothing is ever written to the
+  //     mail server's own Drafts folder.
+  //   * in this browser's localStorage, for as long as the server has not yet
+  //     taken the latest edits. That covers the second between a keystroke and
+  //     its save, and a server that cannot be reached at all. It is written
+  //     synchronously as the page goes away, the one moment a save still on the
+  //     wire would otherwise take the text with it.
+  //
+  // A draft is known by `key`, which it keeps for life, rather than by its
+  // server id: the id arrives only with the first save's answer, and is lost
+  // again if the row is sent or thrown away from another tab.
+  //
+  // Opening a composer is not writing one. A reply opened, read and closed
+  // leaves nothing behind; `touched` is what makes the window a draft to keep.
+
+  const SAVE_AFTER_MS = 1500;          // quiet after the last keystroke
+  const LOCAL_AFTER_MS = 400;
+  const RETRY_MS = 20000;              // a save the network ate
+  const RECONCILE_AFTER_MS = 2000;     // another tab's saves arrive in bursts
+  const LOCAL_KEY = "meerail.compose.drafts";
+  const OPEN_KEY = "meerail.compose.open";     // sessionStorage: on screen as the page went
+  const TAB_KEY = "meerail.compose.tab";
+  // A local copy another tab wrote is left to that tab until it has not been
+  // rewritten for this long. An open tab rewrites its copies on every retry,
+  // and a background tab's timers still fire once a minute.
+  const STALE_MS = 5 * 60 * 1000;
+
+  let saveTimer = null;
+  let localTimer = null;
+  let retryTimer = null;
+  let reconcileTimer = null;
+  let loaded = false;                  // the drafts from before this page are on the bar
+  const saving = new Map();            // key -> the save on the wire for it
+  const again = new Set();             // keys edited while their save was out
+  const gone = new Set();              // sent or thrown away here: never brought back
+
+  function newKey() {
+    if (window.crypto && crypto.randomUUID) {
+      try { return crypto.randomUUID(); } catch (_) { /* not a secure context */ }
+    }
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  }
+
+  // Which tab wrote a local copy. sessionStorage, because it is the one store
+  // that survives a reload and is not shared with the other tabs.
+  const TAB = (() => {
+    try {
+      let id = sessionStorage.getItem(TAB_KEY);
+      if (!id) { id = newKey(); sessionStorage.setItem(TAB_KEY, id); }
+      return id;
+    } catch (_) { return newKey(); }
+  })();
+
+  function showSaved(text) { $("#compose-saved").textContent = text; }
+
+  // The window is being emptied: whatever draft it held is not the one on
+  // screen any more, and its timer must not save the next one under its key.
+  function forgetOnScreen() {
+    clearTimeout(saveTimer);
+    draftKey = null;
+    draftId = null;
+    draftRev = 0;
+    savedSig = null;
+    touched = false;
+    showSaved("");
+  }
+
+  // Everything this tab holds as a draft, the one on screen first.
+  function liveDrafts() {
+    const out = minimized.slice();
+    if (draftKey) out.unshift(snapshot());
+    return out;
+  }
+
+  function idOf(key) {
+    const s = key === draftKey ? { draftId } : minimized.find((d) => d.key === key);
+    return (s && s.draftId) || null;
+  }
+
+  function draftFor(key) {
+    if (!key) return null;
+    if (key === draftKey) return snapshot();
+    return minimized.find((d) => d.key === key) || null;
+  }
+
+  // Written back wherever that draft lives now: a save that went out from the
+  // window can come back to a draft that has been parked in the meantime.
+  function update(key, fields) {
+    // A draft that changes key mid-send is still the one being sent.
+    if ("key" in fields && key === sendingKey) sendingKey = fields.key;
+    if (key && key === draftKey) {
+      if ("key" in fields) draftKey = fields.key;
+      if ("draftId" in fields) draftId = fields.draftId;
+      if ("draftRev" in fields) draftRev = fields.draftRev;
+      if ("savedSig" in fields) savedSig = fields.savedSig;
+      return;
+    }
+    const held = minimized.find((d) => d.key === key);
+    if (held) Object.assign(held, fields);
+  }
+
+  // What the server keeps. Recipients go as the tokens typed, unchecked: a
+  // draft is allowed a half-written address. `state` is the composer's own and
+  // the server stores it without reading it.
+  function draftPayload(s) {
+    return {
+      account_id: s.from.account_id,
+      from_address: s.from.address || null,
+      to: parseAddrs(s.to),
+      cc: parseAddrs(s.cc),
+      bcc: parseAddrs(s.bcc),
+      subject: s.subject,
+      body_text: s.bodyText,
+      in_reply_to: s.replyTo || null,
+      references: s.references || [],
+      attachments: s.staged.map((a) => ({
+        id: a.id, filename: a.filename || "", size: a.size || 0, content_type: a.content_type || "",
+      })),
+      state: {
+        key: s.key, title: s.title, ccShown: s.ccShown, bccShown: s.bccShown,
+        htmlMode: s.htmlMode, fromPinned: s.fromPinned, fromDefault: s.fromDefault,
+        archiveTicket: s.archiveTicket, prefilledFooter: s.prefilledFooter,
+        footerTail: s.footerTail, lastField: s.lastField,
+      },
+    };
+  }
+
+  function signature(s) { return JSON.stringify(draftPayload(s)); }
+
+  // hasDraft(), for a snapshot rather than for the window.
+  function hasContent(s) {
+    return [s.to, s.cc, s.bcc, s.subject].some((v) => (v || "").trim())
+      || (s.bodyText || "").replace(s.prefilledFooter || "", "").trim() !== ""
+      || s.staged.length > 0;
+  }
+
+  function lostNote(n) {
+    return n ? `${n} attachment${n === 1 ? "" : "s"} could not be restored: no longer stored.` : "";
+  }
+
+  // A server row as a parked draft, ready for apply().
+  function fromServer(d) {
+    const st = d.state || {};
+    const missing = new Set(d.missing_attachments || []);
+    const attachments = d.attachments || [];
+    const lost = attachments.filter((a) => missing.has(a.id)).length;
+    const title = st.title || "New Message";
+    const to = (d.to || []).join(", ");
+    const cc = (d.cc || []).join(", ");
+    const bcc = (d.bcc || []).join(", ");
+    const from = { account_id: d.account_id, address: d.from_address };
+    const s = {
+      generation: ++generationSeq,
+      title,
+      label: (d.subject || "").trim() || title,
+      to, cc, bcc,
+      // A row with a recipient in it is never folded away: showExtra() would
+      // clear the field, and an address nobody can see must not be sent to.
+      ccShown: !!st.ccShown || !!cc,
+      bccShown: !!st.bccShown || !!bcc,
+      subject: d.subject || "",
+      bodyText: d.body_text || "",
+      status: lostNote(lost),
+      fromNote: "",
+      from,
+      fromDefault: st.fromDefault || from,
+      staged: attachments.filter((a) => !missing.has(a.id)),
+      replyTo: d.in_reply_to || null,
+      references: d.references || [],
+      archiveTicket: st.archiveTicket || null,
+      fromPinned: st.fromPinned == null ? true : !!st.fromPinned,
+      htmlMode: !!st.htmlMode,
+      lastField: st.lastField || "#compose-to",
+      prefilledFooter: st.prefilledFooter || "",
+      footerTail: st.footerTail || "",
+      suggestKey: null,
+      relatedKey: null,
+      suggestions: [],
+      key: st.key || newKey(),
+      draftId: d.id,
+      draftRev: d.revision,
+      touched: true,
+      savedSig: null,
+    };
+    // With a file gone the row is out of date, and the next save says so.
+    s.savedSig = lost ? null : signature(s);
+    return s;
+  }
+
+  // --- the local copy ---
+
+  function readLocal() {
+    try {
+      const v = JSON.parse(localStorage.getItem(LOCAL_KEY) || "{}");
+      return v && typeof v === "object" ? v : {};
+    } catch (_) { return {}; }
+  }
+
+  function writeLocal(entries) {
+    try {
+      if (Object.keys(entries).length) localStorage.setItem(LOCAL_KEY, JSON.stringify(entries));
+      else localStorage.removeItem(LOCAL_KEY);
+    } catch (_) { /* private mode, or over quota: the server copy is all there is */ }
+  }
+
+  // Rewrites this tab's entries: a copy for every draft with edits the server
+  // has not acknowledged, none for the rest. Other tabs' entries are left be.
+  function persistLocal() {
+    clearTimeout(localTimer);
+    const entries = readLocal();
+    for (const s of liveDrafts()) {
+      if (gone.has(s.key)) continue;
+      if (!s.touched || signature(s) === s.savedSig) {
+        delete entries[s.key];
+      } else {
+        const { generation, suggestions, ...portable } = s;
+        entries[s.key] = { owner: TAB, at: Date.now(), draft: portable };
+      }
+    }
+    for (const key of gone) delete entries[key];
+    writeLocal(entries);
+  }
+
+  function forgetLocal(key) {
+    const entries = readLocal();
+    if (!(key in entries)) return;
+    delete entries[key];
+    writeLocal(entries);
+  }
+
+  // --- saving ---
+
+  // Somebody typed. The server gets it once they pause; this browser gets it
+  // sooner, since it costs nothing to ask and nothing to lose.
+  function edited() {
+    if (!draftKey) return;
+    touched = true;
+    const key = draftKey;
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => saveDraft(key), SAVE_AFTER_MS);
+    clearTimeout(localTimer);
+    localTimer = setTimeout(persistLocal, LOCAL_AFTER_MS);
+  }
+
+  function retryLater() {
+    if (retryTimer) return;
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      for (const s of liveDrafts()) saveDraft(s.key);
+      persistLocal();
+    }, RETRY_MS);
+  }
+
+  // One save per draft on the wire at a time; an edit made while one is out is
+  // picked up by another as soon as it lands. Nothing is sent when the server
+  // already has exactly this.
+  async function saveDraft(key) {
+    if (!key || gone.has(key) || key === sendingKey) return;
+    if (saving.has(key)) { again.add(key); return; }
+    const s = draftFor(key);
+    if (!s || !s.touched) return;
+    const payload = draftPayload(s);
+    if (payload.account_id == null) return;       // no account to keep it under
+    const sig = JSON.stringify(payload);
+    if (sig === s.savedSig) return;
+    // Typed into and emptied again is not worth a row. One that already has a
+    // row is saved empty all the same: only the × throws a draft away.
+    if (!s.draftId && !hasContent(s)) return;
+
+    let next = null;
+    const run = (async () => {
+      try {
+        const res = s.draftId
+          ? await App.api.updateDraft(s.draftId, { ...payload, base_revision: s.draftRev })
+          : await App.api.createDraft(payload);
+        if (gone.has(key)) {
+          // Thrown away or sent while this was out. A row this save created is
+          // one the × could not have known to delete.
+          if (!s.draftId) App.api.deleteDraft(res.id).catch(() => {});
+          return;
+        }
+        update(key, { draftId: res.id, draftRev: res.revision, savedSig: sig });
+        const missing = new Set(res.missing_attachments || []);
+        if (missing.size) dropMissing(key, missing);
+        if (key === draftKey) showSaved("Draft saved");
+        const now = draftFor(key);
+        if (now && signature(now) === sig) forgetLocal(key);
+      } catch (e) {
+        if (e.status === 409) {
+          // Another tab saved over this draft since this copy last matched it.
+          // Neither version is thrown away: this one becomes a draft of its
+          // own, under a key of its own so the two never get matched up again.
+          next = newKey();
+          forgetLocal(key);
+          update(key, { key: next, draftId: null, draftRev: 0, savedSig: null });
+        } else if (e.status === 404) {
+          // Sent or thrown away somewhere else, and still being written here:
+          // those are still somebody's words, so it is saved afresh.
+          next = key;
+          update(key, { draftId: null, draftRev: 0, savedSig: null });
+        } else {
+          persistLocal();
+          if (key === draftKey) showSaved("Saved in this browser");
+          // A refusal will say the same thing again until the draft changes;
+          // anything else is the network, and worth another go by itself.
+          if (!e.status || e.status >= 500) retryLater();
+        }
+      }
+    })();
+    saving.set(key, run);
+    await run;
+    saving.delete(key);
+    if (again.delete(key) && !next) next = key;
+    if (next) saveDraft(next);
+  }
+
+  // Staged files the server no longer has. They cannot be sent, so they come
+  // off the draft, and the draft says why.
+  function dropMissing(key, missing) {
+    if (key === draftKey) {
+      const before = staged.length;
+      staged = staged.filter((a) => !missing.has(a.id));
+      if (staged.length === before) return;
+      renderAttachments();
+      $("#compose-status").textContent = lostNote(before - staged.length);
+      edited();
+      return;
+    }
+    const held = minimized.find((d) => d.key === key);
+    if (!held) return;
+    const before = held.staged.length;
+    held.staged = held.staged.filter((a) => !missing.has(a.id));
+    if (held.staged.length === before) return;
+    held.status = lostNote(before - held.staged.length);
+    renderBar();
+    saveDraft(key);
+  }
+
+  // A draft thrown away, or sent, here. Both of its saved copies go.
+  function dropDraft(key, id) {
+    if (!key) return;
+    gone.add(key);
+    if (key === draftKey) clearTimeout(saveTimer);
+    if (id) App.api.deleteDraft(id).catch(() => {});
+    persistLocal();
+  }
+
+  // --- loading, and keeping up with other tabs ---
+
+  // The drafts from before this page: the server's, with this browser's
+  // unacknowledged edits laid over them.
+  async function loadDrafts() {
+    let rows = null;
+    try { rows = (await App.api.drafts()).drafts || []; } catch (_) { /* offline: local copies only */ }
+    const found = (rows || []).map(fromServer);
+    const now = Date.now();
+    for (const [key, entry] of Object.entries(readLocal())) {
+      if (!entry || !entry.draft || gone.has(key)) continue;
+      // Another tab that is still open is still trying to save this one.
+      if (entry.owner !== TAB && now - (entry.at || 0) < STALE_MS) continue;
+      const s = { ...entry.draft, generation: ++generationSeq, suggestions: [],
+                  staged: entry.draft.staged || [], references: entry.draft.references || [],
+                  key, touched: true, savedSig: null };
+      const at = found.findIndex((x) => x.key === key);
+      if (at >= 0) {
+        // The local copy is the newer one: the server's only ever lags it. It
+        // takes that row over, including a row whose creating save was
+        // answered after the page had gone, rather than starting a second.
+        s.draftId = found[at].draftId;
+        s.draftRev = found[at].draftRev;
+        found[at] = s;
+      } else if (rows && s.draftId) {
+        // It had a row and the row is gone: sent or thrown away elsewhere since.
+        forgetLocal(key);
+      } else {
+        found.push(s);
+      }
+    }
+    loaded = true;
+    for (const s of found) {
+      if (!liveDrafts().some((x) => x.key === s.key)) minimized.push(s);
+    }
+    renderBar();
+    // The draft that was on screen when this tab went away comes back up, so
+    // a reload in the middle of a sentence lands back in that sentence.
+    let open = null;
+    try { open = sessionStorage.getItem(OPEN_KEY); sessionStorage.removeItem(OPEN_KEY); } catch (_) { /* none */ }
+    const wasOpen = open && minimized.find((d) => d.key === open);
+    if (wasOpen && $("#compose-modal").hidden) restore(wasOpen);
+    for (const s of found) saveDraft(s.key);       // only the ones holding news go anywhere
+    persistLocal();
+  }
+
+  // The drafts SSE event: some tab, maybe this one, saved or removed a draft.
+  function onDraftEvent(ev) {
+    if (!loaded || !ev || !ev.id) return;
+    if (ev.change === "deleted") return lostElsewhere(ev.id);
+    const s = liveDrafts().find((d) => d.draftId === ev.id);
+    if (s && s.draftRev >= (ev.revision || 0)) return;   // this tab's own save, coming back
+    clearTimeout(reconcileTimer);
+    reconcileTimer = setTimeout(reconcile, RECONCILE_AFTER_MS);
+  }
+
+  // A draft this tab holds was sent or thrown away somewhere else.
+  function lostElsewhere(id) {
+    const s = liveDrafts().find((d) => d.draftId === id);
+    if (!s || gone.has(s.key)) return;
+    // On screen, or carrying edits that never reached the server: those are
+    // words nobody has thrown away yet. It lets go of the row and, the next
+    // time it is saved, becomes a draft again.
+    if (s.key === draftKey || signature(s) !== s.savedSig) {
+      update(s.key, { draftId: null, draftRev: 0, savedSig: null });
+      if (s.key !== draftKey) saveDraft(s.key);
+      return;
+    }
+    minimized = minimized.filter((d) => d.key !== s.key);
+    gone.add(s.key);
+    renderBar();
+    persistLocal();
+  }
+
+  // Brings the bar in line with the server: new drafts from elsewhere are
+  // added, parked copies another tab has moved on from are replaced, and ones
+  // removed elsewhere go. A draft being written here is never replaced under
+  // the writer; if both sides changed it, its next save keeps both (see 409).
+  async function reconcile() {
+    if (!loaded) return;
+    const before = new Set(liveDrafts().map((d) => d.draftId).filter(Boolean));
+    let rows;
+    try { rows = (await App.api.drafts()).drafts || []; } catch (_) { return; }
+    const onServer = new Set(rows.map((d) => d.id));
+    for (const d of rows) {
+      const key = d.state && d.state.key;
+      if (key && gone.has(key)) continue;
+      const s = liveDrafts().find((x) => (key && x.key === key) || x.draftId === d.id);
+      if (!s) {
+        minimized.push(fromServer(d));
+        continue;
+      }
+      if (s.draftId !== d.id) {
+        // This tab's own first save of it, answered on the stream before the
+        // request came back.
+        if (s.draftId == null) update(s.key, { draftId: d.id, draftRev: d.revision });
+        continue;
+      }
+      if (d.revision <= s.draftRev) continue;
+      if (s.key === draftKey || signature(s) !== s.savedSig) continue;
+      const at = minimized.findIndex((x) => x.key === s.key);
+      if (at >= 0) minimized[at] = fromServer(d);
+    }
+    // Only rows known before the fetch: one created while it was out is not
+    // missing, just newer than the answer.
+    for (const id of before) if (!onServer.has(id)) lostElsewhere(id);
+    renderBar();
   }
 
   // The account's footer is prefilled into the editor rather than stapled on at
@@ -826,6 +1325,8 @@ App.compose = (function () {
     makeRoom();                 // park whatever was in the window first
     parked = false;             // a fresh draft, not one back off the bar
     discardStaged();
+    forgetOnScreen();
+    draftKey = newKey();        // not saved anywhere until it is written in
     replyTo = ctx.in_reply_to || null;
     references = ctx.references || [];
     archiveTicket = ctx.archiveTicket || null;
@@ -915,6 +1416,7 @@ App.compose = (function () {
     const rest = body.getText();
     body.setText(rest ? `${text}\n\n${rest}` : text);
     body.focus(false);
+    edited();                   // asked for, so as much a draft as anything typed
   }
 
   // --- Sending -----------------------------------------------------------
@@ -964,6 +1466,12 @@ App.compose = (function () {
     status.textContent = "Sending…";
     let sentWord = "Sent ✓";
     busy(true);
+    // No saves while this is out: the send takes the draft's row off the
+    // drafts, and a save landing after it would find the row gone and put the
+    // mail back as a draft.
+    let key = draftKey;
+    sendingKey = key;
+    clearTimeout(saveTimer);
     try {
       const from = identities[Number($("#compose-from").value)] || identities[0] || {};
       // The editor only decorates; the markdown source the user typed is what
@@ -971,7 +1479,7 @@ App.compose = (function () {
       // sent as text/plain exactly as it always has been. A draft with nothing
       // in it has nothing to render, so it stays plain either way.
       const text = body.getText();
-      const res = await App.api.sendMail({
+      const mail = {
         account_id: from.account_id,
         from_address: from.address,
         to: to.ok, cc: cc.ok, bcc: bcc.ok,
@@ -980,7 +1488,19 @@ App.compose = (function () {
         body_html: htmlMode && text.trim() ? App.markdown.toMail(text) : "",
         in_reply_to: replyTo, references,
         attachments: staged.map((a) => a.id),
-      });
+      };
+      // Read off the window before this waits, so what goes out is what was on
+      // screen when Send was pressed. The wait is for a save already on the
+      // wire, which may be the one that gives this draft its row.
+      await saving.get(key);
+      key = sendingKey || key;           // a save that forked the draft renamed it
+      const res = await App.api.sendMail({ ...mail, draft_id: idOf(key) });
+      // The server took the draft row away with the send. The local copy goes
+      // too, and nothing is to bring either back.
+      gone.add(key);
+      sendingKey = null;
+      forgetLocal(key);
+      if (key === draftKey) draftId = null;
       // The server baked these files into the queued MIME and removed them.
       // They are no longer part of a draft, even if a follow-up action fails.
       staged = [];
@@ -993,6 +1513,9 @@ App.compose = (function () {
     } catch (e) {
       status.textContent = e.message || "Send failed";
       busy(false);
+      sendingKey = null;
+      // Still a draft, and one somebody tried to send: it is kept.
+      if (key === draftKey) edited();
       return false;
     }
     status.textContent = sentWord;
@@ -1009,7 +1532,9 @@ App.compose = (function () {
         return true;
       }
     }
-    setTimeout(close, 700);
+    // Only if the sent draft is still the one on screen: a new draft opened in
+    // the meantime would otherwise be closed, and its saved copy deleted.
+    setTimeout(() => { if (draftKey === key) close(); }, 700);
     busy(false);
     return true;
   }
@@ -1084,7 +1609,7 @@ App.compose = (function () {
     $("#compose-send-archive").addEventListener("click", sendAndArchive);
     $("#compose-send-ticket").addEventListener("click", sendAndTicket);
     $("#compose-attach").addEventListener("click", () => $("#compose-file").click());
-    $("#compose-html").addEventListener("click", () => setHtmlMode(!htmlMode));
+    $("#compose-html").addEventListener("click", () => { setHtmlMode(!htmlMode); edited(); });
     setHtmlMode(htmlDefault());
     $("#compose-cc-toggle").addEventListener("click", () => toggleExtra("cc"));
     $("#compose-bcc-toggle").addEventListener("click", () => toggleExtra("bcc"));
@@ -1115,6 +1640,33 @@ App.compose = (function () {
     // On the window, not the fields: the last stop on the ring is a send
     // button, and the first is the minimize button in the header.
     $("#compose-window").addEventListener("keydown", onTab);
+    // What counts as writing in the draft, for saving it. `input` alone misses
+    // most of the body: the editor takes Enter, paste and undo for itself and
+    // rebuilds the text by hand, which fires nothing. A key that can change a
+    // field catches those; saveDraft() sends nothing when nothing changed.
+    // Plain typing is not listed: it fires `input`. Neither are arrows and Tab,
+    // or reading a reply through would save it.
+    const win = $("#compose-window");
+    ["input", "change", "cut", "paste", "drop"].forEach((t) => win.addEventListener(t, edited));
+    win.addEventListener("keyup", (e) => {
+      if (!e.target.matches("input, [contenteditable]")) return;
+      if (e.key === "Enter" || ((e.ctrlKey || e.metaKey) && /^[zyxv]$/i.test(e.key))) edited();
+    });
+    // The page going away is the last chance to keep what the server has not
+    // got yet, and localStorage is written synchronously, so this one lands.
+    window.addEventListener("pagehide", () => {
+      persistLocal();
+      try {
+        sessionStorage.setItem(OPEN_KEY, draftKey && touched ? draftKey : "");
+      } catch (_) { /* nothing to reopen, then */ }
+    });
+    // A tab put in the background may never come back to the foreground, so
+    // its drafts go to the server now rather than when a timer next fires.
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) return;
+      for (const s of liveDrafts()) saveDraft(s.key);
+      persistLocal();
+    });
 
     const modal = $("#compose-modal");
     modal.addEventListener("dragenter", (e) => {
@@ -1146,12 +1698,15 @@ App.compose = (function () {
     });
     try { accounts = await App.api.accounts(); } catch (_) { accounts = []; }
     buildIdentities();
+    // After the accounts: a restored draft's From is picked out of them.
+    loadDrafts();
   }
 
   return {
     init, openNew, openReply, openWithBody, close, sendNow, sendDefault, sendAndArchive,
     sendAndTicket,
     minimize, cycle, focusExtra, focusSuggestions,
+    onDraftEvent, syncDrafts: reconcile,   // the SSE stream in app.shell.js
     htmlDefault, setHtmlDefault,     // the settings modal owns the checkbox, not the state
     isOpen: () => !$("#compose-modal").hidden,
     refreshAccounts: async () => {

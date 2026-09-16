@@ -736,6 +736,9 @@
           <button type="button" class="compose-toggle" id="compose-html"
                   aria-pressed="false">Send as HTML email</button>
           <span id="compose-status" class="compose-status"></span>
+          <!-- Whether the draft is kept yet: on the server, or only in this
+               browser while the server cannot be reached. See app.compose.js. -->
+          <span id="compose-saved" class="compose-saved" aria-live="polite"></span>
           <!-- Send & Archive is the default, so it sits last where the primary
                button has always been. Neither variant is drawn unless it can
                act — archiving needs the conversation this replies to, ticketing

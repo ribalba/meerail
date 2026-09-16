@@ -506,6 +506,13 @@ App.shell = (function () {
     // without waiting out a poll.
     ["accounts", "messages", "flags", "cursor", "present", "folders", "extract",
      "outbox"].forEach((t) => es.addEventListener(t, scheduleRefresh));
+    // A draft saved, sent or thrown away in another tab or browser. Not a
+    // list refresh: only the composer's bar of parked drafts has to follow.
+    es.addEventListener("drafts", (e) => {
+      let ev = null;
+      try { ev = JSON.parse(e.data); } catch (_) { return; }
+      if (App.compose) App.compose.onDraftEvent(ev);
+    });
     // "agent" fires when the agent's health changes. It rides the same debounce
     // as the rest; the status refresh happens inside it. Note that this can only
     // ever deliver good news promptly — an agent that has died sends nothing at
@@ -515,7 +522,12 @@ App.shell = (function () {
     // its own — but a server that has gone away is usually noticed here first,
     // long before the user clicks something. Hand it to the watchdog, which
     // confirms with a probe before showing the bar.
-    es.onopen = () => App.conn.ok();
+    // Draft events sent while the stream was down are not replayed, so the bar
+    // is checked against the server whenever it comes back.
+    es.onopen = () => {
+      App.conn.ok();
+      if (App.compose) App.compose.syncDrafts();
+    };
     // A stream we closed on purpose is not an outage. Without the guard, going
     // to the background would raise the red "connection lost" bar and set the
     // watchdog probing on a loop — the opposite of standing down.

@@ -5,9 +5,7 @@ prefill (recipients, quoting, threading headers) is computed here."""
 from __future__ import annotations
 
 import mimetypes
-import os
 import re
-import time
 import uuid
 from datetime import timedelta
 from email.message import EmailMessage
@@ -17,7 +15,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import distinct, func, select, tuple_
-from sqlalchemy.orm import Session as DBSession
+from sqlalchemy.orm import Session as DBSession, defer
 # Starlette's own, not the FastAPI subclass: the form is parsed by Starlette
 # here (see upload_attachment) and produces the base class, which a FastAPI
 # UploadFile is not an instance of.
@@ -36,7 +34,7 @@ _MALFORMED_MULTIPART = (MultiPartException, MultipartParseError)
 from core import outbox as outbox_core
 from core.config import get_settings
 from core.database import get_db
-from .. import events, mailops
+from .. import events, mailops, staging
 from ..deps import require_ui_auth
 from .messages import _readable
 from core.models import Account, Attachment, Message, Outbound, PendingAction, Recipient, utcnow
@@ -53,11 +51,11 @@ def _safe(name: str) -> str:
 
 
 def _staged_path(staging_id: str) -> Path:
-    # staging_id is "<uuid>__<safe filename>"; reject anything that isn't a bare basename.
-    if staging_id != os.path.basename(staging_id) or ".." in staging_id:
-        raise HTTPException(status_code=400, detail="Invalid attachment id")
-    path = (settings.outbox_dir / staging_id).resolve()
-    if path.parent != settings.outbox_dir.resolve():
+    # staging_id is "<uuid>__<safe filename>"; reject anything that isn't a bare
+    # basename. The rules live in app/staging.py, shared with the code that reads
+    # ids back out of drafts and must never be handed a path outside the area.
+    path = staging.staged_path(staging_id)
+    if path is None:
         raise HTTPException(status_code=400, detail="Invalid attachment id")
     return path
 
@@ -77,6 +75,9 @@ class SendRequest(BaseModel):
     in_reply_to: str | None = None
     references: list[str] = []
     attachments: list[str] = []          # staging ids from /attachments
+    # The draft this message was written in, if it was autosaved. Sending
+    # consumes it in the same transaction that queues the mail (see send).
+    draft_id: int | None = None
 
 
 def _sender_addresses(account: Account) -> list[str]:
@@ -192,56 +193,8 @@ def _stage_bytes(filename: str, payload: bytes) -> str:
     return staging_id
 
 
-# How long a staged file may sit unclaimed before it is swept.
-#
-# Staging is meant to be brief: a file is written when it is attached and
-# removed when the message is sent (/send, which unlinks every path it baked in)
-# or when the composer drops it (DELETE /attachments/{id}). Neither happens if
-# the composer never finishes — a closed tab, a crashed browser, a laptop lid —
-# and nothing else ever looked at the directory, so those files stayed for good.
-#
-# Forwarding is what makes that matter rather than merely being untidy.
-# ``reply_context(mode="forward")`` stages every attachment of the message being
-# forwarded *before* the user has decided to send anything, so opening a forward
-# of a mail carrying a video and then closing the composer leaves the video on
-# disk. Doing that a few times a week is a data directory that grows forever
-# with files nothing can reach.
-#
-# A day, because the only thing the age has to clear is a composer someone left
-# open — including one left open overnight. A staged file is written once and
-# then only read at /send, so mtime is a fair reading of "nothing has claimed
-# this".
-STAGING_TTL_SECONDS = 24 * 3600
-
-
-def sweep_outbox_staging(ttl_seconds: int = STAGING_TTL_SECONDS) -> int:
-    """Delete staged attachments nothing came back for. Returns how many.
-
-    Called at startup rather than on a timer. The files are only orphaned by a
-    composer that never finished, so a sweep per process start clears them at
-    the one moment there is demonstrably no composer open against this server —
-    and it costs a directory listing on a directory that is normally empty.
-
-    Best-effort throughout: this runs before the app serves anything, and a
-    permission error or a file that vanishes underneath us is not a reason to
-    refuse to start. Anything it cannot deal with is simply left, and the next
-    start tries again.
-    """
-    cutoff = time.time() - ttl_seconds
-    swept = 0
-    try:
-        entries = list(settings.outbox_dir.iterdir())
-    except OSError:
-        return 0
-    for path in entries:
-        try:
-            if not path.is_file() or path.stat().st_mtime >= cutoff:
-                continue
-            path.unlink()
-            swept += 1
-        except OSError:
-            continue
-    return swept
+# Files staged here and never sent are swept at startup, sparing the ones saved
+# drafts still reference: see app/staging.py.
 
 
 def _forward_attachments(db: DBSession, msg: Message) -> tuple[list[dict], int]:
@@ -387,6 +340,24 @@ def send(req: SendRequest, db: DBSession = Depends(get_db)):
     if hold:
         payload["not_before"] = hold
     db.add(PendingAction(account_id=account.id, type="send", payload=payload))
+
+    # The draft this was written in goes in the same commit as the mail it
+    # became. Two commits would have a window, however short, in which a crash
+    # leaves both: the message queued and its draft still listed, one "Send"
+    # away from going out twice. Only a row that is still a draft is touched;
+    # an id that has already gone (discarded in another tab, or sent from it)
+    # or that names some other outbound row is not this request's to delete,
+    # and the send itself is no less valid for it.
+    #
+    # Its staged files are not unlinked here beyond what the loop below does:
+    # the ones this message carries were baked in above, and a chip the user
+    # removed before sending was already discarded by the composer.
+    consumed_draft = None
+    if req.draft_id is not None:
+        draft = _locked_draft(db, req.draft_id)
+        if draft is not None:
+            consumed_draft = draft.id
+            db.delete(draft)
     db.commit()
 
     # Staged files are now baked into raw_mime; drop them.
@@ -399,6 +370,11 @@ def send(req: SendRequest, db: DBSession = Depends(get_db)):
     # The outbox count is on screen now, so it has to move when something lands
     # in it — in this window and in any other one that is open.
     events.publish({"type": "outbox", "queued": 1})
+    if consumed_draft is not None:
+        # Any other tab with this draft listed or open has to hear that it is
+        # gone, rather than find out from a 404 on its next autosave.
+        events.publish({"type": "drafts", "id": consumed_draft, "revision": None,
+                        "change": "deleted"})
     # And ask the agent to drain now rather than at the end of its poll
     # interval: a message that sends in a second should not sit visibly in the
     # outbox for thirty. The pass this asks for sends the mail and then reads
@@ -413,6 +389,237 @@ def send(req: SendRequest, db: DBSession = Depends(get_db)):
         mailops.wake_agent(db, account.id)
 
     return {"id": outbound.id, "state": outbound.state, "send_at": hold}
+
+
+# --- Drafts -----------------------------------------------------------------
+#
+# The composer autosaves into the outbound table as state "draft", so a message
+# that is half written survives a closed tab, a crashed browser and a server
+# restart, and can be picked up again in another window. A draft is a snapshot
+# of the composer and nothing more: the recipients are whatever tokens have been
+# typed so far (a draft is allowed to hold "bob@"), the From is not checked
+# against the account, and no MIME exists until /send builds it. All of that is
+# checked when the message is sent, which is the moment it has to be right.
+#
+# Concurrency is optimistic. Every save bumps `revision` and states the revision
+# it was based on, and a mismatch is a 409 carrying the current number: the tab
+# that lost the race finds out it would be overwriting something it never saw,
+# and can reload instead. The row lock is what makes compare-and-bump one step
+# when two saves arrive together.
+#
+# Everything else that reads the table filters on state or goes through a send
+# action's outbound_id, which a draft never has, so none of this reaches the
+# Outbox, its counts or the agent.
+
+
+class StagedChip(BaseModel):
+    """One attachment chip as the composer shows it; `id` names a staged file."""
+
+    id: str
+    filename: str = ""
+    size: int = 0
+    content_type: str = ""
+
+
+class DraftIn(BaseModel):
+    account_id: int
+    # Stored as given. The account's aliases can change while a draft sits, and
+    # a draft that could no longer be saved because of that would be worse than
+    # a From that /send refuses when the time comes.
+    from_address: str | None = None
+    # Raw tokens rather than EmailStr: autosave runs mid-keystroke.
+    to: list[str] = []
+    cc: list[str] = []
+    bcc: list[str] = []
+    subject: str = ""
+    body_text: str = ""
+    in_reply_to: str | None = None
+    references: list[str] = []
+    attachments: list[StagedChip] = []
+    state: dict = {}                     # the composer's own UI state, opaque here
+    # The revision this save started from. Required by PUT, ignored by POST.
+    base_revision: int | None = None
+
+
+def _check_chips(chips: list[StagedChip]) -> None:
+    """400 for a chip whose id could not name a file in the staging area.
+
+    Checked on the way in because a draft's ids are later turned back into
+    paths by code that deletes files (DELETE /drafts) and by the sweep that
+    decides which ones to spare, so an id that points anywhere else must never
+    be stored. Whether the file still exists is a different question, answered
+    on every read as `missing_attachments`: a draft is not refused for having
+    lost one.
+    """
+    for chip in chips:
+        _staged_path(chip.id)
+
+
+def _apply_draft(row: Outbound, body: DraftIn) -> None:
+    """Overwrite every stored field of a draft with what the composer sent.
+
+    A save is the whole composer, not a patch of it, so nothing from the
+    previous revision survives by accident: a field the composer cleared is
+    cleared here too.
+    """
+    row.account_id = body.account_id
+    row.to_addrs = list(body.to)
+    row.cc_addrs = list(body.cc)
+    row.bcc_addrs = list(body.bcc)
+    row.subject = body.subject
+    row.body_text = body.body_text
+    row.body_html = ""
+    row.in_reply_to = body.in_reply_to
+    row.references = list(body.references)
+    row.attachments = [chip.model_dump() for chip in body.attachments]
+    row.draft_state = {"from_address": body.from_address, "state": body.state}
+
+
+def _draft_out(row: Outbound) -> dict:
+    """A draft as the composer gets it back: what it saved, plus which of its
+    attachments are no longer on disk.
+
+    Those are reported rather than dropped. A chip that silently vanished
+    would be an attachment the user believes is still on the message, and the
+    composer is the place that can say so before Send does.
+    """
+    stored = row.draft_state if isinstance(row.draft_state, dict) else {}
+    ui_state = stored.get("state")
+    chips = list(row.attachments or [])
+    return {
+        "id": row.id,
+        "revision": row.revision,
+        "account_id": row.account_id,
+        "from_address": stored.get("from_address"),
+        "to": list(row.to_addrs or []),
+        "cc": list(row.cc_addrs or []),
+        "bcc": list(row.bcc_addrs or []),
+        "subject": row.subject or "",
+        "body_text": row.body_text or "",
+        "in_reply_to": row.in_reply_to,
+        "references": list(row.references or []),
+        "attachments": chips,
+        "missing_attachments": [
+            sid for sid in staging.chip_ids(chips)
+            if (path := staging.staged_path(sid)) is None or not path.exists()
+        ],
+        "state": ui_state if isinstance(ui_state, dict) else {},
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    }
+
+
+def _locked_draft(db: DBSession, draft_id: int) -> Outbound | None:
+    """The draft with this id, locked for the rest of the transaction, or None
+    if there is no such row or it is not a draft.
+
+    Filtering on the state is what keeps every caller from ever touching a
+    queued or sent message through a draft id. raw_mime is deferred because a
+    draft has none, and nothing here should be the query that reads one.
+    """
+    return db.execute(
+        select(Outbound).options(defer(Outbound.raw_mime))
+        .where(Outbound.id == draft_id, Outbound.state == "draft")
+        .with_for_update()
+    ).scalars().first()
+
+
+@router.get("/drafts")
+def list_drafts(db: DBSession = Depends(get_db)) -> dict:
+    """Every saved draft, oldest first."""
+    rows = db.execute(
+        select(Outbound).options(defer(Outbound.raw_mime))
+        .where(Outbound.state == "draft")
+        .order_by(Outbound.created_at, Outbound.id)
+    ).scalars().all()
+    return {"drafts": [_draft_out(row) for row in rows]}
+
+
+@router.post("/drafts")
+def create_draft(body: DraftIn, db: DBSession = Depends(get_db)) -> dict:
+    """The first save of a composer: a new draft at revision 1."""
+    _check_chips(body.attachments)
+    if db.get(Account, body.account_id) is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    row = Outbound(state="draft", revision=1)
+    _apply_draft(row, body)
+    db.add(row)
+    db.commit()
+
+    out = _draft_out(row)
+    events.publish({"type": "drafts", "id": out["id"], "revision": out["revision"],
+                    "change": "saved"})
+    return out
+
+
+@router.put("/drafts/{draft_id}")
+def save_draft(draft_id: int, body: DraftIn, db: DBSession = Depends(get_db)) -> dict:
+    """Every later save: replace the draft, if it is still the revision the
+    composer last saw.
+
+    404 when the draft is gone, which means it was sent or discarded somewhere
+    else. That is an answer, not an error to retry: recreating it here would
+    resurrect a message the user already dealt with.
+    """
+    if body.base_revision is None:
+        raise HTTPException(status_code=422,
+                            detail="base_revision is required to save an existing draft")
+    _check_chips(body.attachments)
+
+    row = _locked_draft(db, draft_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    if row.revision != body.base_revision:
+        raise HTTPException(status_code=409, detail={
+            "message": "This draft was saved from somewhere else since it was opened",
+            "revision": row.revision,
+        })
+    if db.get(Account, body.account_id) is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    _apply_draft(row, body)
+    row.revision = row.revision + 1
+    db.commit()
+
+    out = _draft_out(row)
+    events.publish({"type": "drafts", "id": out["id"], "revision": out["revision"],
+                    "change": "saved"})
+    return out
+
+
+@router.delete("/drafts/{draft_id}", status_code=204)
+def delete_draft(draft_id: int, db: DBSession = Depends(get_db)):
+    """Discard a draft and the files it was holding on to.
+
+    204 whether or not there was one to discard, since the outcome the caller
+    wants (no such draft) is true either way, and two tabs discarding the same
+    draft should not have one of them report a failure. A row that is not a
+    draft is never deleted through here.
+
+    The files are unlinked after the commit, not before: if the commit fails
+    the draft is still there and still needs them. A crash between the two
+    leaves files no draft references, and the startup sweep takes those once
+    they are old enough.
+    """
+    row = _locked_draft(db, draft_id)
+    if row is None:
+        return Response(status_code=204)
+    staged = staging.chip_ids(row.attachments)
+    db.delete(row)
+    db.commit()
+
+    for sid in staged:
+        path = staging.staged_path(sid)
+        if path is None:
+            continue
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    events.publish({"type": "drafts", "id": draft_id, "revision": None, "change": "deleted"})
+    return Response(status_code=204)
 
 
 # --- Which address do I write to these people from? -------------------------
