@@ -1038,6 +1038,38 @@ def test_inline_disposition_is_allowlisted(account):
     assert h["Content-Disposition"].startswith("attachment;")
 
 
+def test_inline_attachment_renders_in_the_apps_own_frame(account):
+    """The phone's attachment viewer frames ?inline=1, so it must be frameable.
+
+    It was not: the app-wide X-Frame-Options: DENY landed on attachments too, and
+    a PDF under CSP `sandbox` is never drawn by WebKit or Chromium, so the viewer
+    came up empty. Other origins still may not frame it, and only an inline PDF
+    loses the sandbox.
+    """
+    email, aid = account["email"], account["id"]
+    mid = f"frame-{uuid.uuid4().hex}@t"
+    raw = make_message(f"<{mid}>", "Frame check", "x@y.com", email, "body", T0,
+                       pdf_text="Report", png=True)
+    dbfixture.ingest_raw_message(email, raw, uid=1)
+
+    msg = _detail_by_subject(aid, "Frame check")
+    pdf = next(a for a in msg["attachments"] if a["content_type"] == "application/pdf")
+    png = next(a for a in msg["attachments"] if a["content_type"] == "image/png")
+
+    for att in (pdf, png):
+        _, _, h = api_bytes(f"/api/attachments/{att['id']}?inline=1")
+        assert h["X-Frame-Options"] == "SAMEORIGIN"
+        csp = [d.strip() for d in h["Content-Security-Policy"].split(";")]
+        assert "frame-ancestors 'self'" in csp
+        assert "default-src 'none'" in csp
+        assert ("sandbox" in csp) is (att is png)
+
+    # A download is never framed, and keeps the sandbox whatever its type.
+    _, _, h = api_bytes(f"/api/attachments/{pdf['id']}")
+    assert h["X-Frame-Options"] == "DENY"
+    assert h["Content-Security-Policy"] == "sandbox; default-src 'none'"
+
+
 def test_attachment_name_outside_latin1_still_downloads(account):
     """A name a header cannot carry is still a download, never a 500.
 

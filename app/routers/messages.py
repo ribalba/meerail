@@ -617,17 +617,28 @@ def download_attachment(
     media = att.content_type or "application/octet-stream"
     if not media.isascii() or not media.isprintable():
         media = "application/octet-stream"
-    return Response(
-        content=att.content,
-        media_type=media,
-        headers={
-            "Content-Disposition": _disposition(dispo, filename),
-            # Belt and braces around the allowlist: never let the browser sniff
-            # its way to a different type, and neuter scripts if one slips past.
-            "X-Content-Type-Options": "nosniff",
-            "Content-Security-Policy": "sandbox; default-src 'none'",
-        },
-    )
+    # Belt and braces around the allowlist: never let the browser sniff its way
+    # to a different type, and neuter scripts if one slips past.
+    csp = "sandbox; default-src 'none'"
+    headers = {
+        "Content-Disposition": _disposition(dispo, filename),
+        "X-Content-Type-Options": "nosniff",
+    }
+    if dispo == "inline":
+        # A PDF is drawn by the browser's own viewer, and WebKit and Chromium
+        # both refuse to draw one into a sandboxed document: the page simply
+        # comes up empty. Only a PDF loses the sandbox, and only inline, which
+        # the allowlist has already confined to exactly application/pdf.
+        if media.split(";")[0].strip().lower() == "application/pdf":
+            csp = "default-src 'none'"
+        # The phone's attachment viewer (app.mobile.js) shows this in a frame of
+        # the app's own. The middleware's X-Frame-Options: DENY would blank that
+        # frame too, so an inline attachment may be framed by this origin and
+        # still by no other.
+        csp += "; frame-ancestors 'self'"
+        headers["X-Frame-Options"] = "SAMEORIGIN"
+    headers["Content-Security-Policy"] = csp
+    return Response(content=att.content, media_type=media, headers=headers)
 
 
 # --- "Save them all" -----------------------------------------------------
