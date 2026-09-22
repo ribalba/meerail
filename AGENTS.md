@@ -96,6 +96,7 @@ Any plain IMAP/SMTP account (Gmail, Fastmail, Dovecot) works the same way.
 | `app/mail/render.py` | nh3 HTML sanitizing, remote-content blocking, `cid:` rewriting. |
 | `app/searchquery.py` | Search syntax parser. |
 | `app/llm.py`, `aiprompts.py`, `threadtext.py` | AI providers, prompts, and conversation flattening. |
+| `app/grammar.py` | Grammar and spelling checks: the settings row, UTF-16 segment offsets, the LanguageTool client, and the privacy guard that refuses a public `grammar.url`. |
 | `app/static/` | The SPA: `index.html`, `css/mail.css`, `js/app.*.js`. |
 | `tests/` | The pytest suite: `conftest.py` (safety guard), `dbfixture.py` (seeding), `helpers.py` (HTTP). |
 | `tools/` | `import_mbox.py` (+ `import-mbox.sh`), plus three maintenance scripts that are dry-run unless given `--apply`: `migrate_blobs.py`, `reparse_forwards.py`, `restore_pending.py`. |
@@ -349,6 +350,7 @@ these rules exists because something went wrong without it. The README section
 | `messages` | `/api` | list, detail, thread, source, attachments, thumbs |
 | `actions` | `/api/messages` | mark, flag, move, trash, archive, bulk, empty trash, purge |
 | `compose` | `/api/compose` | staging attachments, send, drafts |
+| `grammar` | `/api/grammar` | config, languages, check, ignore |
 | `outbox` | `/api/outbox` | unsent mail, send delay, retry/cancel/discard |
 | `reminders` | (none) | `/api/messages/{id}/remind`, `/api/reminders` |
 | `search` | `/api` | `/api/search` |

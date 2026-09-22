@@ -22,6 +22,11 @@
 # Bridge only starts under the `proton` profile (COMPOSE_PROFILES=proton in
 # .env, which the installer sets when you choose Proton Mail). A Gmail or
 # Fastmail install never pulls it.
+#
+# LanguageTool, the grammar and spelling checker, only starts under the
+# `grammar` profile, which nothing sets for you: add it to COMPOSE_PROFILES
+# (comma-separated, e.g. COMPOSE_PROFILES=proton,grammar) and set
+# `[grammar] url = "http://languagetool:8010"` in meerail.toml. See the service.
 name: meerail
 
 services:
@@ -251,6 +256,51 @@ services:
       # logging in again — it is not a copy of your mail.
       - bridge-data:/root
     restart: unless-stopped
+
+  languagetool:
+    # Grammar and spelling checks while you write, done on this machine:
+    # LanguageTool, the Java server, in the community image, pinned. Only
+    # starts under the `grammar` profile, because it is the heaviest thing here
+    # after Tika: ~450 MB to pull and ~1.3 GB of memory once two languages have
+    # been checked. Two steps turn it on:
+    #
+    #   1. COMPOSE_PROFILES=grammar in .env, or add it to the list already there
+    #      (COMPOSE_PROFILES=proton,grammar); and
+    #   2. [grammar] url = "http://languagetool:8010" in meerail.toml.
+    #
+    # The second decides whether a draft is sent anywhere, so it is not set in
+    # the server's environment for you: that would outrank meerail.toml and
+    # take the choice away from you. The server does not depend on this service
+    # either, so a stack with the profile off comes up exactly as before.
+    image: ${LANGUAGETOOL_IMAGE:-erikvl87/languagetool:6.8}
+    profiles: ["grammar"]
+    networks: [meerail]
+    # Deliberately NOT published. The image runs LanguageTool with --public,
+    # --allow-origin '*' and no authentication, so a host port would let
+    # anything that can reach it use your checker. The server is its only
+    # client, over this network.
+    environment:
+      # Initial and maximum heap, which the image's start.sh hands to the JVM.
+      Java_Xms: 256m
+      Java_Xmx: ${LANGUAGETOOL_HEAP:-1g}
+      # Every langtool_* variable becomes a line of LanguageTool's
+      # config.properties. The composer sends the whole draft again on every
+      # pause in typing; with a sentence cache, only what changed is checked.
+      langtool_cacheSize: "1000"
+    deploy:
+      resources:
+        limits:
+          # ~1.3 GB measured with a 1 GB heap; keep this well above the heap,
+          # since the JVM's own memory outside it counts against the limit too.
+          memory: ${LANGUAGETOOL_MEM_LIMIT:-2g}
+    restart: unless-stopped
+    healthcheck:
+      # The image's own check with a start period: one small English check.
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null --data 'language=en-US&text=a simple test' http://localhost:8010/v2/check || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
 networks:
   meerail:

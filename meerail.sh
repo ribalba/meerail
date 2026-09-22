@@ -162,19 +162,32 @@ compose() {
   # `./meerail.toml` in the compose file resolves against) follows the compose
   # file, so this works from wherever the user happens to be standing.
   #
-  # The profile is passed as a flag rather than left to COMPOSE_PROFILES in the
+  # The profiles are passed as flags rather than left to COMPOSE_PROFILES in the
   # env file: compose does read that variable from there, but only as an
   # interpolation source in some versions, and a Bridge that silently fails to
-  # start would look exactly like a Bridge that failed to log in. One flag ends
-  # the ambiguity. Repeating it (the bridge subcommands pass their own) is
+  # start would look exactly like a Bridge that failed to log in. Flags end the
+  # ambiguity. Repeating one (the bridge subcommands pass their own) is
   # harmless.
-  local profiles
-  profiles="$(env_get COMPOSE_PROFILES)"
-  if [ -n "$profiles" ]; then
-    compose_docker --profile "$profiles" "$@"
-  else
-    compose_docker "$@"
-  fi
+  #
+  # One flag per profile, because `--profile` takes exactly one name.
+  # COMPOSE_PROFILES is a comma-separated list, and `--profile "proton,grammar"`
+  # activates a single profile literally called "proton,grammar", which no
+  # service has: an install that listed Bridge and the grammar checker would
+  # silently start neither. So the list is split here, each entry trimmed and
+  # empty ones skipped. The `${flags[@]+...}` form is for bash 3.2 (macOS),
+  # where expanding an empty array under `set -u` is an unbound-variable error.
+  local raw entry
+  local -a names=() flags=()
+  raw="$(env_get COMPOSE_PROFILES)"
+  IFS=',' read -r -a names <<< "$raw"
+  for entry in ${names[@]+"${names[@]}"}; do
+    entry="${entry#"${entry%%[![:space:]]*}"}"
+    entry="${entry%"${entry##*[![:space:]]}"}"
+    if [ -n "$entry" ]; then
+      flags+=(--profile "$entry")
+    fi
+  done
+  compose_docker ${flags[@]+"${flags[@]}"} "$@"
 }
 
 compose_docker() {
@@ -1016,14 +1029,14 @@ cmd_uninstall() {
     warn "That cannot be undone. Your mail is still on the mail server; what is"
     warn "deleted is meerail's copy, its search index and its sync state."
     if ask_yn "Delete it?" n; then
-      compose --profile proton down -v
+      compose --profile proton --profile grammar down -v
       ok "Containers and volumes removed."
     else
-      compose --profile proton down
+      compose --profile proton --profile grammar down
       ok "Containers removed; volumes kept."
     fi
   else
-    compose --profile proton down
+    compose --profile proton --profile grammar down
     ok "Containers removed; volumes kept. \`start\` brings it all back."
   fi
   say ""

@@ -51,6 +51,9 @@ App.compose = (function () {
     { show: "⌥/Alt ⇧ C/B", label: "Cc / Bcc" },
     { show: "⌥/Alt ⇧ S", label: "Suggested people", ck: "suggest" },
     { show: "←/→ ↵", label: "Walk / add a suggestion", ck: "suggest" },
+    // Hidden by app.grammar.js on an install with no checker configured, and
+    // dimmed while the draft has nothing flagged, the way the two above are.
+    { show: "⌥/Alt ⇧ G", label: "Next spelling issue", ck: "grammar" },
     { show: "⌘/Ctrl ↵", label: "Send" },
     // The plain-Send key: ⌘↵ presses whichever button is the primary one, and
     // behind a thread that is Send & Archive. This one only ever sends.
@@ -544,6 +547,10 @@ App.compose = (function () {
     $("#compose-title").textContent = title;
     $("#compose-status").textContent = "";
     $("#compose-modal").hidden = false;
+    // Every way a draft reaches the window comes through here, with its text
+    // already in the editor: a fresh one, one back off the bar, one restored
+    // after a reload. The checker starts over for it.
+    if (App.grammar) App.grammar.onOpen();
   }
 
   // Hiding the window does not move the caret out of it: the field keeps the
@@ -567,6 +574,7 @@ App.compose = (function () {
     dropFocus();
     parked = false;
     $("#compose-modal").hidden = true;
+    if (App.grammar) App.grammar.onHide();
   }
 
   // --- Minimize ---------------------------------------------------------
@@ -684,6 +692,7 @@ App.compose = (function () {
     forgetOnScreen();
     dropFocus();
     $("#compose-modal").hidden = true;
+    if (App.grammar) App.grammar.onHide();
     renderBar();
     // Saved now rather than after the usual pause: nothing more is going to be
     // typed into it to set that timer off again.
@@ -1229,6 +1238,29 @@ App.compose = (function () {
   function footerFor(accountId) {
     const acct = accounts.find((a) => a.id === accountId) || accounts[0];
     return ((acct && acct.footer) || "").replace(/\n+$/, "");
+  }
+
+  // The stretches of the draft this composer wrote rather than the user, as
+  // [start, end) offsets into `text`: the footer it prefilled and the tail it
+  // opened with (the quote under a reply, the original under a text forward).
+  // The spelling checker leaves them alone. A forward's original is somebody
+  // else's writing, and so is the attribution line above a quote, which is not
+  // quoted itself and would otherwise be checked like the rest.
+  //
+  // Only while they are still as they were put there: once the user has edited
+  // the footer or written into the quote, the text is theirs, and it is checked
+  // like anything else they typed. Quoted lines are skipped either way, by the
+  // checker itself (App.markdown.proseRanges).
+  function notYours(text) {
+    const out = [];
+    if (prefilledFooter) {
+      const at = text.indexOf(prefilledFooter);
+      if (at >= 0) out.push([at, at + prefilledFooter.length]);
+    }
+    if (footerTail && text.endsWith(footerTail)) {
+      out.push([text.length - footerTail.length, text.length]);
+    }
+    return out;
   }
 
   function currentAccountId() {
@@ -1801,6 +1833,9 @@ App.compose = (function () {
     onDraftEvent, syncDrafts: reconcile,   // the SSE stream in app.shell.js
     htmlDefault, setHtmlDefault,     // the settings modal owns the checkbox, not the state
     isOpen: () => !$("#compose-modal").hidden,
+    // For app.grammar.js: the body's editor, and what in it is not the user's.
+    editor: () => body,
+    notYours,
     refreshAccounts: async () => {
       try { accounts = await App.api.accounts(); } catch (_) { accounts = []; }
       buildIdentities();

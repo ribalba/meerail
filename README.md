@@ -554,6 +554,16 @@ keys unless you specifically want a per-machine override.
 | `data_dir` | `DATA_DIR` | `./data` | Scratch space for staging outgoing attachments. Mail bytes live in Postgres. Every container overrides it to `/data`. |
 | `update_check` | `UPDATE_CHECK` | `true` | Once a day, fetch [`VERSION`](VERSION) from this repository's default branch and let the UI say so if it is newer than the running build. The only outbound request the server makes, and it carries nothing but the request — no identifier, no version, no statistics. `false` makes no request at all. See [How to update](#how-to-update) and [Versions and releases](#versions-and-releases). |
 
+### `[grammar]`
+
+Grammar and spelling checks in the composer, done by a LanguageTool server on your own machine. The whole section is optional; see [Grammar and spelling](#grammar-and-spelling).
+
+| Key | Env | Default | What it does |
+| --- | --- | --- | --- |
+| `url` | `GRAMMAR_URL` | *(empty)* | Base URL of a LanguageTool-compatible checker, normally `http://languagetool:8010` for the container the compose files start under the `grammar` profile. Empty means the feature is off: the composer has no checker and **no draft text is sent anywhere**. Not a Settings field on purpose: where your drafts go is the operator's decision, made in this file. |
+| `timeout_seconds` | `GRAMMAR_TIMEOUT_SECONDS` | `20` | How long to wait for an answer. Generous because LanguageTool loads each language the first time it is asked for one, which takes about six seconds. Only the read side; failing to connect at all gives up after three. |
+| `allow_public_hosts` | `GRAMMAR_ALLOW_PUBLIC_HOSTS` | `false` | The privacy guard. With it off, a `url` whose host resolves to any public address is refused before anything is sent, with a message saying so, so that a URL copied from a tutorial cannot quietly start sending every paragraph you type to somebody else's server. Loopback and private addresses are always allowed. Turn it on only if sending drafts to that public address is what you intend. |
+
 ### `[agent]`
 
 | Key | Env | Default | What it does |
@@ -791,6 +801,65 @@ Pointing **Other** at a model on `localhost` or your LAN needs `server.llm_allow
 = true` — the base URL is fetched by the *server*, so without that restriction the field would
 be a way to aim this machine at whatever else is on its network. The error message says so
 when you hit it.
+
+### Grammar and spelling
+
+Optional, and off until you set it up. The composer can check spelling, grammar and style as you
+write, the way a word processor does. The checking is done by
+[LanguageTool](https://dev.languagetool.org/http-server) running **on your own machine**, as one
+more container in the stack, and the meerail server is its only client, over the compose
+network. Nothing goes to languagetool.org or to anyone else.
+
+What is checked is what you wrote: the paragraphs of your draft, and not the quoted message you
+are replying to, code blocks, or the footer the composer prefilled. They are sent from the meerail
+server to the container on every pause in typing, in one request, and none of it is logged.
+
+Two steps turn it on, because the container is not small (~450 MB to pull, ~1.3 GB of memory once
+two languages have been checked) and nothing should start it unless you ask:
+
+1. Start the container: `COMPOSE_PROFILES=grammar` in `.env` (or add it to the list already
+   there, `COMPOSE_PROFILES=proton,grammar`), or `--profile grammar` on the `docker compose`
+   command line.
+2. Tell the server where it is, in `meerail.toml`:
+
+   ```toml
+   [grammar]
+   url = "http://languagetool:8010"
+   ```
+
+Then bring the stack up again (`make up`, or `meerail.sh restart` for an install).
+
+The container is not published on any host port. The image runs LanguageTool without any
+authentication, so a port would let anything that can reach it use your checker; the server
+reaches it by name on the compose network instead.
+
+Before anything is sent, the server resolves the host in `grammar.url` and refuses if any address
+it has is public, and the error says so. A URL copied from somewhere else must not be how your
+drafts start going to a third party. `grammar.allow_public_hosts = true` is the override, for a
+checker on a server of your own that happens to have a public IP.
+
+Any server speaking LanguageTool's v2 HTTP API works, including
+[LingoTweaker](https://github.com/fiduswriter/LingoTweaker), a Rust port (`lt-cli serve`). As of
+its current alpha it treats *auto* as US English and loads every language up front (measured
+~3.5 GB resident, against ~1.3 GB for the Java server), so pick a fixed language in Settings when
+you use it.
+
+In the composer, spelling mistakes get a red wavy underline, grammar an amber one, and style
+(only with *Picky* on) a dotted blue one, a moment after you stop typing. Click an underlined
+word, or press **Alt+Shift+G** to walk from one to the next, and a small box offers the
+replacements. Picking one is a normal edit, so Ctrl+Z takes it back. The same box has three ways
+to make the checker stop: **Ignore** (this message only), **Add to dictionary** (every message
+from now on) and **Turn off this rule** (the same, for a whole kind of mistake). A button next
+to *Send as HTML email* shows how many things are flagged and walks them when clicked. Beside it,
+a menu sets the language for this message only; *Auto* detects it from the text and names what
+it found.
+
+**Settings → Composing** turns the checker on and off, and sets the default language, the
+variants detection should prefer (`en-GB, de-DE`, say), and the *Picky* level. It also shows your
+dictionary and the rules you turned off, one per line, to edit by hand. These are stored on the
+server, so every browser gets the same. While the checker is on, the browser's own spell check
+is switched off in the composer, so words are not underlined twice. With no checker configured,
+or with it turned off, the browser's spell check comes back.
 
 ### What meerail deletes, and when
 

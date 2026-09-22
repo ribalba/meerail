@@ -148,7 +148,7 @@ App.api = {
     return answer;
   },
   get(p, signal) { return this.request("GET", p, undefined, signal); },
-  post(p, b) { return this.request("POST", p, b); },
+  post(p, b, signal) { return this.request("POST", p, b, signal); },
   patch(p, b) { return this.request("PATCH", p, b); },
   put(p, b) { return this.request("PUT", p, b); },
   del(p) { return this.request("DELETE", p); },
@@ -355,6 +355,15 @@ App.api = {
   saveOutboxSettings(seconds) {
     return this.put("/api/outbox/settings", { send_delay_seconds: seconds });
   },
+  // Spelling and grammar (app/routers/grammar.py). The paragraphs of a draft go
+  // to this server, which hands them to the LanguageTool it was configured
+  // with and to nothing else; the browser never talks to the checker itself.
+  grammarConfig() { return this.get("/api/grammar/config"); },
+  saveGrammarConfig(cfg) { return this.put("/api/grammar/config", cfg); },
+  grammarLanguages() { return this.get("/api/grammar/languages"); },
+  // Aborted by the caller when a newer check replaces it mid-flight.
+  grammarCheck(payload, signal) { return this.post("/api/grammar/check", payload, signal); },
+  grammarIgnore(payload) { return this.post("/api/grammar/ignore", payload); },
   deleteAttachment(id) { return this.del(`/api/compose/attachments/${encodeURIComponent(id)}`); },
   // Multipart, so it cannot go through request() — that one JSON-encodes the
   // body and sets a Content-Type, and a FormData upload needs the browser to

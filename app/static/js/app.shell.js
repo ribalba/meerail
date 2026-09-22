@@ -763,6 +763,8 @@ App.shell = (function () {
     // list and the key field are one form, and splitting it across two modules
     // only makes the module that has the state ask the one that has the fields.
     App.ai.onSettingsOpen();
+    // Same arrangement: app.grammar.js holds the state the form edits.
+    App.grammar.onSettingsOpen();
     loadSendDelay();
     $("#theme-mode").value = App.theme.mode();
     $("#age-days").value = App.list.ageDays();
@@ -916,6 +918,9 @@ App.shell = (function () {
       App.mobile.init();
       App.search.init();
       App.compose.init();
+      // After the composer, whose editor it draws on. It asks the server once
+      // whether a checker is configured and stays out of the way if not.
+      App.grammar.init();
       App.keys.init();
       App.bulk.init();
       App.tasks.init();

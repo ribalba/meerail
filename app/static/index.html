@@ -306,6 +306,59 @@
           </p>
         </div>
 
+        <!-- Filled by app.grammar.js from /api/grammar/config. The form is only
+             drawn when this server has a checker to send drafts to; otherwise
+             the note under it says how to set one up. -->
+        <div class="settings-section" id="grammar-settings">
+          <div id="grammar-settings-form" hidden>
+            <label class="settings-check" for="grammar-enabled">
+              <input type="checkbox" id="grammar-enabled" />
+              <span>Check spelling and grammar while I type</span>
+            </label>
+
+            <label for="grammar-language">Language</label>
+            <select id="grammar-language">
+              <option value="auto">Detect from the text</option>
+            </select>
+
+            <label for="grammar-variants">When detecting, prefer these variants</label>
+            <input type="text" id="grammar-variants" autocomplete="off" spellcheck="false"
+              placeholder="en-GB, de-DE" />
+
+            <label class="settings-check" for="grammar-picky">
+              <input type="checkbox" id="grammar-picky" />
+              <span>Picky: also point out style and typography</span>
+            </label>
+
+            <label for="grammar-words">My dictionary (one word per line)</label>
+            <textarea id="grammar-words" class="grammar-list" rows="4" spellcheck="false"></textarea>
+
+            <label for="grammar-rules">Rules I turned off (one rule id per line)</label>
+            <textarea id="grammar-rules" class="grammar-list" rows="3" spellcheck="false"></textarea>
+
+            <div class="sa-footer-actions">
+              <button type="button" id="grammar-save">Save</button>
+              <span class="sa-footer-status" id="grammar-save-status"></span>
+            </div>
+            <p class="muted small">
+              The paragraphs you write are checked by the LanguageTool server
+              this install runs on its own network. Quoted text, code and the
+              footer the composer puts in are left out, and nothing is sent
+              anywhere else. <em>Add to dictionary</em> and <em>Turn off this
+              rule</em> in the composer fill the two lists above. Stored on the
+              server, so every browser gets the same.
+            </p>
+          </div>
+          <p class="muted small" id="grammar-settings-off">
+            <strong>Spelling and grammar</strong> are not set up on this server.
+            They need a LanguageTool running next to meerail: start the
+            <code>grammar</code> compose profile and set <code>url</code> under
+            <code>[grammar]</code> in <code>meerail.toml</code> (see
+            <code>meerail.example.toml</code>). Until then the browser's own
+            spell checker underlines the composer.
+          </p>
+        </div>
+
         <h3 class="settings-heading" id="settings-ai-heading">AI</h3>
         <div class="settings-section">
           <label for="ai-provider">Provider</label>
@@ -747,6 +800,19 @@
                setHtmlMode(), which is also what knows which way it is. -->
           <button type="button" class="compose-toggle" id="compose-html"
                   aria-pressed="false">Send as HTML email</button>
+          <!-- Spelling and grammar: how many things are underlined (pressing it
+               walks them, as Alt+Shift+G does) and which language the draft is
+               checked in. Hidden unless this server has a checker configured
+               ([grammar] in meerail.toml) and it is switched on in Settings.
+               Shown and filled by app.grammar.js. -->
+          <span class="compose-grammar" id="compose-grammar" hidden>
+            <button type="button" class="compose-toggle" id="compose-grammar-next"
+                    aria-keyshortcuts="Alt+Shift+G"></button>
+            <select id="compose-grammar-lang" class="compose-grammar-lang"
+                    title="Language this draft is checked in" aria-label="Language this draft is checked in">
+              <option value="auto">Auto</option>
+            </select>
+          </span>
           <span id="compose-status" class="compose-status"></span>
           <!-- Whether the draft is kept yet: on the server, or only in this
                browser while the server cannot be reached. See app.compose.js. -->
@@ -769,6 +835,12 @@
              the suggestion hints when there is nothing to suggest. -->
         <div class="compose-keys" id="compose-keys"></div>
       </div>
+      <!-- What the checker says about the underlined word under the caret: its
+           message, the replacements to pick from, and the ways to make it stop
+           saying so. Inside the window so it goes when the window does, fixed
+           to the viewport so the editor's scrolling cannot clip it. Filled by
+           app.grammar.js. -->
+      <div class="grammar-pop" id="grammar-pop" role="dialog" aria-label="Spelling and grammar" hidden></div>
     </div>
   </div>
 
@@ -852,6 +924,7 @@
   <script src="/static/js/app.bulk.js"></script>
   <script src="/static/js/app.search.js"></script>
   <script src="/static/js/app.compose.js"></script>
+  <script src="/static/js/app.grammar.js"></script>
   <script src="/static/js/app.outbox.js"></script>
   <script src="/static/js/app.tasks.js"></script>
   <script src="/static/js/app.ai.js"></script>

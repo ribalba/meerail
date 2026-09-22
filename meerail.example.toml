@@ -5,9 +5,9 @@
 #   cp meerail.example.toml meerail.toml && chmod 600 meerail.toml
 #
 # Both processes read this same file: the web app takes [database] and
-# [server], the agent takes [database] and [agent]. Each ignores the other's
-# section, so a machine running only one of them just leaves the rest at its
-# default.
+# [server] (plus [journal] and [grammar] when you use them), the agent takes
+# [database] and [agent]. Each ignores the other's section, so a machine
+# running only one of them just leaves the rest at its default.
 #
 # EVERY setting here can be overridden by an environment variable of the same
 # name in upper case — server.password is SERVER_PASSWORD, database.url is
@@ -258,6 +258,56 @@ update_check = true
 # Seconds between polls. Sixty matches the reminder tick, so a reminder set on
 # one machine shows up on the others inside about a minute.
 # poll_interval = 60
+
+
+# --- grammar ------------------------------------------------------------------
+# Grammar and spelling checks while you write, underlined in the composer. The
+# checking is done by LanguageTool running on your own machine, as one more
+# container in the stack. Leave the section out, the default, and the composer
+# has no checker and no draft text is sent anywhere at all.
+#
+# What is sent, once it is on, is the paragraphs you wrote: not the quoted mail
+# you are replying to, not code blocks, not the footer the composer prefilled.
+# It goes from the meerail server to the checker on every pause in typing, and
+# none of it is logged.
+#
+# Turning it on takes two steps, because the checker is a container of its own
+# and not a small one (~450 MB to pull, ~1.3 GB of memory with two languages
+# loaded), so nothing starts it unless you ask:
+#
+#   1. Start the container: COMPOSE_PROFILES=grammar in .env (or add it to the
+#      list already there, COMPOSE_PROFILES=proton,grammar), or pass
+#      `--profile grammar` to docker compose.
+#   2. Tell the server where it is, here:
+#
+# [grammar]
+# url = "http://languagetool:8010"
+#
+# That is the container's name on the compose network, which is where the
+# server runs. A server started outside compose (`make dev`) cannot resolve it
+# and needs an address it can reach instead, such as a LanguageTool you started
+# yourself on 127.0.0.1.
+#
+# How long to wait for an answer, in seconds. LanguageTool loads each language
+# the first time it is asked for one, which takes about six seconds, so this is
+# generous. Failing to connect at all still gives up after three.
+# timeout_seconds = 20
+#
+# The privacy guard. Before anything is sent, the host in `url` is resolved,
+# and if any address it has is public the check is refused, with a message
+# saying so: a URL copied from a tutorial (api.languagetool.org, say) would
+# otherwise send every paragraph you type to somebody else's server. Loopback
+# and private addresses (the compose network, 127.0.0.1, your LAN) are always
+# allowed. Set this to true only if sending your drafts to that public address
+# is what you intend, for instance a checker on a server of your own that
+# happens to have a public IP.
+# allow_public_hosts = false
+#
+# LingoTweaker (https://github.com/fiduswriter/LingoTweaker, `lt-cli serve`), a
+# Rust port of LanguageTool, speaks the same API and works here too. As of its
+# current alpha it treats language = auto as en-US, and it loads every language
+# up front (measured ~3.5 GB resident, against ~1.3 GB for the Java server), so
+# pick a fixed language in Settings when you use it.
 
 
 # --- agent --------------------------------------------------------------------

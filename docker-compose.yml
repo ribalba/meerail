@@ -142,6 +142,60 @@ services:
       retries: 3
       start_period: 30s
 
+  languagetool:
+    # Grammar and spelling checks while writing (app/grammar.py): LanguageTool,
+    # the Java server, in the community image. Opt-in, because after Tika it is
+    # the heaviest thing here: ~450 MB of image and, measured, ~1.3 GB resident
+    # once English and German have each been checked, with the heap capped at
+    # 1 GB below. So it only starts under the `grammar` profile, and turning the
+    # feature on takes two steps:
+    #
+    #   1. COMPOSE_PROFILES=grammar in .env (or `--profile grammar` on the
+    #      command line), so that compose starts this service; and
+    #   2. [grammar] url = "http://languagetool:8010" in meerail.toml, so that
+    #      the server knows where it is.
+    #
+    # The second is the one that decides whether a draft is sent anywhere, and
+    # it is deliberately not in the server's environment below: the environment
+    # outranks meerail.toml, so an entry there would take the setting away from
+    # the operator (see the server's comment). Nor does the server depend on
+    # this service. With the profile off, a depends_on would fail the whole
+    # `up`, and a server with no checker is a perfectly good server: the
+    # composer simply draws no underlines.
+    image: erikvl87/languagetool:6.8
+    profiles: ["grammar"]
+    networks: [meerail]
+    # Deliberately NOT published. The image runs LanguageTool with --public and
+    # --allow-origin '*' and no authentication at all, so a host port would let
+    # anything that can reach it use this machine's checker. The server is the
+    # only client, and it reaches the service as languagetool:8010 over the
+    # compose network.
+    environment:
+      # Initial and maximum heap, which the image's start.sh hands to the JVM.
+      Java_Xms: 256m
+      Java_Xmx: 1g
+      # start.sh turns every langtool_* variable into a line of LanguageTool's
+      # config.properties. cacheSize is the number of sentences whose result it
+      # keeps, and it is what makes the composer cheap to serve: the whole draft
+      # is sent again on every pause in typing, and with the cache only the
+      # sentence that changed is really checked again.
+      langtool_cacheSize: "1000"
+    # ~1.3 GB measured with the 1 GB heap above: the rest is the JVM's own
+    # memory outside the heap. The limit leaves room for a third language.
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+    restart: unless-stopped
+    healthcheck:
+      # The image's own check, restated to give it a start period: one small
+      # English check, which also loads English before anybody types.
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null --data 'language=en-US&text=a simple test' http://localhost:8010/v2/check || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
   server:
     build: .
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
@@ -207,7 +261,8 @@ services:
 
 # One network for the whole stack. Compose would create a default one anyway;
 # naming it makes the boundary explicit — services address each other by service
-# name (`db`, `tika`, `server`) over it, and only `server` crosses it outwards.
+# name (`db`, `tika`, `languagetool`, `server`) over it, and only `server`
+# crosses it outwards.
 networks:
   meerail:
     driver: bridge

@@ -219,6 +219,9 @@ App.keys = (function () {
         // field. The composer's own footer lists this beside the keys that are
         // only its; this row is here so the sheet is not missing one.
         { show: "⌥/Alt ⇧ S", label: "Suggested recipients" },
+        // Display-only as well. The underlines are the one thing in the draft
+        // the keyboard cannot otherwise land on.
+        { show: "⌥/Alt ⇧ G", label: "Next spelling issue" },
         { keys: ["/"], show: "/", label: "Search", run: () => App.search.focusInput() },
         // Display-only, like the other modified keys — handled ahead of the
         // table in handle(), since this one has to work with the caret already
@@ -327,6 +330,17 @@ App.keys = (function () {
       e.preventDefault();
       if (e.code === "KeyS") App.compose.focusSuggestions();
       else App.compose.focusExtra(e.code === "KeyC" ? "cc" : "bcc");
+      return;
+    }
+    // Alt+Shift+G walks the spelling and grammar underlines in the draft, one
+    // press each, opening the suggestions for the next one after the caret. The
+    // underlines have no tab stops of their own, and reaching one with the
+    // mouse is the only other way in. Same family and same rule as the three
+    // above: nothing to do without a composer, and swallowed all the same.
+    if (e.altKey && !mod && e.shiftKey && e.code === "KeyG") {
+      if (!App.compose.isOpen()) return;
+      e.preventDefault();
+      App.grammar.next();
       return;
     }
     // Alt+C brings the next minimized draft up, parking whatever is in the

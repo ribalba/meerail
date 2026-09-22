@@ -1158,6 +1158,70 @@ mark.hit.hit-on { background: #ff8a3d; box-shadow: 0 0 0 2px #ff8a3d; }
    history has nobody to offer. Dimmed rather than hidden so the strip does not
    reflow every time a recipient is typed. */
 .ck-item.off { opacity: .45; }
+/* Hidden outright, not dimmed, on an install with no spelling checker: a key
+   that can never do anything is not worth learning. */
+.ck-item[hidden] { display: none; }
+
+/* --- Spelling and grammar in the composer (app.grammar.js) -----------------
+   The underlines are CSS Custom Highlights: Ranges over the editor's text,
+   registered under these four names. Nothing is inserted into the editor, so
+   its textContent stays exactly the text that is sent, and the markdown
+   repaint on every keystroke has nothing of ours to throw away. Red for
+   spelling, amber for grammar, a dotted blue for style: the colours every
+   checker has already taught people to read. */
+::highlight(lt-spelling) {
+  text-decoration: underline wavy var(--danger); text-underline-offset: 3px; }
+::highlight(lt-grammar) {
+  text-decoration: underline wavy var(--warning); text-underline-offset: 3px; }
+::highlight(lt-style) {
+  text-decoration: underline dotted var(--accent); text-underline-offset: 3px; }
+/* The word whose suggestions are up, so the popup visibly belongs to it. */
+::highlight(lt-active) { background-color: var(--accent-weak); }
+
+.compose-grammar { display: inline-flex; align-items: center; gap: .25rem; flex: 0 0 auto; }
+.compose-grammar[hidden] { display: none; }
+/* Tabular figures, so "9 issues" becoming "10 issues" does not nudge the
+   send buttons along. Amber with something flagged, like the underline. */
+#compose-grammar-next { white-space: nowrap; font-variant-numeric: tabular-nums; }
+#compose-grammar-next.has-issues { color: var(--warning); }
+#compose-grammar-next.is-error { color: var(--text-faint); }
+/* A check on the wire. Dimmed rather than relabelled: most answer in tens of
+   milliseconds, and a label flipping to "Checking…" on every pause in typing
+   would flicker under the writer's eye. */
+#compose-grammar-next.busy { opacity: .6; }
+.compose-grammar-lang {
+  font: inherit; font-size: .78rem; max-width: 11rem; padding: .15rem .3rem;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg); color: var(--text-muted); cursor: pointer;
+}
+.compose-grammar-lang:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+/* The suggestions for one underline. Fixed to the viewport and placed by
+   app.grammar.js under the word (above it near the bottom of the screen);
+   fixed is also what lets it spill past the composer window, whose
+   overflow:hidden would otherwise cut it off at the editor's edge. */
+.grammar-pop {
+  position: fixed; z-index: 5; box-sizing: border-box;
+  max-width: min(340px, calc(100vw - 16px)); padding: .55rem .65rem .5rem;
+  background: var(--bg); color: var(--text); font-size: .84rem; line-height: 1.4;
+  border: 1px solid var(--border-strong); border-radius: 10px; box-shadow: var(--shadow);
+}
+.grammar-pop[hidden] { display: none; }
+.gp-msg { margin-bottom: .45rem; }
+.gp-sugs { display: flex; flex-wrap: wrap; gap: .3rem; margin-bottom: .45rem; }
+.gp-sug {
+  font: inherit; font-weight: 600; cursor: pointer; padding: .2rem .55rem;
+  border: 1px solid transparent; border-radius: 6px;
+  background: var(--accent-weak); color: var(--accent);
+}
+.gp-sug:hover { border-color: var(--accent); }
+.gp-sug em { font-weight: 400; }
+.gp-acts { display: flex; flex-wrap: wrap; gap: .15rem .7rem; padding-top: .4rem;
+  border-top: 1px solid var(--border); }
+.gp-act { font: inherit; font-size: .76rem; cursor: pointer; padding: .1rem 0;
+  border: none; background: none; color: var(--text-muted); }
+.gp-act:hover { color: var(--text); text-decoration: underline; }
+.gp-sug:focus-visible, .gp-act:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 /* Outlined alternative to .btn-primary. The composer swaps the two classes
    between its send buttons as the default moves, so they have to match in
    metrics or a button would resize as it changes rank — hence the transparent
@@ -1291,6 +1355,14 @@ mark.hit.hit-on { background: #ff8a3d; box-shadow: 0 0 0 2px #ff8a3d; }
   font-size: .84rem; color: var(--text); cursor: pointer; }
 .settings-check input[type="checkbox"] { accent-color: var(--accent); margin: 0;
   width: 15px; height: 15px; cursor: pointer; }
+/* The spelling and grammar form is the one section with several fields in a
+   row, so each after the first gets air above it. */
+#grammar-settings-form > label { margin-top: .8rem; }
+#grammar-settings-form > label:first-child { margin-top: 0; }
+.grammar-list { width: 100%; box-sizing: border-box; font: inherit; font-size: .84rem;
+  line-height: 1.45; padding: .5rem .65rem; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg); color: var(--text); resize: vertical; }
+.grammar-list:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 
 /* --- The AI dialogs --- */
 /* Wider than the 480px default. The search writer shows a query that must not

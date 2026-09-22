@@ -99,6 +99,32 @@ services:
       retries: 3
       start_period: 30s
 
+  languagetool:
+    # The grammar checker, under the same `grammar` profile as production, so a
+    # plain `make test` neither pulls nor starts it and CI stays as fast as it
+    # was. The live half of tests/test_grammar.py skips without it; run it
+    # with `COMPOSE_PROFILES=grammar make test`. No host port: only the server
+    # talks to it, over this project's network.
+    image: erikvl87/languagetool:6.8
+    profiles: ["grammar"]
+    environment:
+      Java_Xms: 256m
+      # Smaller than production: the suite checks English and German only.
+      Java_Xmx: 768m
+      langtool_cacheSize: "1000"
+    deploy:
+      resources:
+        limits:
+          memory: 1536m
+    healthcheck:
+      # Short interval so `up --wait` (make test-up) returns as soon as the
+      # checker answers, rather than after the image's default 30 seconds.
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null --data 'language=en-US&text=a simple test' http://localhost:8010/v2/check || exit 1"]
+      interval: 3s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+
   server:
     build: .
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
@@ -128,6 +154,12 @@ services:
       # watch a parked conversation come back on its own rather than assert
       # that the code which would have done it exists.
       MEERAIL_REMINDER_TICK: 2
+      # The profiled languagetool service above. Set whether or not the profile
+      # is on, so GET /api/grammar/config reports the feature as available and
+      # its validation can be tested either way; with the profile off the name
+      # does not resolve, and every real check answers 503, which is what the
+      # live tests skip on.
+      GRAMMAR_URL: http://languagetool:8010
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)"]
       interval: 2s

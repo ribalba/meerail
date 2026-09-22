@@ -120,6 +120,38 @@ App.markdown = (function () {
     return out;
   }
 
+  // --- Prose: what the spelling checker is allowed to read ---------------
+  //
+  // The stretches of a draft that are writing, as [start, end) offsets into the
+  // text, one per paragraph: runs of lines that are neither quoted, nor code,
+  // nor a rule, broken at blank lines. app.grammar.js sends only these to the
+  // checker. A quoted reply is somebody else's words and not yours to correct,
+  // and code is not a language the checker knows, so both would come back as a
+  // page of red that hides the one typo that matters.
+  //
+  // Here rather than there because this file owns the line grammar: a line the
+  // editor paints as a quote is exactly a line the checker skips.
+  function proseRanges(text) {
+    const lines = String(text == null ? "" : text).split("\n");
+    const flags = fenceFlags(lines);
+    const out = [];
+    let at = 0, start = -1, end = -1;
+    lines.forEach((line, i) => {
+      const prose = flags[i] === "" && line.trim() !== ""
+        && !RE.quote.test(line) && !RE.hr.test(line);
+      if (prose) {
+        if (start < 0) start = at;
+        end = at + line.length;
+      } else if (start >= 0) {
+        out.push([start, end]);
+        start = -1;
+      }
+      at += line.length + 1;
+    });
+    if (start >= 0) out.push([start, end]);
+    return out;
+  }
+
   // --- Reader: markdown -> HTML ----------------------------------------
 
   function listHtml(items, ordered) {
@@ -306,6 +338,11 @@ App.markdown = (function () {
     let hist = [{ text: "", caret: 0 }];
     let hidx = 0;
     let histTimer = null;
+    // Told after every repaint. Painting replaces a line's nodes wholesale, so
+    // anything that pointed into the old ones (the spelling checker's
+    // underlines, which are DOM Ranges) has to be drawn again from offsets.
+    let rendered = null;
+    const notify = () => { if (rendered) rendered(); };
 
     function paint(div, text, fence) {
       const { cls, html } = lineParts(text, fence);
@@ -427,6 +464,7 @@ App.markdown = (function () {
       });
       el.classList.toggle("is-empty", lines.length === 1 && lines[0] === "");
       if (caret >= 0) placeGlobal(caret);
+      notify();
     }
 
     // Repaint whatever changed. The fast path touches only lines whose text or
@@ -450,6 +488,38 @@ App.markdown = (function () {
         if (off >= 0) placeInLine(d, Math.min(off, texts[i].length));
       });
       el.classList.toggle("is-empty", texts.length === 1 && texts[0] === "");
+      notify();
+    }
+
+    // A DOM Range over [start, end) of the source text, or null when the text
+    // is not that long. The inverse of globalOffset: lines are the children,
+    // and every line but the last is followed by one newline that has no node.
+    function pointAt(off) {
+      for (const d of lineDivs()) {
+        const len = norm(d.textContent).length;
+        if (off <= len) {
+          const walk = document.createTreeWalker(d, NodeFilter.SHOW_TEXT);
+          let n, seen = 0, last = null;
+          while ((n = walk.nextNode())) {
+            if (seen + n.data.length >= off) return [n, off - seen];
+            seen += n.data.length;
+            last = n;
+          }
+          return last ? [last, last.data.length] : [d, 0];
+        }
+        off -= len + 1;
+      }
+      return null;
+    }
+
+    function rangeFor(start, end) {
+      const a = pointAt(start);
+      const b = pointAt(end);
+      if (!a || !b) return null;
+      const r = document.createRange();
+      r.setStart(a[0], a[1]);
+      r.setEnd(b[0], b[1]);
+      return r;
     }
 
     function globalOffsetInLine(div) {
@@ -601,8 +671,15 @@ App.markdown = (function () {
         const last = el.lastElementChild;
         if (atEnd && last) placeInLine(last, norm(last.textContent).length);
       },
+      // For app.grammar.js, which draws on the text without owning it: told
+      // after every repaint, and able to turn source offsets into Ranges and
+      // back. The caret is -1 when it is not in the editor at all.
+      onRender(fn) { rendered = fn; },
+      rangeFor,
+      caret: caretOffset,
+      setCaret: placeGlobal,
     };
   }
 
-  return { toHtml, toMail, editor, inlineHtml };
+  return { toHtml, toMail, editor, inlineHtml, proseRanges };
 })();

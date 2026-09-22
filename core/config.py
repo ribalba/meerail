@@ -272,6 +272,11 @@ _SECTION_KEYS: dict[str, dict[str, str]] = {
         "instance": "journal_instance",
         "poll_interval": "journal_poll_interval",
     },
+    "grammar": {
+        "url": "grammar_url",
+        "timeout_seconds": "grammar_timeout_seconds",
+        "allow_public_hosts": "grammar_allow_public_hosts",
+    },
     "agent": {
         "tika_url": "tika_url",
         "poll_interval": "poll_interval",
@@ -603,6 +608,43 @@ class Settings(BaseSettings):
     # laptop shows up on the desktop within about a minute, and a machine that is
     # asleep catches up in one pass when it wakes.
     journal_poll_interval: int = 60
+
+    # --- [grammar] ------------------------------------------------------------
+    # Grammar and spelling checks while writing, done by a LanguageTool server
+    # (or anything else speaking its v2 HTTP API) that this install runs itself.
+    # The composer sends the paragraphs the user has written on every pause in
+    # typing, so what is configured here decides where a draft goes before it
+    # is even sent: the whole design is that it goes nowhere off this machine.
+    # See app/grammar.py.
+
+    # The checker's base URL, e.g. http://languagetool:8010 for the container
+    # the compose files start under the `grammar` profile. Empty, the default,
+    # means the feature is off: the composer draws no checker, and no draft text
+    # is sent anywhere at all.
+    #
+    # Operator configuration rather than a field in Settings, and that is why it
+    # does not go through app/nethost.py. That guard exists for URLs somebody
+    # typed into the UI, and it refuses private addresses, which is exactly what
+    # this one is supposed to be. The check here is the inverse (see
+    # grammar_allow_public_hosts below).
+    grammar_url: str = ""
+
+    # How long to wait for an answer, in seconds. Only the read side: failing to
+    # connect gives up after three. Twenty rather than a web service's usual few
+    # because LanguageTool loads each language lazily, and the first check in a
+    # language after it starts takes about six seconds while it does; a tight
+    # timeout would turn that first check into an error every time.
+    grammar_timeout_seconds: int = 20
+
+    # Let grammar_url point at a public address. Off by default, and this is the
+    # privacy half of the feature: a draft is the most private thing a mail
+    # client holds, and a URL naming a hosted service (api.languagetool.org, a
+    # server rented somewhere) would send every paragraph there as it is typed.
+    # With this off, a URL whose host resolves to any public address is refused
+    # before a request is made, with a message saying so. Turn it on only if
+    # sending drafts to that machine is what you intend, for instance a checker
+    # on your own server that happens to have a public address.
+    grammar_allow_public_hosts: bool = False
 
     # --- [agent] --------------------------------------------------------------
     # Apache Tika endpoint for attachment text extraction.
