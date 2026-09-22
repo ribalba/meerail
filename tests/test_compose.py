@@ -9,7 +9,7 @@ from email.utils import format_datetime
 import dbfixture
 from conftest import ingest_one
 from core.models import DEFAULT_FOOTER
-from helpers import api, build_pdf, make_message, upload_attachment
+from helpers import api, build_pdf, build_png, make_message, upload_attachment
 
 T0 = datetime(2026, 4, 1, 9, 0, tzinfo=timezone.utc)
 
@@ -560,6 +560,7 @@ def test_forward_context(account):
     assert ctx["to"] == []
     assert "Forwarded message" in ctx["body_text"]
     assert ctx["attachments"] == []          # nothing was attached to forward
+    assert "forward" not in ctx              # plain mail is still quoted as text
 
 
 def test_forward_carries_the_attachments(account):
@@ -587,6 +588,154 @@ def test_forward_carries_the_attachments(account):
     oid = dbfixture.pending_actions(email, "send")[0]["payload"]["outbound_id"]
     mime = dbfixture.outbound_mime(oid)
     assert "report.pdf" in mime and "application/pdf" in mime
+
+
+# --- Forwarding HTML mail ----------------------------------------------------
+# An HTML original used to be forwarded as its text quoted into the composer,
+# which dropped every picture it carried as a cid: part. It now goes as HTML:
+# the composer sends the note and names the original, and /send builds the body.
+
+
+def _html_mail(email: str, account_id: int, token: str, uid: int,
+               with_pdf: bool = False) -> int:
+    """An HTML message with one picture its markup shows by cid:, one inline
+    part it never refers to, and optionally a PDF. Returns its id."""
+    m = EmailMessage()
+    m["Message-ID"] = f"<fwdhtml-{uuid.uuid4().hex}@t>"
+    m["Subject"] = f"Einladung {token}"
+    m["From"] = "Stefan <stefan@ex.com>"
+    m["To"] = email
+    m["Date"] = format_datetime(T0)
+    m.set_content(f"{token} plain")
+    m.add_alternative(
+        "<html><head><style>p.x{color:#c00}</style></head>"
+        f'<body style="background:#eee"><p class="x">{token} html</p>'
+        '<img src="cid:pic-1@ex"></body></html>', subtype="html")
+    html_part = m.get_payload()[1]
+    html_part.add_related(build_png(40, 30), "image", "png", cid="<pic-1@ex>")
+    html_part.add_related(build_png(8, 8), "image", "png", cid="<unused@ex>")
+    if with_pdf:
+        m.add_attachment(build_pdf(f"{token} report"), maintype="application",
+                         subtype="pdf", filename="report.pdf")
+    dbfixture.ingest_raw_message(email, m.as_bytes(), uid=uid)
+    _, found = api("GET", f"/api/search?q={token}&account_id={account_id}")
+    return found["rows"][0]["id"]
+
+
+def test_forward_of_html_mail_opens_on_an_empty_note(account):
+    """The quote no longer goes into the editor: the original is named, and the
+    quoted text is kept aside for a switch to a plain-text forward."""
+    email = account["email"]
+    token = "FWDHTMLCTX" + uuid.uuid4().hex[:6]
+    mid = _html_mail(email, account["id"], token, uid=881)
+
+    _, ctx = api("GET", f"/api/compose/reply-context/{mid}?mode=forward")
+    assert ctx["body_text"] == ""
+    fwd = ctx["forward"]
+    assert fwd["message_id"] == mid
+    assert fwd["images"] == 1                # the unreferenced part is not a picture in it
+    assert fwd["images_missing"] == 0
+    assert fwd["text"].startswith("---------- Forwarded message ----------\nFrom: ")
+    assert f"{token} plain" in fwd["text"]
+
+
+def test_html_forward_carries_the_original_and_its_pictures(account):
+    """One text/html body inside multipart/related: the note, the forward
+    header, the original with its styles, and the picture it shows, under the
+    Content-ID it already refers to it by."""
+    email, aid = account["email"], account["id"]
+    token = "FWDHTMLSEND" + uuid.uuid4().hex[:6]
+    mid = _html_mail(email, account["id"], token, uid=882)
+
+    code, _ = api("POST", "/api/compose/send", {
+        "account_id": aid, "to": ["dest@example.com"], "subject": f"Fwd: {token}",
+        "body_text": "Look at this <3\nsecond line", "forward_of": mid})
+    assert code == 200
+
+    send, mime = _raw_mime_of_last_send(email)
+    parsed = message_from_string(mime, policy=policy.default)
+    assert parsed.get_content_type() == "multipart/related"
+    leaves = [p for p in parsed.walk() if not p.is_multipart()]
+    assert [p.get_content_type() for p in leaves] == ["text/html", "image/png"]
+    assert leaves[1]["Content-ID"] == "<pic-1@ex>"
+    assert leaves[1].get_content_disposition() == "inline"
+    assert leaves[1].get_content() == build_png(40, 30)
+
+    html = parsed.get_body(("html",)).get_content()
+    # Written as plain text, so escaped and with its line breaks kept.
+    assert "Look at this &lt;3<br>" in html
+    assert html.index("Look at this") < html.index("Forwarded message") < html.index(f"{token} html")
+    assert 'src="cid:pic-1@ex"' in html
+    assert "p.x{color:#c00}" in html          # the original's styles came along
+    assert "background:#eee" in html          # and so did its body's
+    assert html.count("<body") == 1           # one document, not two nested
+
+    # The Outbox shows what is being sent on, not only the note.
+    recorded = dbfixture.outbound_body_text(send["payload"]["outbound_id"])
+    assert recorded.startswith("Look at this <3")
+    assert "Forwarded message" in recorded and f"{token} plain" in recorded
+
+
+def test_html_forward_takes_a_formatted_note(account):
+    """With "Send as HTML email" on, the rendered note goes in, not its source."""
+    email, aid = account["email"], account["id"]
+    token = "FWDHTMLMD" + uuid.uuid4().hex[:6]
+    mid = _html_mail(email, account["id"], token, uid=883)
+
+    api("POST", "/api/compose/send", {
+        "account_id": aid, "to": ["dest@example.com"], "subject": "Fwd",
+        "body_text": "**bold** note",
+        "body_html": '<!DOCTYPE html>\n<html><body style="margin:0"><div><p><strong>bold</strong> note</p></div></body></html>',
+        "forward_of": mid})
+
+    _, mime = _raw_mime_of_last_send(email)
+    html = message_from_string(mime, policy=policy.default).get_body(("html",)).get_content()
+    assert "<strong>bold</strong> note" in html
+    assert "**bold**" not in html
+    assert html.count("<body") == 1
+
+
+def test_html_forward_with_files_is_mixed_around_the_related_body(account):
+    """The original's files still go as chips, beside the HTML and its picture."""
+    email, aid = account["email"], account["id"]
+    token = "FWDHTMLPDF" + uuid.uuid4().hex[:6]
+    mid = _html_mail(email, account["id"], token, uid=884, with_pdf=True)
+
+    _, ctx = api("GET", f"/api/compose/reply-context/{mid}?mode=forward")
+    assert [a["filename"] for a in ctx["attachments"]] == ["report.pdf"]
+    code, _ = api("POST", "/api/compose/send", {
+        "account_id": aid, "to": ["dest@example.com"], "subject": ctx["subject"],
+        "body_text": "fyi", "forward_of": mid,
+        "attachments": [a["id"] for a in ctx["attachments"]]})
+    assert code == 200
+
+    _, mime = _raw_mime_of_last_send(email)
+    parsed = message_from_string(mime, policy=policy.default)
+    assert parsed.get_content_type() == "multipart/mixed"
+    assert [p.get_content_type() for p in parsed.walk()] == [
+        "multipart/mixed", "multipart/related", "text/html", "image/png", "application/pdf"]
+    assert [p["MIME-Version"] for p in parsed.walk() if p is not parsed] == [None] * 4
+    assert "multipart/alternative" not in mime
+
+
+def test_html_forward_of_a_deleted_original_is_refused(account):
+    """Not sent without the message it was for, and not read past the gate
+    either: the answer says how to send the copy the draft holds instead."""
+    email, aid = account["email"], account["id"]
+    token = "FWDHTMLGONE" + uuid.uuid4().hex[:6]
+    mid = _html_mail(email, account["id"], token, uid=885)
+
+    from core.models import MessageLocation
+    with dbfixture.session() as db:
+        for loc in db.query(MessageLocation).filter_by(message_pk=mid):
+            loc.deleted = True
+
+    code, r = api("POST", "/api/compose/send", {
+        "account_id": aid, "to": ["dest@example.com"], "subject": "Fwd",
+        "body_text": "note", "forward_of": mid})
+    assert code == 409
+    assert "Forward as plain text" in r["detail"]
+    assert dbfixture.pending_actions(email, "send") == []
 
 
 def test_the_outbox_count_reports_what_is_still_waiting(account):

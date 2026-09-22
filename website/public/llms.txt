@@ -1,0 +1,135 @@
+# meerail
+
+> meerail is a free, open-source (AGPL-3.0), self-hosted email client for power users. It downloads every message from your existing mail accounts (Proton Mail through Proton Mail Bridge, Gmail, Fastmail, iCloud, or any IMAP/SMTP server) into a PostgreSQL database on your own machine and puts a fast, keyboard-driven, three-pane email client on top of it. Its defining features are regex search across all mail, including the text inside PDF and Office attachments and OCR'd images, and a mailbox that is a real database you and your AI tools can query with SQL.
+
+meerail is an email client, not an email provider. It does not host addresses or mailboxes: you keep the accounts you already have, and meerail syncs them in both directions, so reading, flagging, moving, deleting and sending in meerail happen on the real mail server too. There is no cloud or hosted version. You run it yourself with Docker, and your mail stays on your machine.
+
+- Website: https://meerail.com/
+- Source code and full documentation: https://github.com/ribalba/meerail
+- Status: a young, actively developed, pre-1.0 project
+- Sibling project: Meerato, a to-do app (https://meerato.com/)
+
+## Who it is for
+
+- People with very large mail archives (hundreds of thousands of messages, many years) who have outgrown webmail search.
+- Proton Mail users who want their whole mailbox searchable locally. meerail was designed around Proton Mail Bridge, and the installer sets Bridge up for you.
+- Technical users who are comfortable with Docker and want their mail in a database they can query.
+- Anyone who wants to point an LLM at their own email without handing the mailbox to a third-party service.
+
+## Features
+
+- **Regex and keyword search over everything:**
+  - covers subjects, bodies, participants and extracted attachment text
+  - filters: `:unread`, `:read`, `:has-attachment`, `:from`, `:to`
+  - scope by account, folder, or a "last N years" window
+  - each result says which folder it was found in, Trash included
+- **Searchable attachments:** Apache Tika extracts text from PDF, DOCX, XLSX, PPTX, ODF and plain text. Photos and scans are OCR'd with Tesseract.
+- **A familiar interface:**
+  - an Apple Mail style three-pane layout
+  - a unified inbox across accounts
+  - conversation threading
+  - light and dark themes
+  - a layout for narrow screens
+  - an optional Electron desktop app
+- **Keyboard first:** single-key shortcuts for reading, moving, archiving, replying and searching.
+- **Two-way sync:** your actions are queued and applied to the mail server, even after the machine has been offline for days.
+- **Safe mail rendering:** HTML mail is sanitized and sandboxed, and remote images are blocked by default. Hovering a link shows where it really goes.
+- **Outbox with send delay:** messages can wait before sending, with "Send now" and "Cancel send". The queue runs on the server, so closing the browser does not stop it.
+- **Undo:** a "Recent actions" panel can undo archive, trash and move, including bulk moves.
+- **Reminders:** "remind me later" files a conversation away and brings it back unread at the time you choose.
+- **Markdown composer:** mail is sent as plain text by default, with optional rendered HTML per message.
+- **Attachment previews:** thumbnails of PDFs and images.
+- **Statistics:** who you correspond with, reply times, mail volume, arrival hours.
+- **Cleanup:** repetitive bulk mail is grouped so it can be cleared in one go.
+- **Age tint:** inbox rows turn red as they age, so neglected mail stands out.
+- **Content window:** keep full bodies and attachments only for recent mail (for example 24 months). Older mail stays as searchable headers. This limits disk use without touching the mail server.
+- **Import:** old mail comes in from mbox files (Thunderbird, Gmail Takeout) and Apple Mail mailboxes.
+- **Meerato integration:** turn a mail into a task, attachments included.
+- **Multi-machine sync:** an optional self-hosted journal server keeps reminders and account settings in step across installs. Records are sealed with a passphrase the journal server never sees.
+
+## AI features
+
+- **Built in, optional, off by default.** You bring your own model: Anthropic Claude, OpenAI, or any OpenAI-compatible endpoint, including a local Ollama or LM Studio. The four actions are:
+  - write a search query from a plain-language description
+  - ask anything about a whole conversation (summarise, list what to do, draft a reply)
+  - suggest when a reminder should fire
+  - explain an attachment
+- **Nothing is sent to a model until you press a button.** There is no background summarising. The API key is encrypted in your own database and never sent to the browser.
+- **LLM-ready database:** because the mailbox is a PostgreSQL database, an AI agent can answer questions about years of email with SQL. meerail ships a skill file (SKILL.md) for Claude Code and similar agents that documents the schema and how to connect to your local database.
+
+## How it works
+
+meerail runs as a small set of containers on your machine:
+
+- **meerail-agent** connects to your mail servers over IMAP and SMTP. It parses, threads and stores every message, sends attachments to Tika for text extraction, and applies your actions back to the server. Mail credentials stay with the agent.
+- **meerail-server** is the web application and user interface (FastAPI). It reads from the database and queues your actions; it never talks to a mail server itself.
+- **PostgreSQL** stores everything: raw messages, attachments, extracted text and the search indexes.
+- **Apache Tika** extracts attachment text and OCRs images.
+- **Proton Mail Bridge** runs as an extra container when you choose Proton in the installer.
+
+Prebuilt images for amd64 and arm64 are on Docker Hub as `ribalba/meerail-server`, `ribalba/meerail-agent` and `ribalba/meerail-tika`.
+
+## Privacy and security
+
+- **Your mail stays on your machine.** Nothing is sent to the meerail project, and there is no account to create and no telemetry.
+- **Outbound requests are limited.** The only automatic one is a once-a-day version check against the GitHub repository, which carries no data about you and can be turned off (`update_check = false`). AI, Meerato and journal requests happen only once you configure them.
+- **The web UI listens only on localhost by default,** with no login. To reach it from another device you set a password, and meerail then requires HTTPS.
+- **meerail never deletes mail on its own.** Delete means "move to Trash". Permanent deletion needs an explicit action such as "Empty Trash", and a failed or offline connection never causes deletions.
+
+## Requirements and platforms
+
+- **Docker** Engine 24 or newer with the Compose v2 plugin. On macOS and Windows that means Docker Desktop, and on Windows the installer runs inside WSL2 or Git Bash.
+- **Platforms:** Linux, macOS (Intel and Apple Silicon) and Windows.
+- **Memory:** about 6 GB of free RAM for the stack as shipped. The installer sizes it to the memory you have.
+- **Disk:** grows with your mailbox, up to tens of GB for large accounts. The content window caps it.
+- **Mail access:** Gmail, iCloud and most other providers need an app password rather than your normal password.
+
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ribalba/meerail/main/meerail.sh -o meerail.sh
+bash meerail.sh
+```
+
+The installer checks Docker, asks where your mail lives, writes its configuration to `~/.meerail`, pulls the images and starts them. Then open http://localhost:8000. Accounts appear as the first sync runs.
+
+Day-to-day commands:
+
+| Command | What it does |
+| --- | --- |
+| `bash meerail.sh status` | show the containers, the installed version and the URL |
+| `bash meerail.sh logs agent` | watch the sync work through your mailbox |
+| `bash meerail.sh test` | check the database, Tika, IMAP and SMTP |
+| `bash meerail.sh update` | move to the newest release |
+| `bash meerail.sh backup` | dump the database to one compressed file |
+| `bash meerail.sh restore` | replace the database with a backup |
+| `bash meerail.sh help` | list everything else |
+
+Developers can instead clone the repository and build the same stack from source.
+
+## Common questions
+
+- **Is meerail free?** Yes. It is open source under the GNU AGPL-3.0, with no paid tier.
+- **Is it a new email address or provider?** No. It is a client for the accounts you already have.
+- **Does it work with Gmail, iCloud or Fastmail?** Yes. It works with any provider that allows IMAP and SMTP login with a password or app password. The installer fills in the server settings for Gmail, Fastmail and iCloud; for any other provider you enter them yourself.
+- **Does it work with Outlook.com or Microsoft 365?** Not at the moment. Microsoft's personal accounts only accept OAuth sign-in over IMAP, and meerail signs in with a password.
+- **Does it work with Proton Mail?** Yes, through Proton Mail Bridge, which the installer can run as a container on every operating system.
+- **Is there a phone app?** No. The web interface has a narrow-screen layout, so a phone browser works if your server is reachable from the phone, with a password and HTTPS.
+- **Does it upload my mail anywhere?** No. Everything is stored in your own PostgreSQL database. AI features send content to the model you configured, and only when you press a button.
+- **Does it replace my mail server's storage?** No. It mirrors the server. Deleting mail on the server deletes it in meerail, and meerail's actions are applied to the server.
+
+## Documentation
+
+- [README](https://github.com/ribalba/meerail#readme): full documentation, covering features, configuration, updating, backups, security, and what meerail deletes and when
+- [Installer script](https://raw.githubusercontent.com/ribalba/meerail/main/meerail.sh): the `meerail.sh` installer and manager
+- [Configuration reference](https://github.com/ribalba/meerail/blob/main/meerail.example.toml): every setting, annotated
+- [Agent documentation](https://github.com/ribalba/meerail/blob/main/agent/README.md): running the mail agent natively next to Proton Mail Bridge, logs and troubleshooting
+- [SKILL.md](https://github.com/ribalba/meerail/blob/main/website/public/downloads/SKILL.md): a skill that lets an AI agent query your own meerail database with SQL
+
+## Optional
+
+- [Screenshots](https://meerail.com/#screenshots): the inbox, threads, regex search, OCR, attachment previews, the Markdown composer, statistics and Meerato tasks
+- [Journal server](https://github.com/ribalba/meerail/blob/main/journal/README.md): keeps several meerail installs in agreement
+- [Desktop app](https://github.com/ribalba/meerail/blob/main/electron/README.md): building the Electron wrapper
+- [Coolify deployment](https://github.com/ribalba/meerail/blob/main/COOLIFY.md): running the whole stack on a server behind Coolify
+- [License](https://github.com/ribalba/meerail/blob/main/LICENSE): GNU AGPL-3.0

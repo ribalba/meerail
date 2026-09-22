@@ -22,6 +22,8 @@ App.compose = (function () {
   let lastField = "#compose-to";  // recipient field a suggestion would be added to
   let suggestItems = [];   // the co-recipients currently offered, so a park can keep them
   let htmlMode = false;    // send a formatted copy alongside the plain text
+  let forward = null;      // the HTML original this draft forwards; see "Forwarding as HTML"
+  let previewSeq = 0;      // drops a preview that lands after its draft left the window
   let minimized = [];      // parked drafts, oldest first — see "Minimize" below
   let parked = false;      // the draft on screen came off the bar — see makeRoom()
   let draftKey = null;     // the on-screen draft's lasting identity; see "Drafts that outlive the page"
@@ -561,6 +563,7 @@ App.compose = (function () {
     dropDraft(draftKey, draftId);
     forgetOnScreen();
     discardStaged();
+    setForward(null);
     dropFocus();
     parked = false;
     $("#compose-modal").hidden = true;
@@ -600,7 +603,7 @@ App.compose = (function () {
       from: { account_id: from.account_id, address: from.address },
       fromDefault: { account_id: def.account_id, address: def.address },
       staged, replyTo, references, archiveTicket, fromPinned, htmlMode, lastField,
-      prefilledFooter, footerTail, suggestKey, relatedKey,
+      prefilledFooter, footerTail, suggestKey, relatedKey, forward,
       suggestions: suggestItems,
       key: draftKey, draftId, draftRev, savedSig, touched,
     };
@@ -638,6 +641,7 @@ App.compose = (function () {
     $("#compose-cc").value = s.cc;
     $("#compose-bcc").value = s.bcc;
     $("#compose-subject").value = s.subject;
+    setForward(s.forward);
     setHtmlMode(s.htmlMode);
     setSuggestions(s.suggestions);
     setFromNote(s.fromNote);
@@ -674,6 +678,7 @@ App.compose = (function () {
     // the next draft's discardStaged() from deleting them and tells an upload
     // still in flight which draft it is landing in.
     staged = [];
+    setForward(null);                  // and the original it forwards
     draftGeneration = ++generationSeq;
     parked = false;                    // the snapshot is the parked one now
     forgetOnScreen();
@@ -739,7 +744,8 @@ App.compose = (function () {
     return ["#compose-to", "#compose-cc", "#compose-bcc", "#compose-subject"]
       .some((s) => $(s).value.trim())
       || body.getText().replace(prefilledFooter, "").trim() !== ""
-      || staged.length > 0;
+      || staged.length > 0
+      || !!forward;              // a forward with no note yet is still a message
   }
 
   // --- Drafts that outlive the page ---------------------------------------
@@ -873,7 +879,7 @@ App.compose = (function () {
         key: s.key, title: s.title, ccShown: s.ccShown, bccShown: s.bccShown,
         htmlMode: s.htmlMode, fromPinned: s.fromPinned, fromDefault: s.fromDefault,
         archiveTicket: s.archiveTicket, prefilledFooter: s.prefilledFooter,
-        footerTail: s.footerTail, lastField: s.lastField,
+        footerTail: s.footerTail, lastField: s.lastField, forward: s.forward || null,
       },
     };
   }
@@ -884,7 +890,8 @@ App.compose = (function () {
   function hasContent(s) {
     return [s.to, s.cc, s.bcc, s.subject].some((v) => (v || "").trim())
       || (s.bodyText || "").replace(s.prefilledFooter || "", "").trim() !== ""
-      || s.staged.length > 0;
+      || s.staged.length > 0
+      || !!s.forward;
   }
 
   function lostNote(n) {
@@ -926,6 +933,7 @@ App.compose = (function () {
       lastField: st.lastField || "#compose-to",
       prefilledFooter: st.prefilledFooter || "",
       footerTail: st.footerTail || "",
+      forward: st.forward || null,
       suggestKey: null,
       relatedKey: null,
       suggestions: [],
@@ -1283,9 +1291,82 @@ App.compose = (function () {
     const btn = $("#compose-html");
     btn.setAttribute("aria-pressed", String(htmlMode));
     btn.classList.toggle("on", htmlMode);
+    // Forwarding HTML, the message is HTML either way (the original is), so the
+    // button only decides what becomes of the note written above it.
+    if (forward) {
+      btn.title = htmlMode
+        ? "On: your note's markdown is rendered; the forwarded original keeps its HTML"
+        : "Off: your note goes exactly as written; the forwarded original keeps its HTML";
+      return;
+    }
     btn.title = htmlMode
       ? "On: the markdown is rendered and the message is sent as HTML"
       : "Off: the message goes out as plain text, exactly as it is written";
+  }
+
+  // --- Forwarding as HTML ------------------------------------------------
+  // HTML mail is forwarded as HTML, pictures and all, rather than as text
+  // quoted into the editor: the editor can only hold text, and the text of an
+  // invitation or a newsletter is the least of it. So the editor holds the
+  // note, the original is shown under it the way the reader shows it, and /send
+  // builds the message out of the two (see "Forwarding as HTML" in
+  // app/routers/compose.py). `forward` is what reply-context handed over: which
+  // message, how many pictures go along, and the quoted text that a switch to a
+  // plain-text forward puts into the editor instead.
+
+  function forwardNote(f, remoteBlocked) {
+    const n = f.images || 0;
+    const lost = f.images_missing || 0;
+    let note = "Forwarding the original as HTML";
+    if (n) note += `, with its ${n} picture${n === 1 ? "" : "s"}`;
+    note += ".";
+    if (lost) note += ` ${lost} picture${lost === 1 ? " it shows is" : "s it shows are"} not stored here and cannot go along.`;
+    // The preview blocks remote images the way the reader does; the message
+    // itself carries the addresses, and the recipient's client decides.
+    if (remoteBlocked) note += " Remote images are hidden here but stay in the message.";
+    return note;
+  }
+
+  function setForward(f) {
+    forward = f || null;
+    const frame = $("#compose-forward-frame");
+    const seq = ++previewSeq;
+    $("#compose-forward").hidden = !forward;
+    $("#compose-window").classList.toggle("has-forward", !!forward);
+    setHtmlMode(htmlMode);            // its title says what becomes of the note
+    if (!forward) {
+      frame.removeAttribute("srcdoc");
+      return;
+    }
+    const f0 = forward;
+    $("#compose-forward-note").textContent = forwardNote(f0, 0);
+    frame.srcdoc = App.reader.frameDoc("");
+    // The same sanitized copy the reader draws, from the same gate: a message
+    // deleted since the forward was opened has nothing to show, and cannot go
+    // out as HTML either, which the note says rather than leaving a blank box.
+    App.api.message(f0.message_id, false).then((m) => {
+      if (seq !== previewSeq) return;
+      frame.srcdoc = App.reader.frameDoc(m.body_html || "");
+      $("#compose-forward-note").textContent = forwardNote(f0, m.remote_blocked);
+    }).catch(() => {
+      if (seq !== previewSeq) return;
+      $("#compose-forward-note").textContent =
+        "The original is no longer stored, so it cannot go as HTML. Forward it as plain text instead.";
+    });
+  }
+
+  // Back to the way every forward used to go: the original quoted into the
+  // editor below the footer, the pictures left behind. One way only, since the
+  // quote is ordinary text from here and may be edited like the rest. The
+  // footer logic is told the quote is now the tail it has to stay above.
+  function forwardAsText() {
+    if (!forward) return;
+    const quote = `\n\n${forward.text}`;
+    footerTail = quote;
+    body.replaceText(body.getText().replace(/\n+$/, "") + quote);
+    setForward(null);
+    edited();
+    body.focus(false);
   }
 
   // Cc/Bcc stay folded away until asked for. Hiding clears the field: a
@@ -1336,6 +1417,7 @@ App.compose = (function () {
     // here on: removable one by one, and thrown away with the draft.
     staged = ctx.attachments || [];
     renderAttachments();
+    setForward(ctx.forward);
     fillFrom(ctx.account_id, ctx.from_address);
     // A reply's From is the alias the original was addressed to — a better
     // answer than any history could give, so it stands. A new message or a
@@ -1488,6 +1570,7 @@ App.compose = (function () {
         body_html: htmlMode && text.trim() ? App.markdown.toMail(text) : "",
         in_reply_to: replyTo, references,
         attachments: staged.map((a) => a.id),
+        forward_of: forward ? forward.message_id : null,
       };
       // Read off the window before this waits, so what goes out is what was on
       // screen when Send was pressed. The wait is for a save already on the
@@ -1610,6 +1693,15 @@ App.compose = (function () {
     $("#compose-send-ticket").addEventListener("click", sendAndTicket);
     $("#compose-attach").addEventListener("click", () => $("#compose-file").click());
     $("#compose-html").addEventListener("click", () => { setHtmlMode(!htmlMode); edited(); });
+    $("#compose-forward-plain").addEventListener("click", forwardAsText);
+    // A click into the preview hands it the keyboard, and Esc or Alt+C would
+    // stop reaching the composer. Handed back out the way the reader does it,
+    // which the sandbox allows because it allows same-origin.
+    $("#compose-forward-frame").addEventListener("load", (e) => {
+      try {
+        if (App.keys) e.target.contentDocument.addEventListener("keydown", App.keys.handle);
+      } catch (_) { /* not ours to reach into: nothing to hand back */ }
+    });
     setHtmlMode(htmlDefault());
     $("#compose-cc-toggle").addEventListener("click", () => toggleExtra("cc"));
     $("#compose-bcc-toggle").addEventListener("click", () => toggleExtra("bcc"));

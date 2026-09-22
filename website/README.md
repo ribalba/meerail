@@ -35,6 +35,7 @@ website/
 ├── nginx.conf              gzip, cache headers, SKILL.md as a download
 └── public/
     ├── index.html          the whole page
+    ├── llms.txt            what meerail is, for LLMs that visit the site
     ├── css/site.css        landing styles (from meerkat) + meerail additions
     ├── img/                logo.png, logo-square.png (from app/static/img)
     └── downloads/
@@ -56,6 +57,19 @@ the install snippet curls the `raw.githubusercontent.com` equivalent.
 Keep it in sync with [`core/models.py`](../core/models.py) when the schema
 changes, and with [`.env.example`](../.env.example) when the credential
 defaults change.
+
+## llms.txt
+
+`public/llms.txt` is the site's grounding page for language models, in the
+[llmstxt.org](https://llmstxt.org/) format: a Markdown summary at the site root
+that tells an LLM what meerail is, who it is for, what it can and cannot do,
+and where the documentation lives. It answers "what is this product", where
+SKILL.md answers "how do I query my own mail".
+
+`index.html` points at it with a `<link rel="alternate">` and carries the same
+facts as schema.org JSON-LD in its `<head>`, for readers that only fetch the
+page itself. Keep all three in step when a feature, a requirement or the
+install command changes.
 
 ## Before you publish
 

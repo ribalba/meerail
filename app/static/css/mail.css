@@ -1103,6 +1103,22 @@ mark.hit.hit-on { background: #ff8a3d; box-shadow: 0 0 0 2px #ff8a3d; }
    to be read before clicking, not to compete with the sentence it sits in.
    Long URLs break mid-word rather than pushing the pane wide. */
 .md-href { color: var(--text-faint); font-size: .88em; word-break: break-all; }
+/* The original an HTML forward carries, under the note. The note is usually a
+   line or two and the original is what is being sent on, so the original gets
+   the larger share of the window and scrolls inside its own frame. White like
+   the reader's frames, since that is what the mail was written against. */
+.compose.has-forward .compose-textarea { flex: 1 1 0; min-height: 90px; }
+.compose-forward {
+  flex: 2 1 0; min-height: 140px; display: flex; flex-direction: column;
+  border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+}
+.compose-forward[hidden] { display: none; }
+.cf-head {
+  display: flex; align-items: center; gap: .5rem; padding: .3rem .4rem .3rem .6rem;
+  background: var(--bg-elev); border-bottom: 1px solid var(--border);
+}
+.cf-note { flex: 1; min-width: 0; color: var(--text-muted); font-size: .78rem; }
+.cf-frame { flex: 1; min-height: 0; width: 100%; border: 0; background: #fff; }
 .compose-attachments { display: flex; flex-wrap: wrap; gap: .4rem; }
 .compose-attachments:empty { display: none; }
 .compose-chip { display: inline-flex; align-items: center; gap: .35rem; background: var(--bg-elev);

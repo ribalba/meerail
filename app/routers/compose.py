@@ -10,12 +10,16 @@ import uuid
 from datetime import timedelta
 from email.message import EmailMessage
 from email.utils import formataddr, formatdate, make_msgid
+from html import escape as html_escape
 from pathlib import Path
+from typing import NamedTuple
+from urllib.parse import unquote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import distinct, func, select, tuple_
 from sqlalchemy.orm import Session as DBSession, defer
+from selectolax.lexbor import LexborHTMLParser
 # Starlette's own, not the FastAPI subclass: the form is parsed by Starlette
 # here (see upload_attachment) and produces the base class, which a FastAPI
 # UploadFile is not an instance of.
@@ -75,6 +79,10 @@ class SendRequest(BaseModel):
     in_reply_to: str | None = None
     references: list[str] = []
     attachments: list[str] = []          # staging ids from /attachments
+    # The message this one forwards as HTML, if it does. body_text (or
+    # body_html) is then only the note above it: /send reads the original's
+    # markup and pictures back out of the database. See "Forwarding as HTML".
+    forward_of: int | None = None
     # The draft this message was written in, if it was autosaved. Sending
     # consumes it in the same transaction that queues the mail (see send).
     draft_id: int | None = None
@@ -207,11 +215,13 @@ def _forward_attachments(db: DBSession, msg: Message) -> tuple[list[dict], int]:
     They also get discarded through it — closing the composer deletes them.
 
     Inline parts are skipped, matching what the reader lists as attachments:
-    they are the signature logos and tracking pixels of the body, and the body
-    goes into a forward as quoted plain text where a cid: reference means
-    nothing. Pruned messages keep their attachment rows with the payload
-    emptied (see store.strip_content); those cannot be forwarded, and the second
-    return value is how many were left behind so the composer can say so.
+    they are the pictures of the body, and they travel with the body or not at
+    all. An HTML forward carries the ones its markup refers to as related parts
+    (see "Forwarding as HTML" below); a plain-text one has nowhere to put them,
+    since a cid: reference in quoted text means nothing. Pruned messages keep
+    their attachment rows with the payload emptied (see store.strip_content);
+    those cannot be forwarded, and the second return value is how many were left
+    behind so the composer can say so.
     """
     rows = db.execute(
         select(Attachment.filename, Attachment.content_type, Attachment.size_bytes,
@@ -234,6 +244,138 @@ def _forward_attachments(db: DBSession, msg: Message) -> tuple[list[dict], int]:
     return staged, missing
 
 
+# --- Forwarding as HTML -------------------------------------------------------
+#
+# The composer is a plain-text editor, so a forward used to be the original's
+# words quoted into it. Mail written in HTML lost everything that was not words
+# on the way: its layout, and every picture it carried as a `cid:` part, because
+# those are not attachments (see _forward_attachments above) and a cid:
+# reference in quoted text points at nothing.
+#
+# So an HTML original is forwarded as HTML. The composer holds only the note the
+# user writes above it and names the message it forwards (`forward_of`). /send
+# reads that message's markup back out of the database and builds the body from
+# three pieces: the note, the forward header, and the original, with each
+# picture the original refers to carried as a multipart/related part under the
+# Content-ID it already uses. Read at send time rather than handed to the
+# browser and back, so a draft stays the size of what was typed.
+#
+# The original goes out as its sender wrote it, which is what every client does
+# when it forwards HTML: the reader's sanitizer decides what this origin renders,
+# and a recipient's client makes that decision for itself. Only the <head>
+# styles and the <body> content are kept, since one document cannot sit inside
+# another one's body, and the body's own style moves onto the <div> holding it.
+
+_FORWARD_RULE = "---------- Forwarded message ----------"
+# A cid: reference as it appears in markup, up to the quote, space or bracket
+# that ends the attribute value or the url(...) it sits in.
+_CID_REF = re.compile(r"""cid:([^"'\s<>)]+)""", re.I)
+
+
+class _Related(NamedTuple):
+    cid: str
+    content_type: str
+    filename: str
+    payload: bytes
+
+
+class _Forward(NamedTuple):
+    html: str                   # the whole body: note, forward header, original
+    text: str                   # the same as plain text, for the outbound row
+    related: list[_Related]     # the pictures the original refers to by cid:
+
+
+def _forward_headers(msg: Message) -> list[str]:
+    return [f"From: {_format_sender(msg)}", f"Subject: {msg.subject or ''}"]
+
+
+def _forward_text(msg: Message) -> str:
+    """The original as quoted plain text under the forward rule: the whole of a
+    forward before HTML ones, and still how a plain-text original goes."""
+    body = msg.body_text or html_to_text(msg.body_html, quotes=True)
+    return "\n".join([_FORWARD_RULE, *_forward_headers(msg)]) + "\n\n" + body
+
+
+def _split_document(html: str) -> tuple[str, str, str]:
+    """(head styles, body content, body style) of an HTML document or fragment.
+
+    Parsed rather than cut at the tags: a stored body can be several documents
+    end to end (see _body_with_forwards in core/mail/parse.py), and a fragment
+    with no <body> at all is just as common.
+    """
+    tree = LexborHTMLParser(html or "")
+    styles = "".join(node.html or "" for node in tree.css("head style"))
+    body = tree.body
+    if body is None:
+        return styles, "", ""
+    attrs = body.attributes
+    style = (attrs.get("style") or "").strip()
+    if attrs.get("bgcolor"):
+        style = f"background-color:{attrs['bgcolor']};{style}"
+    return styles, body.inner_html or "", style
+
+
+def _embedded_parts(db: DBSession, msg: Message, html: str) -> tuple[list[_Related], int]:
+    """The parts `html` refers to by cid:, and how many of those it refers to
+    that there are no bytes for (pruned, or never captured).
+
+    By reference rather than by the inline flag: a part the markup never names
+    is not a picture in the message, and a part it does name is one whatever
+    disposition its sender gave it.
+    """
+    wanted = {unquote(m.group(1)).strip("<>").lower() for m in _CID_REF.finditer(html or "")}
+    if not wanted:
+        return [], 0
+    rows = db.execute(
+        select(Attachment.content_id, Attachment.content_type, Attachment.filename,
+               Attachment.content)
+        .where(Attachment.message_pk == msg.id, Attachment.content_id.is_not(None))
+        .order_by(Attachment.id)
+    ).all()
+    found: dict[str, _Related] = {}
+    for row in rows:
+        key = row.content_id.strip("<>").lower()
+        if key in wanted and key not in found and row.content:
+            found[key] = _Related(row.content_id.strip("<>"), row.content_type or "",
+                                  row.filename or "", row.content)
+    return list(found.values()), len(wanted - found.keys())
+
+
+def _forward_body(db: DBSession, req: SendRequest) -> _Forward:
+    """The body of a message that forwards `req.forward_of` as HTML.
+
+    Gated like reading the original, because it is reading it. A draft can
+    outlive its original (deleted, or its content pruned by the window), and
+    that is a 409 naming the way out rather than a forward sent without the
+    message it was for: the composer still holds the quoted text.
+    """
+    try:
+        msg = _readable(db, req.forward_of)
+    except HTTPException:
+        msg = None
+    if msg is None or not (msg.body_html or "").strip():
+        raise HTTPException(status_code=409, detail=(
+            "The message being forwarded is no longer stored, so it cannot go out as HTML. "
+            "Use 'Forward as plain text' to send the copy this draft holds instead."))
+
+    styles, content, body_style = _split_document(msg.body_html)
+    related, _ = _embedded_parts(db, msg, content)
+    if (req.body_html or "").strip():
+        note_styles, note, _ = _split_document(req.body_html)
+        styles = note_styles + styles
+    elif req.body_text.strip():
+        note = "<div>" + html_escape(req.body_text.strip()).replace("\n", "<br>\n") + "</div>"
+    else:
+        note = ""
+    header = ('<div style="margin:1.5em 0 0.5em"><b>' + html_escape(_FORWARD_RULE) + "</b><br>"
+              + "<br>".join(html_escape(h) for h in _forward_headers(msg)) + "</div>")
+    original = (f'<div style="{html_escape(body_style)}">' if body_style else "<div>") + content + "</div>"
+    html = ('<!DOCTYPE html>\n<html><head><meta charset="utf-8">' + styles + "</head><body>"
+            + note + header + original + "</body></html>")
+    text = "\n\n".join(p for p in (req.body_text.strip(), _forward_text(msg)) if p)
+    return _Forward(html, text, related)
+
+
 def _attach_staged(m: EmailMessage, staging_ids: list[str]) -> list[Path]:
     paths: list[Path] = []
     for sid in staging_ids:
@@ -248,8 +390,8 @@ def _attach_staged(m: EmailMessage, staging_ids: list[str]) -> list[Path]:
     return paths
 
 
-def _build_mime(req: SendRequest, from_addr: str,
-                from_header: str | None = None) -> tuple[EmailMessage, list[str], list[Path]]:
+def _build_mime(req: SendRequest, from_addr: str, from_header: str | None = None,
+                forward: _Forward | None = None) -> tuple[EmailMessage, list[str], list[Path]]:
     m = EmailMessage()
     # The header may carry a display name; `from_addr` never does — it is the
     # envelope sender and the Message-ID domain below.
@@ -286,7 +428,23 @@ def _build_mime(req: SendRequest, from_addr: str,
     # HTML now shows the markup — and that is the trade the button makes, once,
     # per message, when the user presses it. With it off nothing has changed:
     # the message is text/plain and nothing else, exactly as it always was.
-    if (req.body_html or "").strip():
+    #
+    # A forward of HTML mail is HTML whichever way the button is: it is the
+    # original's markup that makes it so, not the note. Its pictures go beside
+    # it as multipart/related, which is one body with parts it refers to rather
+    # than a choice between bodies, so the reasoning above does not reach it.
+    if forward is not None:
+        m.set_content(forward.html, subtype="html")
+        for part in forward.related:
+            maintype, _, subtype = part.content_type.lower().partition("/")
+            if not maintype or not subtype or maintype in ("multipart", "message"):
+                maintype, subtype = "application", "octet-stream"
+            # disposition spelled out: given a filename, Python would call the
+            # part an attachment, and some clients would list it as one too.
+            m.add_related(part.payload, maintype=maintype, subtype=subtype,
+                          cid=f"<{part.cid}>", filename=part.filename or None,
+                          disposition="inline")
+    elif (req.body_html or "").strip():
         m.set_content(req.body_html, subtype="html")
     else:
         m.set_content(req.body_text or "")
@@ -313,14 +471,17 @@ def send(req: SendRequest, db: DBSession = Depends(get_db)):
         raise HTTPException(status_code=400, detail="At least one recipient is required")
 
     from_addr = _resolve_from(account, req.from_address)
-    m, rcpt, staged_paths = _build_mime(req, from_addr, _from_header(account, from_addr))
+    forward = _forward_body(db, req) if req.forward_of is not None else None
+    m, rcpt, staged_paths = _build_mime(req, from_addr, _from_header(account, from_addr), forward)
 
     outbound = Outbound(
         account_id=account.id, state="queued",
         to_addrs=[str(a) for a in req.to], cc_addrs=[str(a) for a in req.cc],
         bcc_addrs=[str(a) for a in req.bcc], subject=req.subject,
-        body_text=req.body_text or "",
-        body_html=req.body_html or "",
+        # A forward's row holds all of it, so the Outbox shows what is being
+        # sent on and not only the note written above it.
+        body_text=forward.text if forward else req.body_text or "",
+        body_html=forward.html if forward else req.body_html or "",
         in_reply_to=req.in_reply_to, references=req.references,
         attachments=[p.name for p in staged_paths],
         raw_mime=m.as_string(),
@@ -727,14 +888,22 @@ def reply_context(message_id: int, mode: str = "reply", db: DBSession = Depends(
 
     if mode == "forward":
         attachments, missing = _forward_attachments(db, msg)
-        return {
+        ctx = {
             "account_id": msg.account_id, "from_address": from_address, "to": [], "cc": [],
             "subject": ("" if normalize_subject(base_subj).startswith("fwd") else "Fwd: ") + base_subj,
-            "body_text": f"\n\n---------- Forwarded message ----------\nFrom: {_format_sender(msg)}"
-                         f"\nSubject: {base_subj}\n\n{msg.body_text or html_to_text(msg.body_html, quotes=True)}",
+            "body_text": "\n\n" + _forward_text(msg),
             "in_reply_to": None, "references": [],
             "attachments": attachments, "attachments_missing": missing,
         }
+        # HTML mail is forwarded as HTML (see "Forwarding as HTML"): the composer
+        # opens on an empty note with the original shown under it, and keeps the
+        # quoted text for a switch to a plain-text forward.
+        if (msg.body_html or "").strip():
+            images, images_missing = _embedded_parts(db, msg, msg.body_html)
+            ctx["body_text"] = ""
+            ctx["forward"] = {"message_id": msg.id, "text": _forward_text(msg),
+                              "images": len(images), "images_missing": images_missing}
+        return ctx
 
     to = [msg.from_addr]
     cc: list[str] = []

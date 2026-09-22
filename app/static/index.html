@@ -726,6 +726,18 @@
         <div id="compose-body" class="compose-textarea md-editor" contenteditable="plaintext-only"
              role="textbox" aria-multiline="true" aria-label="Message body" spellcheck="true"
              data-placeholder="Write your message…"></div>
+        <!-- The original an HTML forward carries under the note, drawn the way
+             the reader draws it. Shown and filled by app.compose.js; see
+             "Forwarding as HTML" there. -->
+        <div class="compose-forward" id="compose-forward" hidden>
+          <div class="cf-head">
+            <span class="cf-note" id="compose-forward-note"></span>
+            <button type="button" class="compose-toggle" id="compose-forward-plain"
+                    title="Put the original into the message as quoted text instead, without its pictures">Forward as plain text</button>
+          </div>
+          <iframe class="cf-frame" id="compose-forward-frame" title="Forwarded message"
+                  sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"></iframe>
+        </div>
         <div id="compose-attachments" class="compose-attachments"></div>
         <div class="compose-actions">
           <button id="compose-attach" class="icon-btn" title="Attach file"></button>

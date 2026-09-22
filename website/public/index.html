@@ -8,6 +8,40 @@
   <meta name="theme-color" content="#2185d0" />
   <link rel="icon" href="/img/logo-square.png" />
   <link rel="apple-touch-icon" href="/img/logo-square.png" />
+  <link rel="canonical" href="https://meerail.com/" />
+
+  <!-- For language models and other machine readers: the plain-text summary
+       (llmstxt.org) and the same facts as schema.org data. Keep both in step
+       with the page and with llms.txt. -->
+  <link rel="alternate" type="text/plain" href="/llms.txt" title="meerail in plain text, for LLMs" />
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "meerail",
+    "url": "https://meerail.com/",
+    "description": "A free, open-source, self-hosted email client for power users. It syncs your existing IMAP accounts (Proton Mail via Bridge, Gmail, Fastmail, iCloud, any IMAP/SMTP server) into PostgreSQL on your own machine and adds regex search over all mail and attachment text, a keyboard-driven three-pane interface, and a database AI tools can query with SQL.",
+    "applicationCategory": "CommunicationApplication",
+    "applicationSubCategory": "Email client",
+    "operatingSystem": "Linux, macOS, Windows (runs in Docker)",
+    "softwareRequirements": "Docker Engine 24+ with Docker Compose v2",
+    "isAccessibleForFree": true,
+    "license": "https://www.gnu.org/licenses/agpl-3.0.html",
+    "image": "https://meerail.com/img/logo-square.png",
+    "screenshot": "https://meerail.com/img/screenshots/inbox.png",
+    "installUrl": "https://raw.githubusercontent.com/ribalba/meerail/main/meerail.sh",
+    "sameAs": ["https://github.com/ribalba/meerail"],
+    "featureList": [
+      "Regex and keyword search over all mail, including text extracted from PDF and Office attachments and OCR'd images",
+      "Every message stored in PostgreSQL on your own machine",
+      "Works with Proton Mail Bridge, Gmail, Fastmail, iCloud and any IMAP/SMTP account",
+      "Unified inbox, conversation threading, light and dark themes",
+      "Full keyboard control",
+      "Two-way sync, outbox with send delay, undo, reminders",
+      "Optional bring-your-own-model AI: Claude, OpenAI or a local Ollama"
+    ]
+  }
+  </script>
 
   <!-- Heavy stylesheets loaded non-render-blocking, as on the meerkat landing page. -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/fomantic-ui@2.9.3/dist/semantic.min.css" media="print" onload="this.media='all'" />

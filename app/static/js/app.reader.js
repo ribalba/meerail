@@ -1698,6 +1698,9 @@ App.reader = (function () {
   // thread open — both the bar and the per-message toolbars carry one.
   return { openThread, clear, action, scrollBy, scrollEnd, scrollMsg, setKeyFocus, renderEmpty,
     redraw: () => rerender(), isOpen: () => !!currentThread,
+    // The composer previews a forwarded original in the same document the
+    // reader draws it in, so it looks there the way it looked here.
+    frameDoc,
     // Find in thread, for app.keys.js: Ctrl/Cmd+F puts the caret in the box,
     // and Escape takes a find back down before it starts stepping out of panes
     // — which it has to be asked about, since the query can still be lit, or
