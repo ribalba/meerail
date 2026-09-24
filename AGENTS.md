@@ -99,7 +99,7 @@ Any plain IMAP/SMTP account (Gmail, Fastmail, Dovecot) works the same way.
 | `app/grammar.py` | Grammar and spelling checks: the settings row, UTF-16 segment offsets, the LanguageTool client, and the privacy guard that refuses a public `grammar.url`. |
 | `app/static/` | The SPA: `index.html`, `css/mail.css`, `js/app.*.js`. |
 | `tests/` | The pytest suite: `conftest.py` (safety guard), `dbfixture.py` (seeding), `helpers.py` (HTTP). |
-| `tools/` | `import_mbox.py` (+ `import-mbox.sh`), plus three maintenance scripts that are dry-run unless given `--apply`: `migrate_blobs.py`, `reparse_forwards.py`, `restore_pending.py`. |
+| `tools/` | `import_mbox.py` (+ `import-mbox.sh`), plus four maintenance scripts that are dry-run unless given `--apply`: `file_sent.py`, `migrate_blobs.py`, `reparse_forwards.py`, `restore_pending.py`. |
 | `journal/` | The standalone journal server. `app/journal.py` and `core/journal.py` are its client. |
 | `tika/` | Tika image. The reasoning behind `tika-config.json` lives in `tika/README.md`, because the JSON cannot hold comments. |
 | `electron/` | Desktop wrapper. `electron/main.js` is the real file; the root `main.js` is a byte-identical stray copy. |
@@ -130,7 +130,9 @@ Any plain IMAP/SMTP account (Gmail, Fastmail, Dovecot) works the same way.
 - **`accounts.local`** marks an imported account that no agent syncs. The server
   applies actions to it directly instead of queueing them.
 - **`pending_actions`** is the queue from server to agent.
-  - Types: `setflags | move | delete | create_folder | send`.
+  - Types: `setflags | move | delete | create_folder | send | save_sent`. The
+    last is queued by the agent itself, after a send, on servers that do not
+    file a copy of sent mail on their own.
   - Statuses: `pending | leased | held | stale | refused | undone | done`. There
     is also a legacy `error`, which only `--requeue-abandoned` touches.
   - The JSONB `payload` carries the UID together with its `uidvalidity`, the
@@ -221,6 +223,17 @@ pruning.
 draft is deleted in the same commit, and the agent relays the message over SMTP.
 The Outbox can retry a send, cancel it (`held`), or discard it, but never while
 it is leased.
+
+Once the server has taken the message, the agent queues a `save_sent` action
+for it, unless the server files its own copy of sent mail. Proton Bridge and
+Gmail do, and are recognised from the session itself (`_server_files_sent`:
+the `\Noselect` "Folders" node, the `X-GM-EXT-1` capability); a plain
+IMAP/SMTP server keeps nothing. The action APPENDs the outbound MIME into the
+folder with role `sent`, `\Seen`, dated when it was sent, after searching the
+folder for the Message-ID so a retry never files it twice. It is a row of its
+own so that a failed copy can never reopen the send (which would send the mail
+twice). `save_sent` on the account config overrides the server reading.
+`tools/file_sent.py` queues the same action for mail sent before this existed.
 
 ### Search
 
@@ -518,7 +531,6 @@ Trust the code over these:
   `.venv-test` through `make test`.
 - **The CSP comment in `app/main.py` mentions `blob:` mail bodies.** The reader
   uses `srcdoc`.
-- **`PendingAction`'s docstring lists four types.** `create_folder` is the fifth.
 
 ## Further reading
 

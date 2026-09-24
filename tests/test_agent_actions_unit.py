@@ -13,7 +13,7 @@ poll is under three minutes of a wrong port or a signed-out Bridge.
 """
 
 import sys
-from datetime import timedelta
+from datetime import timedelta, timezone
 from itertools import count
 from pathlib import Path
 
@@ -40,6 +40,7 @@ class Account:
     smtp_host = "127.0.0.1"
     smtp_port = 1025
     smtp_security = "starttls"
+    save_sent = None          # let the server say whether it files its own copy
 
 
 class Action:
@@ -117,6 +118,19 @@ class DB:
     def get(self, _model, _pk):
         return self.outbound
 
+    def add(self, row):
+        """A row queued mid-pass, the copy of a sent message (see
+        _queue_sent_copy). The mapper would fill these in at flush; here the
+        row has to be claimable by the same pass's second round, so they are
+        filled in now."""
+        row.id = next(Action._next_id)
+        row.status = "pending"
+        row.attempts = 0
+        row.error = None
+        row.created_at = utcnow()
+        row.updated_at = None
+        self._actions.append(row)
+
     def commit(self):
         self.commits += 1
 
@@ -126,12 +140,23 @@ class DB:
 
 class Bridge:
     """A bridge whose SMTP always times out — Bridge answering an implicit-TLS
-    port with `starttls` configured, which is exactly the reported failure."""
+    port with `starttls` configured, which is exactly the reported failure.
+
+    It looks like Proton Bridge on the IMAP side too: user folders under the
+    \\Noselect "Folders" node, which is how the agent knows the server files
+    its own copy of sent mail and keeps its hands off Sent (_server_files_sent).
+    """
 
     acc = Account()
 
     def ops(self):
         return self
+
+    def has_capability(self, _name):
+        return False
+
+    def user_folder_parent(self):
+        return "Folders/"
 
 
 class AccountRow:
@@ -1280,3 +1305,251 @@ def test_an_action_another_agent_holds_is_not_expunged_with_the_batch():
     assert (applied, failed, sent) == (1, 0, 0)
     assert client.expunged == [[11]]
     assert second.attempts == 0                       # untouched, not failed
+
+
+# --- a copy of sent mail, in Sent -------------------------------------------
+#
+# On Proton and Gmail the server files what it relays; on a plain IMAP/SMTP
+# server nothing does, and a reply sent through the HTW account was nowhere but
+# its Outbound row. The agent now queues an APPEND into Sent after every send
+# such a server takes, as a row of its own. What these pin: which servers get
+# one, that the copy lands in the same pass as the send, that a folder already
+# holding the message is left alone, and above all that nothing about the copy
+# ever reaches back into the send it follows: a send whose copy failed is
+# still done, and its mail is never sent a second time.
+
+SENT_RAW = ("Message-ID: <sent@example.com>\r\nFrom: me@example.com\r\n"
+            "To: arne@example.com\r\nSubject: Sent\r\n\r\nthe body\r\n")
+
+
+class SentOutbound(Outbound):
+    raw_mime = SENT_RAW
+
+
+class PlainServer(Bridge):
+    """A server that keeps nothing of what it relays: no Gmail extension and no
+    Bridge folder node. Records what is appended where, and can be told the Sent
+    folder already holds a message (by Message-ID, answered with SENT_RAW)."""
+
+    def __init__(self, in_sent=(), append_fails=False, folders=()):
+        self.calls = []
+        self.in_sent = set(in_sent)
+        self.append_fails = append_fails
+        self.folders = list(folders)          # what LIST says, with SPECIAL-USE
+
+    def user_folder_parent(self):
+        return ""
+
+    def list_folders(self):
+        return list(self.folders)
+
+    def select_folder(self, name, readonly=False):
+        self.calls.append(("peek", name))
+        return {b"UIDVALIDITY": EPOCH}
+
+    def search(self, criteria):
+        return [1] if criteria[0] == "HEADER" and criteria[2] in self.in_sent else []
+
+    def fetch(self, uids, _what):
+        return {uid: {b"BODY[]": SENT_RAW.encode()} for uid in uids}
+
+    def append(self, folder, msg, flags=(), msg_time=None):
+        if self.append_fails:
+            raise IMAPClient.AbortError("connection closed")
+        self.calls.append(("append", folder, msg, list(flags), msg_time))
+
+
+class SentDB(DB):
+    """The DB, plus the one lookup filing a copy makes: which folder is Sent."""
+
+    def __init__(self, actions, sent_folder="Sent", **kw):
+        super().__init__(actions, outbound=SentOutbound(), **kw)
+        self.sent_folder = sent_folder
+
+    def scalar(self, _stmt):
+        return self.sent_folder
+
+
+def _send(monkeypatch, bridge, db, sends=None):
+    def send_raw(*_a, **_kw):
+        if sends is not None:
+            sends.append(1)
+    monkeypatch.setattr(agent_actions.smtp, "send_raw", send_raw)
+    return agent_actions.drain_actions(db, bridge, AccountRow())
+
+
+def _copies(db):
+    return [a for a in db._actions if a.type == "save_sent"]
+
+
+def _appends(server):
+    return [c for c in server.calls if c[0] == "append"]
+
+
+def test_a_send_through_a_server_that_keeps_nothing_files_a_copy_into_sent(monkeypatch):
+    """The whole point: the bytes the SMTP server was given, in Sent, read,
+    dated when they were sent, and in the same pass, so the folder walk that
+    follows the drain finds the message rather than the next one."""
+    server = PlainServer()
+    db = SentDB([Action()])
+
+    applied, failed, sent = _send(monkeypatch, server, db)
+
+    assert (applied, failed, sent) == (2, 0, 1)
+    (copy,) = _copies(db)
+    assert copy.status == "done"
+    assert copy.payload == {"outbound_id": 1, "rcpt_to": ["arne@example.com"]}
+    ((_, folder, raw, flags, when),) = _appends(server)
+    assert folder == "Sent"
+    assert raw == SENT_RAW.encode()
+    assert flags == ["\\Seen"]
+    assert when == db.outbound.sent_at.replace(tzinfo=timezone.utc)
+
+
+def test_the_folder_the_server_flags_sent_wins_over_one_merely_named_sent(monkeypatch):
+    """The mailboxes table gives the role to a flagged folder and to one named
+    Sent alike, so on a server that flags "Gesendete Objekte" and also has a
+    user folder called Sent the table cannot say which is meant. LIST can."""
+    server = PlainServer(folders=[{"name": "Sent", "role_hint": ""},
+                                  {"name": "Gesendete Objekte", "role_hint": "\\Sent"}])
+    db = SentDB([Action()], sent_folder="Sent")
+
+    _send(monkeypatch, server, db)
+
+    ((_, folder, *_rest),) = _appends(server)
+    assert folder == "Gesendete Objekte"
+
+
+def test_a_server_that_files_its_own_copy_is_left_to_it(monkeypatch):
+    """Proton keeps the sent message before Bridge sees it and Gmail files
+    everything it relays; a copy appended there is a second copy in Sent. Each
+    is recognised from the session itself, not from the host name."""
+    db = SentDB([Action()])
+    _send(monkeypatch, Bridge(), db)                    # the Folders node
+    assert _copies(db) == []
+
+    class Gmail(PlainServer):
+        def has_capability(self, name):
+            return name == "X-GM-EXT-1"
+
+    db = SentDB([Action()])
+    _send(monkeypatch, Gmail(), db)
+    assert _copies(db) == []
+
+
+def test_save_sent_in_the_config_overrides_what_the_server_says(monkeypatch):
+    class BridgeLike(PlainServer):
+        def user_folder_parent(self):
+            return "Folders/"
+
+    monkeypatch.setattr(Account, "save_sent", True)
+    server = BridgeLike()
+    db = SentDB([Action()])
+    _send(monkeypatch, server, db)
+    assert len(_appends(server)) == 1
+
+    monkeypatch.setattr(Account, "save_sent", False)
+    server = PlainServer()
+    db = SentDB([Action()])
+    _send(monkeypatch, server, db)
+    assert _copies(db) == []
+
+
+def test_a_copy_the_folder_already_holds_is_not_filed_again(monkeypatch):
+    """A retry after a lost answer, or a row tools/file_sent.py queued for a
+    message the server had filed after all: the folder is asked first, by
+    Message-ID and then by the bytes, and a match means nothing to do."""
+    server = PlainServer(in_sent={"sent@example.com"})
+    db = SentDB([Action()])
+
+    _send(monkeypatch, server, db)
+
+    (copy,) = _copies(db)
+    assert copy.status == "done"
+    assert _appends(server) == []
+
+
+def test_a_copy_that_cannot_be_filed_never_reopens_the_send(monkeypatch, capsys):
+    """The one thing this must never do. The message has left; an APPEND that
+    fails is a copy not yet filed and nothing else. Settling the send as failed
+    over it would send the mail a second time on the next pass."""
+    sends = []
+    server = PlainServer(append_fails=True)
+    action = Action()
+    db = SentDB([action])
+
+    applied, failed, sent = _send(monkeypatch, server, db, sends)
+
+    assert action.status == "done"
+    assert db.outbound.state == "sent"
+    assert (applied, failed, sent) == (1, 1, 1)
+    (copy,) = _copies(db)
+    assert copy.status == "pending" and copy.attempts == 1
+    assert "file a copy of the mail to arne@example.com into Sent" in capsys.readouterr().out
+
+    # Once the backoff has run out the copy is tried again, and the send is not.
+    server.append_fails = False
+    copy.updated_at = utcnow() - agent_actions.retry_delay(1) - timedelta(seconds=1)
+    _send(monkeypatch, server, db, sends)
+    assert copy.status == "done"
+    assert len(_appends(server)) == 1
+    assert sends == [1]
+
+
+def test_an_account_without_a_sent_folder_keeps_the_copy_waiting(monkeypatch):
+    """Nothing to file into is a condition somebody can clear by creating the
+    folder, so the copy waits, and says what it is waiting for."""
+    db = SentDB([Action()], sent_folder=None)
+
+    _send(monkeypatch, PlainServer(), db)
+
+    (copy,) = _copies(db)
+    assert copy.status == "pending"
+    assert "no Sent folder" in copy.error
+
+
+def test_a_server_that_cannot_be_asked_does_not_fail_the_send(monkeypatch, capsys):
+    """Deciding whether the server files its own copy costs a LIST, and a LIST
+    can fail. That is a copy not queued, said in the log with the tool that
+    queues it later, and never a send undone."""
+    class Deaf(PlainServer):
+        def user_folder_parent(self):
+            raise IMAPClient.AbortError("socket closed")
+
+    action = Action()
+    db = SentDB([action])
+
+    _send(monkeypatch, Deaf(), db)
+
+    assert action.status == "done"
+    assert db.outbound.state == "sent"
+    assert _copies(db) == []
+    assert "tools/file_sent.py" in capsys.readouterr().out
+
+
+def test_a_partly_refused_send_still_gets_its_copy(monkeypatch):
+    """Delivered to everyone the server would take is delivered."""
+    def partly(*_a, **_kw):
+        raise agent_actions.smtp.PartlyRefused({"nobody@example.com": (550, b"no such user")})
+    monkeypatch.setattr(agent_actions.smtp, "send_raw", partly)
+    server = PlainServer()
+    db = SentDB([Action()])
+
+    agent_actions.drain_actions(db, server, AccountRow())
+
+    (copy,) = _copies(db)
+    assert copy.status == "done"
+    assert len(_appends(server)) == 1
+
+
+def test_a_send_whose_outcome_is_unknown_gets_no_copy(monkeypatch):
+    """Parked rather than settled (see smtp.Delivered): nobody knows whether
+    the server took it, so nothing may claim it was sent, in Sent least of all."""
+    def unknown(*_a, **_kw):
+        raise agent_actions.smtp.Delivered("the connection failed while waiting")
+    monkeypatch.setattr(agent_actions.smtp, "send_raw", unknown)
+    db = SentDB([Action()])
+
+    agent_actions.drain_actions(db, PlainServer(), AccountRow())
+
+    assert _copies(db) == []

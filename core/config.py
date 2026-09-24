@@ -96,6 +96,22 @@ class AccountConfig(BaseModel):
     # partial response or an outright disconnect often enough that a backfill
     # spends its time restarting, and asking for less is what gets it finished.
     batch_size: int | None = None
+    # Whether the agent files a copy of each message it sends into the account's
+    # Sent folder itself, with an IMAP APPEND once the SMTP server has taken the
+    # message. Sending is a hand-off to the SMTP server, and nothing in that
+    # conversation puts the mail anywhere the user can see it again. Some
+    # servers do that on their own (Proton Bridge and Gmail both file every
+    # message they relay), and a copy appended there would be a second copy in
+    # Sent. Most plain IMAP/SMTP servers do not: a university's Exchange or
+    # Dovecot takes the message, delivers it, and keeps nothing. Until this
+    # existed, mail sent through such an account was nowhere but meerail's own
+    # Outbox row: sent, and not in Sent.
+    #
+    # None, the default, leaves it to the agent to tell the two kinds of server
+    # apart from what the server itself says (agent/actions._server_files_sent):
+    # off where it files its own copies, on everywhere else. true and false
+    # override that either way, for a server the agent reads wrong.
+    save_sent: bool | None = None
     # The name recipients see in front of the address — the display name on the
     # From header of everything this account sends. Empty sends the bare
     # address, which is what every account did before this existed. Per-address

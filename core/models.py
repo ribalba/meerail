@@ -726,8 +726,11 @@ class Setting(Base):
 class PendingAction(Base):
     """Outbox of local changes for the agent to apply to IMAP/SMTP.
 
-    Types: setflags | move | delete | send. Payload carries the specifics
-    (e.g. which flags, target folder, or the outbound message id).
+    Types: setflags | move | delete | create_folder | send | save_sent. Payload
+    carries the specifics (e.g. which flags, target folder, or the outbound
+    message id). A save_sent names the outbound row a send has delivered, and
+    is the copy of it the agent files into Sent on servers that do not keep one
+    themselves (agent/actions._save_sent_copy).
 
     A row leaves this queue by succeeding, and by no other route: ``attempts``
     and ``error`` say how it is going, not whether it is still wanted. The agent

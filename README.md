@@ -585,6 +585,14 @@ the composer's *From*. Accounts register themselves in the app on first sync; th
 nothing to add in the UI. The example file carries a commented-out Gmail block alongside the
 Proton one.
 
+`save_sent` says whether the agent files a copy of each message it sends into the account's
+Sent folder. Leave it out and the agent decides from the server: Proton Bridge and Gmail
+file every message they relay themselves, and a copy appended there would be a second one;
+a plain IMAP/SMTP server (a university's Exchange, a Dovecot, Fastmail) keeps nothing, so
+the agent appends the message into the folder marked `\Sent` once the server has taken it.
+`save_sent = true` or `false` overrides that either way. See
+[Sent mail on plain IMAP servers](#sent-mail-on-plain-imap-servers).
+
 `name = "Your Name"` sets the display name recipients see in front of the address; without it
 mail goes out as the bare address. It applies to every address the account sends from, and an
 entry in `addresses` written as `Name <alias@example.com>` overrides it for that one — listing
@@ -1211,6 +1219,36 @@ ingests it under a real UID and retires the placeholder. Nothing is written to t
 and nothing is deleted; a message already on the server is left alone, so re-running is
 safe. It reuses `agent/.venv` and talks to Bridge and Postgres over the loopback ports, so
 the stack has to be up.
+
+### Sent mail on plain IMAP servers
+
+Sending hands the message to the SMTP server, and nothing in that conversation puts a copy
+anywhere you can open again. Proton and Gmail file one on their own, so on those accounts
+the next sync simply finds the message in Sent. A plain IMAP/SMTP server delivers the
+message and keeps nothing, and in versions up to 0.3.1 mail sent through such an account was
+nowhere but meerail's own Outbox row: sent, and not in Sent.
+
+The agent now files that copy itself. After the server has taken a message, it appends the
+same bytes into the folder marked `\Sent` (or named Sent), read and dated when it was
+sent, and the sync that follows ingests it like any other mail. It first searches the
+folder for the message, so a retry never files it twice. The copy is its own queued action,
+separate from the send: if it cannot be filed (the account has no Sent folder, say) the send
+stays done and the copy is retried, and the status panel says why once it has waited long
+enough. Whether a server files its own copies is read off the server, and `save_sent` on the
+account block in `meerail.toml` overrides that reading.
+
+Mail sent before this existed is still in the database. `tools/file_sent.py` queues the same
+action for it:
+
+```bash
+tools/file_sent.py                     # what it would queue
+tools/file_sent.py --apply
+tools/file_sent.py --apply -a me@example.com
+```
+
+It writes queue rows only and never opens a mail connection; the agent files the copies on
+its next pass, checking the folder first. A message already queued or already in Sent is
+left alone, so re-running is safe.
 
 ### Backing up and restoring
 

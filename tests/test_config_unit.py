@@ -180,6 +180,14 @@ def test_unknown_security_mode_is_rejected():
         AccountConfig(email="a@b.c", smtp_security="tls")
 
 
+def test_save_sent_is_left_to_the_agent_unless_written():
+    # None is "read it off the server" (agent/actions._server_files_sent); only
+    # a value actually written in the file overrides that, either way.
+    assert AccountConfig(email="a@b.c").save_sent is None
+    assert AccountConfig(email="a@b.c", save_sent=True).save_sent is True
+    assert AccountConfig(email="a@b.c", save_sent=False).save_sent is False
+
+
 def test_send_addresses_dedupes_case_insensitively():
     account = AccountConfig(email="You@proton.me",
                             addresses=["alias@proton.me", "you@PROTON.me"])

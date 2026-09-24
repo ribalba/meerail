@@ -4,8 +4,8 @@ from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.utils import format_datetime
 
-from core.mail.parse import (header_message_id, html_to_text, normalize_subject,
-                             parse_email)
+from core.mail.parse import (header_message_id, html_to_text, leading_prefix,
+                             normalize_subject, parse_email)
 from core.mail.threading import _new_thread_id
 from helpers import PNG_1x1, make_message
 
@@ -37,6 +37,24 @@ def test_subject_normalization():
     assert normalize_subject("Re: Fwd:  Project Falcon") == "project falcon"
     assert normalize_subject("AW: WG: Rechnung") == "rechnung"
     assert normalize_subject("No prefix here") == "no prefix here"
+
+
+def test_leading_prefix_reads_only_the_first_prefix_and_only_its_kind():
+    """What the composer asks before adding its own: a reply to "Re: x" stays
+    "Re: x", a reply to "Fwd: x" becomes "Re: Fwd: x". The localised prefixes
+    count as their English equivalents, as they do for threading."""
+    assert leading_prefix("Re: Schlüssel") == "reply"
+    assert leading_prefix("RE: x") == "reply"
+    assert leading_prefix("Re[2]: x") == "reply"
+    assert leading_prefix("AW: WG: x") == "reply"
+    assert leading_prefix("Re: Fwd: x") == "reply"
+    assert leading_prefix("Fwd: Re: x") == "forward"
+    assert leading_prefix("Fw: x") == "forward"
+    assert leading_prefix("WG: x") == "forward"
+    assert leading_prefix("Recipe for x") is None      # "Re" is not a prefix here
+    assert leading_prefix("plain") is None
+    assert leading_prefix("") is None
+    assert leading_prefix(None) is None
 
 
 def test_dedup_key_prefers_message_id():

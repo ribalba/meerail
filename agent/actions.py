@@ -18,14 +18,14 @@ from __future__ import annotations
 import threading
 import time
 from contextlib import ExitStack
-from datetime import timedelta
+from datetime import timedelta, timezone
 
 from sqlalchemy import and_, case, func, or_, select, update
 
 from core import events, outbox
 from core.database import SessionLocal
 from core.mail import store
-from core.mail.parse import content_key
+from core.mail.parse import content_key, header_message_id
 from core.models import Account, Mailbox, Message, Outbound, PendingAction, utcnow
 
 import imap
@@ -628,8 +628,172 @@ def apply_action(db, bridge, account, action: PendingAction) -> None:
             raise ValueError(f"outbound {p.get('outbound_id')} has no MIME to send")
         smtp.send_raw(bridge.acc, p["mail_from"], p["rcpt_to"], outbound.raw_mime.encode("utf-8"))
 
+    elif t == "save_sent":
+        _save_sent_copy(db, c, bridge, action)
+
     else:
         raise ValueError(f"unknown action type: {t}")
+
+
+# --- a copy of sent mail, in Sent -------------------------------------------
+#
+# Sending is a hand-off: the SMTP server takes the message and delivers it, and
+# nothing in that conversation puts a copy anywhere the user can open again.
+# Some servers do that on their own. Proton keeps every message sent through it
+# on its side before Bridge ever sees it, and Gmail files everything it relays
+# into Sent Mail; on both, the next folder walk simply finds the sent message in
+# Sent. A plain IMAP/SMTP server does not: a university's Exchange or Dovecot
+# takes the message and keeps nothing. Until this existed a message sent
+# through such an account was nowhere but its own Outbound row: sent, and not
+# in Sent, with the reply the user wrote missing from the conversation it
+# answered. This is the client's job on those servers (Thunderbird calls it
+# "place a copy in Sent"), and here it is a queued action like any other: an
+# APPEND of the bytes the SMTP server was given, into the folder that carries
+# the \\Sent role, once the send has settled.
+
+
+def _server_files_sent(bridge) -> bool:
+    """Does this server file a copy of every message it relays itself?
+
+    Read off the live session rather than guessed from the host name, because
+    the host name says nothing reliable: Bridge is 127.0.0.1 on a laptop and
+    `bridge` on a Coolify install (docker-compose.coolify.yml), and a plain
+    server can sit on loopback just as well, as GreenMail does in the tests.
+
+    Two signals, each the server's own. Gmail advertises X-GM-EXT-1, which no
+    other server does. Proton Bridge puts every user folder under a \\Noselect
+    node called "Folders" that no other server publishes (the same node
+    imap._user_folder_parent reads to know where a CREATE is allowed), and an
+    account with no folders of its own still lists the node. A server that is
+    neither is taken to keep nothing, which is what most of them do; an account
+    where that reading is wrong either way sets `save_sent` in its config and
+    is not asked again (see _wants_sent_copy).
+    """
+    if bridge.ops().has_capability("X-GM-EXT-1"):
+        return True
+    return bool(bridge.user_folder_parent())
+
+
+def _wants_sent_copy(bridge) -> bool:
+    """Whether a copy of what this account sends belongs in Sent by our hand."""
+    explicit = getattr(bridge.acc, "save_sent", None)
+    if explicit is not None:
+        return bool(explicit)
+    return not _server_files_sent(bridge)
+
+
+def _queue_sent_copy(db, bridge, action: PendingAction) -> None:
+    """After a send the server took: queue filing a copy of it into Sent.
+
+    A row of its own rather than an APPEND inside the send, and queued only once
+    the send has settled, for one reason: nothing that happens to the copy may
+    be read as something that happened to the send. The message has left, the
+    server took it, and an APPEND that then fails (a folder the server would
+    not open, a connection that dropped between the two commands) is a copy not
+    yet filed, not a mail not yet sent. Inside the send's own attempt that
+    exception would settle the send as failed, and the next pass would send the
+    message a second time. As its own row it is retried on the queue's own
+    terms, and the send stays done.
+
+    Nothing here may raise past this function for the same reason: this runs
+    after the send's outcome is written and before it is committed, and an
+    exception would take the "done" down with it. So a server that cannot be
+    asked whether it files its own copies (see _server_files_sent) is logged
+    and passed over, and tools/file_sent.py is how the copy gets queued later.
+    """
+    email = getattr(bridge.acc, "email", None)
+    try:
+        wanted = _wants_sent_copy(bridge)
+    except Exception as e:  # noqa: BLE001, see the docstring
+        log.warn(f"could not tell whether this server files its own copy of sent mail, "
+                 f"so no copy of the message was queued for Sent ({e!r}); "
+                 f"tools/file_sent.py queues it later", email)
+        return
+    if not wanted:
+        return
+    p = action.payload or {}
+    db.add(PendingAction(account_id=action.account_id, message_pk=None, type="save_sent",
+                         payload={"outbound_id": p.get("outbound_id"),
+                                  "rcpt_to": list(p.get("rcpt_to") or [])}))
+
+
+def _sent_folder(db, bridge, account_id: int) -> str | None:
+    """The folder a copy of sent mail belongs in. None when there is none.
+
+    The server's own word first: the folder its LIST flags \\Sent (RFC 6154),
+    which is the one every other client on the account files into. Asked live
+    rather than read from the mailboxes table because the table records the
+    role and not where it came from: the sync pass gives the role to a flagged
+    folder and to one merely *named* Sent alike (core.ingest.derive_role), so
+    a Gmail account with a user folder called Sent has two rows carrying it and
+    only the LIST says which one the server means.
+
+    A server that flags nothing gets the named folder from the table, the
+    oldest such row when there is more than one: a stable choice matters more
+    than a clever one, since the copy must not land in a different folder from
+    one pass to the next.
+    """
+    for folder in bridge.list_folders():
+        if (folder.get("role_hint") or "").lower() == "\\sent":
+            return folder["name"]
+    return db.scalar(
+        select(Mailbox.imap_name)
+        .where(Mailbox.account_id == account_id, Mailbox.role == "sent",
+               Mailbox.local.is_(False), Mailbox.missing_since.is_(None))
+        .order_by(Mailbox.id).limit(1))
+
+
+def _save_sent_copy(db, c, bridge, action: PendingAction) -> None:
+    """File the message a send delivered into the account's Sent folder.
+
+    The bytes are the ones the SMTP server was handed (Outbound.raw_mime, with
+    the same CRLF endings smtp.send_raw puts on the wire), flagged \\Seen (it
+    is the user's own mail) and dated when it was sent, so the folder sorts
+    it where it happened rather than where the retry landed. The folder walk
+    that follows the drain ingests it under a real UID like any other message.
+
+    The folder is asked first whether it has the message already, by Message-ID
+    and then by the bytes (see _copy_landed, which was written for the same
+    question about a move). A retry after a lost answer would otherwise file a
+    second copy, and so would a row queued by tools/file_sent.py for a message
+    the server had filed on its own after all. The check is the same shape as
+    that function's for the same reason: agreeing on a header is not being the
+    same message.
+
+    Two ways out that are not a retry. A message whose Outbound row no longer
+    holds the bytes has nothing to file, and no later pass will find them: said
+    in the log, and the row is done. An account without a Sent folder is the
+    opposite, a condition somebody can clear (create the folder on the server
+    and the next pass files the copy), so that one is an ordinary failure and
+    waits, and the status panel says why once it has waited long enough.
+    """
+    p = action.payload or {}
+    outbound = db.get(Outbound, p.get("outbound_id"))
+    if outbound is None or not outbound.raw_mime:
+        log.warn(f"{_describe(action)}: the message is no longer held here (outbound "
+                 f"{p.get('outbound_id')}), so there is nothing to file",
+                 getattr(bridge.acc, "email", None))
+        return
+    # Queued by tools/file_sent.py, or by a pass that read the server before
+    # the config was changed: on a server that files its own copies, the copy
+    # is already there or on its way, and the row has nothing to do.
+    if getattr(bridge.acc, "save_sent", None) is None and _server_files_sent(bridge):
+        log.info(f"{_describe(action)}: this server files its own copy; nothing appended",
+                 getattr(bridge.acc, "email", None))
+        return
+    folder = _sent_folder(db, bridge, action.account_id)
+    if not folder:
+        raise RuntimeError("this account has no Sent folder to file the copy into (no "
+                           "folder marked \\Sent and none named Sent). Create one on "
+                           "the server and the copy is filed on the next pass")
+    raw = smtp.to_crlf(outbound.raw_mime.encode("utf-8"))
+    message_id = header_message_id(raw.split(b"\r\n\r\n", 1)[0])
+    if _copy_landed(c, 0, folder, message_id, content_key(raw)):
+        return
+    # Naive UTC in the database; IMAP wants to be told which, and a bare
+    # datetime would be read as this machine's local time.
+    stamp = outbound.sent_at.replace(tzinfo=timezone.utc) if outbound.sent_at else None
+    c.append(folder, raw, flags=["\\Seen"], msg_time=stamp)
 
 
 def _due(action: PendingAction, now) -> bool:
@@ -709,10 +873,12 @@ def _settle(db, action: PendingAction, ok: bool, error: str | None = None) -> No
     # the action would come back due on every pass.
     action.updated_at = utcnow()
 
-    # A successful send flips its Outbound to "sent" (Proton then auto-saves it
-    # to Sent, which the next folder sync ingests normally). A failed one stays
-    # "queued", because it is: the bytes are still here and the agent is still
-    # going to send them.
+    # A successful send flips its Outbound to "sent". The copy in Sent is the
+    # server's doing on Proton and Gmail, and a queued action of our own
+    # everywhere else (_queue_sent_copy, which _drain_leased calls once this
+    # outcome is written); either way the next folder sync ingests it normally.
+    # A failed one stays "queued", because it is: the bytes are still here and
+    # the agent is still going to send them.
     if action.type == "send":
         outbound = db.get(Outbound, (action.payload or {}).get("outbound_id"))
         if outbound:
@@ -905,6 +1071,9 @@ def _describe(action: PendingAction) -> str:
         return f"flag uid {p.get('uid')} in {p.get('folder')}"
     if action.type == "create_folder":
         return f"create folder {p.get('name')}"
+    if action.type == "save_sent":
+        return (f"file a copy of the mail to "
+                f"{', '.join(p.get('rcpt_to') or []) or '(no recipients)'} into Sent")
     return action.type
 
 
@@ -1062,6 +1231,20 @@ def drain_actions(db, bridge, account) -> tuple[int, int, int]:
         failed += f
         sends += s
         sent += t
+    # The copies of what this pass has just sent go into Sent now, not a pass
+    # from now. Their rows were queued as the sends settled (_queue_sent_copy),
+    # after this pass's window onto the queue was read, and the folder walk
+    # that follows the drain is what puts sent mail on screen: filed here, the
+    # message shows in Sent within seconds of the send, as it does on Proton;
+    # filed next pass, it shows half a minute late, after a walk that found
+    # nothing. Only those rows: anything else that has become due meanwhile
+    # keeps its place in the next pass's window.
+    if sent:
+        for row in due_queue(db, account.id, utcnow()):
+            if row.type == "save_sent":
+                a, f, _s, _t = _drain_one(db, bridge, account, row, utcnow())
+                applied += a
+                failed += f
     # One event for the drain, not one per message: the UI reads this as "the
     # outbox changed, re-read the count". Only when a send was actually tried —
     # a pass that pushed nothing but flags leaves the outbox exactly as it was.
@@ -1089,6 +1272,7 @@ def _drain_leased(db, bridge, account, action: PendingAction) -> tuple[int, int,
     applied = failed = sent = 0
     is_send = action.type == "send"
     sends = int(is_send)
+    delivered = False       # the server took the message: a copy belongs in Sent
     try:
         # The lease is kept alive for as long as this takes, so that "no
         # agent has touched this in fifteen minutes" stays a statement about
@@ -1098,6 +1282,7 @@ def _drain_leased(db, bridge, account, action: PendingAction) -> tuple[int, int,
         _settle(db, action, True)
         applied += 1
         sent += is_send
+        delivered = is_send
         # Only sends get a line of their own. A flag or a move is the tail
         # end of something the user watched happen in the UI; a send is the
         # one action whose success they have no other way to confirm, and
@@ -1114,6 +1299,7 @@ def _drain_leased(db, bridge, account, action: PendingAction) -> tuple[int, int,
         _settle(db, action, True, repr(e))
         applied += 1
         sent += is_send
+        delivered = True
         log.warn(f"{_describe(action)}: {e}", getattr(bridge.acc, "email", None))
     except smtp.Delivered as e:
         # The server may have it and cannot be asked. Neither answer is
@@ -1139,6 +1325,10 @@ def _drain_leased(db, bridge, account, action: PendingAction) -> tuple[int, int,
         # After _settle: the attempt count it writes is what the log line
         # reports, and the backoff is computed from it.
         _log_failure(bridge.acc, action, e)
+    # Outside the try, on purpose: the send's outcome is decided and written
+    # by now, and nothing about its copy may reopen that. See _queue_sent_copy.
+    if delivered:
+        _queue_sent_copy(db, bridge, action)
     db.commit()
     return applied, failed, sends, sent
 

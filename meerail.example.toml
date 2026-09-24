@@ -385,6 +385,16 @@ imap_read_timeout    = 60
 # stops answering would stop this account syncing, not just sending.
 smtp_timeout         = 60
 
+# Whether the agent files a copy of each message it sends into this account's
+# Sent folder. Proton Bridge and Gmail do that themselves, and a copy appended
+# there would be a second one in Sent; a plain IMAP/SMTP server (a
+# university's Exchange, a Dovecot) keeps nothing, and without the copy sent
+# mail is nowhere but meerail's Outbox. Left out, the agent tells the two apart
+# from the server itself: Bridge by its "Folders" node, Gmail by its X-GM-EXT-1
+# capability, anything else as a server that keeps nothing. Set it only when
+# that reading is wrong for a server.
+# save_sent = true
+
 # The name recipients see in front of your address — the display name on the
 # From header of everything this account sends. Leave it out and mail goes out
 # as the bare address.

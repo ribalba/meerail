@@ -42,7 +42,7 @@ from .. import events, mailops, staging
 from ..deps import require_ui_auth
 from .messages import _readable
 from core.models import Account, Attachment, Message, Outbound, PendingAction, Recipient, utcnow
-from core.mail.parse import html_to_text, normalize_subject
+from core.mail.parse import html_to_text, leading_prefix
 
 router = APIRouter(prefix="/api/compose", tags=["compose"], dependencies=[Depends(require_ui_auth)])
 settings = get_settings()
@@ -890,7 +890,9 @@ def reply_context(message_id: int, mode: str = "reply", db: DBSession = Depends(
         attachments, missing = _forward_attachments(db, msg)
         ctx = {
             "account_id": msg.account_id, "from_address": from_address, "to": [], "cc": [],
-            "subject": ("" if normalize_subject(base_subj).startswith("fwd") else "Fwd: ") + base_subj,
+            # Prefixed once: see leading_prefix for why this is not a check on
+            # the normalised subject.
+            "subject": base_subj if leading_prefix(base_subj) == "forward" else f"Fwd: {base_subj}",
             "body_text": "\n\n" + _forward_text(msg),
             "in_reply_to": None, "references": [],
             "attachments": attachments, "attachments_missing": missing,
@@ -913,7 +915,7 @@ def reply_context(message_id: int, mode: str = "reply", db: DBSession = Depends(
             if a.lower() not in seen:
                 cc.append(a)
                 seen.add(a.lower())
-    subject = base_subj if normalize_subject(base_subj).startswith("re") else f"Re: {base_subj}"
+    subject = base_subj if leading_prefix(base_subj) == "reply" else f"Re: {base_subj}"
     references = list(msg.references or [])
     if msg.message_id and msg.message_id not in references:
         references.append(msg.message_id)

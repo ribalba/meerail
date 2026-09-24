@@ -6,6 +6,8 @@ from email import message_from_string, policy
 from email.message import EmailMessage
 from email.utils import format_datetime
 
+import pytest
+
 import dbfixture
 from conftest import ingest_one
 from core.models import DEFAULT_FOOTER
@@ -385,6 +387,33 @@ def test_reply_context_prefills_headers(account):
     assert ctx["subject"].startswith("Re:")
     assert ctx["in_reply_to"] == rfc          # the original Message-ID
     assert rfc in ctx["references"]
+
+
+@pytest.mark.parametrize("subject, reply, forward", [
+    ("Re: Schlüssel", "Re: Schlüssel", "Fwd: Re: Schlüssel"),
+    ("Fwd: Schlüssel", "Re: Fwd: Schlüssel", "Fwd: Schlüssel"),
+    ("AW: Schlüssel", "AW: Schlüssel", "Fwd: AW: Schlüssel"),
+    ("Schlüssel", "Re: Schlüssel", "Fwd: Schlüssel"),
+])
+def test_the_prefix_is_put_on_once(account, subject, reply, forward):
+    """A reply to a reply went out as "Re: Re: …" (and a forward of a forward
+    as "Fwd: Fwd: …"): the check asked whether the *normalised* subject began
+    with the prefix, and normalising is what strips it. Only the first prefix
+    decides, and only its kind: a reply to a forward is still "Re: Fwd: …"."""
+    email, aid = account["email"], account["id"]
+    tok = uuid.uuid4().hex[:8]
+    raw = make_message(f"<pfx-{tok}@t>", f"{subject} {tok}", "alice@ex.com", email,
+                       f"{tok} body", T0)
+    dbfixture.ingest_raw_message(email, raw, uid=993)
+    _, sr = api("GET", f"/api/search?q={tok}&account_id={aid}")
+    mid = sr["rows"][0]["id"]
+
+    _, ctx = api("GET", f"/api/compose/reply-context/{mid}?mode=reply")
+    assert ctx["subject"] == f"{reply} {tok}"
+    _, ctx = api("GET", f"/api/compose/reply-context/{mid}?mode=replyall")
+    assert ctx["subject"] == f"{reply} {tok}"
+    _, ctx = api("GET", f"/api/compose/reply-context/{mid}?mode=forward")
+    assert ctx["subject"] == f"{forward} {tok}"
 
 
 def test_reply_to_html_only_message_keeps_quote_depth(account):

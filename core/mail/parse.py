@@ -505,6 +505,35 @@ def looks_like_reply(subject: str) -> bool:
     return bool(_SUBJECT_PREFIX_RE.match(subject or ""))
 
 
+# The prefixes _SUBJECT_PREFIX_RE strips, sorted by what they say: "Re:" and its
+# translations mark a mail that answers another, "Fwd:" and its translations
+# one that passes another on. `leading_prefix` reads only the first of them.
+_REPLY_PREFIXES = frozenset({"re", "aw", "antw", "sv", "rif", "ref"})
+_FIRST_PREFIX_RE = re.compile(r"^\s*(re|fwd|fw|aw|wg|sv|antw|rif|ref)\s*(\[\d+\])?\s*:", re.I)
+
+
+def leading_prefix(subject: str) -> str | None:
+    """What kind of prefix the subject opens with: "reply", "forward" or None.
+
+    The composer asks this before it puts its own prefix on, so that a reply to
+    "Re: Schlüssel" is "Re: Schlüssel" and not "Re: Re: Schlüssel". It used to
+    ask whether the *normalised* subject began with "re", and normalising is
+    exactly what strips the prefix off, so the answer was no for every subject
+    that did not itself begin with those two letters, and every reply to a reply
+    (and every forward of a forward) went out with the prefix doubled.
+
+    Only the first prefix counts, and only its kind. A reply to a forward is
+    "Re: Fwd: …" and a forward of a reply is "Fwd: Re: …", which is what every
+    other client writes. The localised spellings count the same as the English
+    ones, as they do for threading: an "AW:" from a German client is already a
+    reply and does not want a "Re:" in front of it.
+    """
+    m = _FIRST_PREFIX_RE.match(subject or "")
+    if not m:
+        return None
+    return "reply" if m.group(1).lower() in _REPLY_PREFIXES else "forward"
+
+
 def make_snippet(text: str, limit: int = 240) -> str:
     s = _WS_RE.sub(" ", text or "").strip()
     return s[:limit]
