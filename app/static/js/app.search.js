@@ -96,7 +96,10 @@ App.search = (function () {
     const e = els();
     const q = e.input.value.trim();
     e.clear.hidden = q === "";
-    if (!q) { clear(false); return false; }
+    // An empty box with results still under it puts the folder back, the same
+    // as the ✕ does. clear(false) here used to leave the last search's rows on
+    // screen beneath a box that said nothing was being searched for.
+    if (!q) { clear(active); return false; }
 
     active = true;
     e.controls.hidden = false;
@@ -241,6 +244,12 @@ App.search = (function () {
 
   function debouncedRun() {
     clearTimeout(timer);
+    // Deleting the last character is pressing the ✕, and at once: there is no
+    // query to wait for the rest of, and an empty box counts as the shortest
+    // query of all, so it would otherwise sit through DEBOUNCE_SHORT first.
+    // `active` decides whether the folder has to be fetched back: a box emptied
+    // before its first search ran never replaced the folder on screen.
+    if (!els().input.value.trim()) { clear(active); return; }
     const request = ++requestSeq;
     const typed = textOf(els().input.value.trim());
     timer = setTimeout(() => run(request), typed.length <= SHORT ? DEBOUNCE_SHORT : DEBOUNCE);

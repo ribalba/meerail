@@ -256,6 +256,15 @@ App.keys = (function () {
 
   function isTyping(el) {
     if (!el) return false;
+    // Somewhere that keeps the single keys for itself although nothing in it
+    // takes text: the composer's preview of a forwarded HTML original, and the
+    // notice drawn over it. With the keyboard in there, a letter or a Backspace
+    // is someone trying to write, and the table below would have spent it on
+    // the open conversation instead. That conversation is usually the mail
+    // being forwarded, so Backspace moved it to Trash from under the draft.
+    // Asked of the element and its ancestors, which covers the frame itself:
+    // while the caret is inside a frame, document.activeElement is the frame.
+    if (el.closest && el.closest("[data-owns-keys]")) return true;
     const tag = el.tagName;
     if (tag === "INPUT") return !CONTROL_INPUT.has((el.type || "text").toLowerCase());
     return tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable;

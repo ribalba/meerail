@@ -1363,6 +1363,7 @@ App.compose = (function () {
     forward = f || null;
     const frame = $("#compose-forward-frame");
     const seq = ++previewSeq;
+    $("#compose-forward-lock").hidden = true;   // a notice about the last original is not about this one
     $("#compose-forward").hidden = !forward;
     $("#compose-window").classList.toggle("has-forward", !!forward);
     setHtmlMode(htmlMode);            // its title says what becomes of the note
@@ -1398,6 +1399,52 @@ App.compose = (function () {
     body.replaceText(body.getText().replace(/\n+$/, "") + quote);
     setForward(null);
     edited();
+    body.focus(false);
+  }
+
+  // The preview is not a field and cannot become one: what goes out is the
+  // stored original, which /send reads back out of the database, so nothing
+  // typed over the preview could ever reach it. But someone who clicks into it
+  // and starts typing means to edit it. They used to get the reader's single-key
+  // shortcuts instead, and Backspace (the Mac's delete key) moved the very mail
+  // being forwarded to Trash. The shortcuts are kept out by data-owns-keys (see
+  // isTyping in app.keys.js); this is the other half, saying why the key did
+  // nothing and offering the forward that can be edited.
+  //
+  // Only keys that write or delete count. Space and the arrows scroll the
+  // preview as they would in the reader, Enter on a link follows it, and a key
+  // with Ctrl, Cmd or Alt held is a shortcut (Ctrl+Enter and Alt+C among them,
+  // which have to reach the composer). AltGr is not one of those: it is how @
+  // and € are typed on many layouts, and Windows reports it as Ctrl+Alt.
+  function wouldEdit(e) {
+    if (e.key === "Backspace" || e.key === "Delete") return true;
+    const altGr = !!(e.getModifierState && e.getModifierState("AltGraph"));
+    if (!altGr && (e.ctrlKey || e.metaKey || e.altKey)) return false;
+    if (e.key === "Enter") return !(e.target.closest && e.target.closest("a[href]"));
+    return e.key !== " " && /^.$/u.test(e.key);
+  }
+
+  function onForwardKey(e) {
+    if (!forward || e.defaultPrevented || !wouldEdit(e)) return;
+    e.preventDefault();           // which is also what tells App.keys the key is spent
+    showForwardLock();
+  }
+
+  // The notice takes the keyboard, so the rest of what was being typed lands
+  // on the card, where it does nothing, rather than going on into the preview.
+  // The card and not one of its buttons: someone still typing would press the
+  // focused button with the next Space or Enter. Focused on "Keep HTML" that
+  // closed the notice and put the rest of the sentence into the note; focused
+  // on the switch it would throw the pictures away, one way. Tab reaches both.
+  function showForwardLock() {
+    $("#compose-forward-lock").hidden = false;
+    $("#compose-forward-lock-card").focus();
+  }
+
+  // Closed with the caret in the note, since that is where writing works. Not
+  // at its end, which is under the footer.
+  function hideForwardLock() {
+    $("#compose-forward-lock").hidden = true;
     body.focus(false);
   }
 
@@ -1728,11 +1775,33 @@ App.compose = (function () {
     $("#compose-forward-plain").addEventListener("click", forwardAsText);
     // A click into the preview hands it the keyboard, and Esc or Alt+C would
     // stop reaching the composer. Handed back out the way the reader does it,
-    // which the sandbox allows because it allows same-origin.
+    // which the sandbox allows because it allows same-origin. onForwardKey goes
+    // first so that a key which would have edited the original is answered with
+    // the notice, and App.keys sees it already spent.
     $("#compose-forward-frame").addEventListener("load", (e) => {
       try {
-        if (App.keys) e.target.contentDocument.addEventListener("keydown", App.keys.handle);
+        const doc = e.target.contentDocument;
+        doc.addEventListener("keydown", onForwardKey);
+        doc.addEventListener("paste", (ev) => {
+          if (!forward) return;
+          ev.preventDefault();
+          showForwardLock();
+        });
+        if (App.keys) doc.addEventListener("keydown", App.keys.handle);
       } catch (_) { /* not ours to reach into: nothing to hand back */ }
+    });
+    $("#compose-forward-keep").addEventListener("click", hideForwardLock);
+    $("#compose-forward-lock-plain").addEventListener("click", forwardAsText);
+    // Escape takes the notice down before it minimizes the composer, and a
+    // click on the dimmed preview around the card counts as "Keep HTML", the
+    // way a click beside any of the page's modals closes it.
+    $("#compose-forward-lock").addEventListener("keydown", (e) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      hideForwardLock();
+    });
+    $("#compose-forward-lock").addEventListener("click", (e) => {
+      if (e.target.id === "compose-forward-lock") hideForwardLock();
     });
     setHtmlMode(htmlDefault());
     $("#compose-cc-toggle").addEventListener("click", () => toggleExtra("cc"));

@@ -283,6 +283,12 @@ body.resizing { cursor: col-resize; user-select: none; }
 .search-bar input { flex: 1; border: none; background: var(--bg-elev); color: var(--text);
   font: inherit; font-size: .86rem; padding: .35rem .6rem; border-radius: 7px; min-width: 0; }
 .search-bar input:focus { outline: 2px solid var(--accent); }
+/* The box stays type="search" for the Search key it gets on a phone keyboard,
+   but Chromium (and so Electron) then draws its own ✕ inside the field, right
+   beside #search-clear: two buttons that looked the same and did not do the
+   same thing. The native one only empties the text; ours also puts the folder
+   back. One ✕ is enough, and it is ours. */
+.search-bar input::-webkit-search-cancel-button { -webkit-appearance: none; appearance: none; display: none; }
 .search-icon { color: var(--text-faint); display: flex; }
 .search-clear { flex: 0 0 auto; }
 /* Sits quietly at the end of the bar until you go looking for it — the filter
@@ -1109,10 +1115,30 @@ mark.hit.hit-on { background: #ff8a3d; box-shadow: 0 0 0 2px #ff8a3d; }
    the reader's frames, since that is what the mail was written against. */
 .compose.has-forward .compose-textarea { flex: 1 1 0; min-height: 90px; }
 .compose-forward {
+  position: relative;  /* containing block for .cf-lock */
   flex: 2 1 0; min-height: 140px; display: flex; flex-direction: column;
   border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
 }
 .compose-forward[hidden] { display: none; }
+/* The notice for a key pressed in the preview that would have edited the
+   original. Inside the forward box rather than one of the page's modals: those
+   sit under the composer (z-index 100 against its 200), and this belongs to the
+   box it covers anyway. Scrolls on its own when the box is short. */
+.cf-lock {
+  position: absolute; inset: 0; z-index: 1; overflow-y: auto;
+  display: flex; align-items: center; justify-content: center; padding: .8rem;
+  background: rgba(0,0,0,.35);
+}
+.cf-lock[hidden] { display: none; }
+.cf-lock-card {
+  width: min(440px, 100%); margin: auto; padding: .9rem 1.1rem 1rem;
+  background: var(--bg); border: 1px solid var(--border-strong); border-radius: 10px;
+  box-shadow: var(--shadow);
+}
+.cf-lock-card:focus { outline: none; }  /* focused by script, not a control */
+.cf-lock-card h3 { margin: 0 0 .4rem; font-size: .95rem; }
+.cf-lock-card p { margin: 0 0 .9rem; color: var(--text-muted); font-size: .84rem; line-height: 1.45; }
+.cf-lock-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .5rem; }
 .cf-head {
   display: flex; align-items: center; gap: .5rem; padding: .3rem .4rem .3rem .6rem;
   background: var(--bg-elev); border-bottom: 1px solid var(--border);

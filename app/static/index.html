@@ -781,8 +781,9 @@
              data-placeholder="Write your message…"></div>
         <!-- The original an HTML forward carries under the note, drawn the way
              the reader draws it. Shown and filled by app.compose.js; see
-             "Forwarding as HTML" there. -->
-        <div class="compose-forward" id="compose-forward" hidden>
+             "Forwarding as HTML" there. data-owns-keys keeps the reader's
+             single-key shortcuts out of it (see isTyping in app.keys.js). -->
+        <div class="compose-forward" id="compose-forward" data-owns-keys hidden>
           <div class="cf-head">
             <span class="cf-note" id="compose-forward-note"></span>
             <button type="button" class="compose-toggle" id="compose-forward-plain"
@@ -790,6 +791,22 @@
           </div>
           <iframe class="cf-frame" id="compose-forward-frame" title="Forwarded message"
                   sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"></iframe>
+          <!-- Drawn over the preview when a key pressed in it would have
+               edited the original; see "Forwarding as HTML" in app.compose.js. -->
+          <div class="cf-lock" id="compose-forward-lock" role="alertdialog"
+               aria-labelledby="compose-forward-lock-title" aria-describedby="compose-forward-lock-text" hidden>
+            <div class="cf-lock-card" id="compose-forward-lock-card" tabindex="-1">
+              <h3 id="compose-forward-lock-title">The forwarded email cannot be edited</h3>
+              <p id="compose-forward-lock-text">It is an HTML email, and it is sent on as it
+                arrived. Write your own text in the box above it. To change the forwarded
+                email itself, switch to a plain-text forward: its text moves into the editor,
+                where you can edit it, but its pictures and layout stay behind.</p>
+              <div class="cf-lock-actions">
+                <button type="button" class="btn-secondary" id="compose-forward-keep">Keep HTML</button>
+                <button type="button" class="btn-primary" id="compose-forward-lock-plain">Switch to plain text</button>
+              </div>
+            </div>
+          </div>
         </div>
         <div id="compose-attachments" class="compose-attachments"></div>
         <div class="compose-actions">
