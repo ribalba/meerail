@@ -964,9 +964,14 @@ mark.hit.hit-on { background: #ff8a3d; box-shadow: 0 0 0 2px #ff8a3d; }
   /* Writing mail is the foreground task, so the composer opens big rather than
      as a 620px box floating over a mailbox you are no longer reading — but it
      caps at 1400px: past that the lines get too long to read back. Still
-     resizable and draggable down from there. */
-  width: min(1400px, 94vw); height: 96vh; max-height: none;
-  min-width: 340px; min-height: 300px; max-width: 98vw; resize: both;
+     resizable and draggable down from there.
+     The caps are in viewport units because a drag or the grip writes the size
+     in pixels, and a window sized on a big monitor kept those pixels after the
+     browser moved to a laptop screen. The next reply then opened twice as tall
+     as the screen, with the send buttons below its bottom edge. The height had
+     no cap at all back then, only the width did. */
+  width: min(1400px, 94vw); height: 96vh;
+  min-width: 340px; min-height: 300px; max-width: 98vw; max-height: 98vh; resize: both;
 }
 /* Shown while files hover anywhere over the composer; pointer-events off so it
    never eats the dragleave/drop events fired at the elements beneath it. */
@@ -2168,8 +2173,8 @@ mark.hit.hit-on { background: #ff8a3d; box-shadow: 0 0 0 2px #ff8a3d; }
 
   /* Writing mail takes the whole screen — a draggable, resizable window is a
      desktop affordance, and there is nothing behind it worth seeing anyway. */
-  .modal.compose { width: 100vw; max-width: none; height: 100dvh; border-radius: 0;
-    resize: none; }
+  .modal.compose { width: 100vw; max-width: none; height: 100dvh; max-height: 100dvh;
+    border-radius: 0; resize: none; }
   /* Neutralises a drag that landed before the window was narrowed. */
   .modal.compose.dragging-placed { position: relative; margin: revert; inset: auto; }
   .modal.compose .modal-head { cursor: default; }

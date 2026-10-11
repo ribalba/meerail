@@ -510,14 +510,32 @@ App.compose = (function () {
 
   // --- Window dragging -------------------------------------------------
   // The window starts centred by the backdrop's flexbox; the first drag pins
-  // it to pixel coordinates and it stays where the user left it.
+  // it to pixel coordinates and it stays where the user left it, as far as the
+  // screen allows.
 
+  // All of the window stays on screen. It used to be free to hang off any edge
+  // as long as a strip of its header showed, and the send buttons are in the
+  // bottom right corner. Once the browser moved from a big monitor to a laptop
+  // screen, every reply after a drag opened with them out of sight. The CSS
+  // caps the size below the viewport's, so there is always a spot where the
+  // whole window fits.
   function placeAt(left, top) {
     const win = $("#compose-window");
-    // Keep at least a grabbable strip of the header on screen.
-    const minLeft = 60 - win.offsetWidth;
-    win.style.left = `${Math.min(Math.max(left, minLeft), window.innerWidth - 60)}px`;
-    win.style.top = `${Math.min(Math.max(top, 0), Math.max(0, window.innerHeight - 40))}px`;
+    const maxLeft = Math.max(0, window.innerWidth - win.offsetWidth);
+    const maxTop = Math.max(0, window.innerHeight - win.offsetHeight);
+    win.style.left = `${Math.min(Math.max(left, 0), maxLeft)}px`;
+    win.style.top = `${Math.min(Math.max(top, 0), maxTop)}px`;
+  }
+
+  // Puts a dragged window back inside the viewport, which may have shrunk
+  // since it was placed. The browser may have moved from a monitor to the
+  // laptop's own screen, or been made smaller while the window sat minimized.
+  // Not while it is hidden, since a hidden window measures 0x0 and would be
+  // placed for that. show() calls this as it opens instead.
+  function refit() {
+    const win = $("#compose-window");
+    if (!win.classList.contains("dragging-placed") || $("#compose-modal").hidden) return;
+    placeAt(parseFloat(win.style.left) || 0, parseFloat(win.style.top) || 0);
   }
 
   function startDrag(e) {
@@ -547,6 +565,7 @@ App.compose = (function () {
     $("#compose-title").textContent = title;
     $("#compose-status").textContent = "";
     $("#compose-modal").hidden = false;
+    refit();
     // Every way a draft reaches the window comes through here, with its text
     // already in the editor: a fresh one, one back off the bar, one restored
     // after a reload. The checker starts over for it.
@@ -1884,11 +1903,7 @@ App.compose = (function () {
       showDropHint(false);
     });
     // A shrinking viewport must not strand the window off-screen.
-    window.addEventListener("resize", () => {
-      const win = $("#compose-window");
-      if (!win.classList.contains("dragging-placed")) return;
-      placeAt(parseFloat(win.style.left) || 0, parseFloat(win.style.top) || 0);
-    });
+    window.addEventListener("resize", refit);
     try { accounts = await App.api.accounts(); } catch (_) { accounts = []; }
     buildIdentities();
     // After the accounts: a restored draft's From is picked out of them.
