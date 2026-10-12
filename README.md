@@ -967,6 +967,21 @@ server that has been down since Friday.
   unreachable Bridge delays a reminder exactly as it delays everything else. If you file the
   mail somewhere yourself while it waits, that wins — the reminder retires quietly rather
   than dragging it back out of wherever you put it.
+- **Mail can be parked.** Some mail is not a task and not a reminder, and you still do not
+  want it in the inbox. A newsletter to read some day, a receipt to keep at hand, a thread
+  you were only copied on. Press `p` (or the **P** button in the reader toolbar) and the
+  conversation moves to **Parked**, a folder directly under the inbox (All Inboxes when you
+  have several accounts). It holds the parked mail of every account. Press `p` there and it
+  goes back to the inbox. `g p` opens Parked from anywhere, and with rows ticked the bar
+  above the list offers **Park** in an inbox and **Back to Inbox** in Parked, **Select all
+  N** included. Parked behaves like the inbox otherwise. Archive, Delete, Move, Flag and
+  Undo all work there, and an empty Parked explains what it is for.
+- **Parked exists only in meerail.** Nothing is moved on your mail server. The mail stays in
+  the server's inbox, and meerail only remembers that you parked it, so your phone and any
+  other mail app still show it in the inbox. That also means parking can never lose mail.
+  When someone replies to a parked conversation, the whole conversation comes back to the
+  inbox. Parking and putting back are listed in Recent actions, and `z` takes them back.
+  "Previous message in thread" moved from `p` to `Shift+N` to make room.
 - **Queued work is never dropped.** Marks, moves and above all messages you have sent sit in
   the queue until they succeed, retried on a backoff for as long as it takes. Nothing
   expires them.

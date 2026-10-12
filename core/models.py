@@ -31,11 +31,13 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    and_,
+    or_,
     select,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, aliased, mapped_column, relationship
 
 from .database import Base
 
@@ -419,6 +421,11 @@ class MessageLocation(Base):
         UniqueConstraint("mailbox_id", "imap_uid", name="uq_location_mailbox_uid"),
         Index("ix_location_message", "message_pk"),
         Index("ix_location_mailbox", "mailbox_id"),
+        # Partial, for the same reason ix_messages_account_read is. Parked mail
+        # is a few hundred rows in a table of hundreds of thousands, and the
+        # Parked list and its sidebar count read exactly those few hundred.
+        Index("ix_location_parked", "mailbox_id",
+              postgresql_where=text("parked")),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -436,6 +443,27 @@ class MessageLocation(Base):
     draft: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     deleted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     keywords: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+
+    # Taken out of the inbox and into Parked. That is mail which is neither a
+    # task nor a reminder, but which the user does not want in front of them
+    # either.
+    #
+    # This app's own idea, like the Outbox and Reminders, and deliberately one
+    # no mail server is told about. The placement stays exactly where it is, in
+    # INBOX with its UID and its flags, and the sync goes on treating it as the
+    # inbox copy it is. Only the lists here read the column. The inbox lists
+    # leave these out and Parked shows them (see ``parked_out`` below). So a
+    # phone looking at the same account still sees the mail in its inbox, and
+    # nothing that can go wrong with a queued move can go wrong with this.
+    #
+    # On the placement rather than on the message, because the placement is
+    # what goes when the mail is filed elsewhere. Archiving a parked
+    # conversation deletes these rows, and the mark goes with them instead of
+    # lying in wait for the day the mail comes back to the inbox. The two ways
+    # a placement is replaced without being filed anywhere (a queued move
+    # landing, a folder rebuilt under a new UIDVALIDITY) carry the mark over to
+    # the new row. See core/mail/store.py::upsert_location.
+    parked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
@@ -701,6 +729,55 @@ def still_filed():
         MessageLocation.message_pk == Message.id,
         MessageLocation.deleted.is_(False),
     ).exists()
+
+
+def parked_out():
+    """A placement that Parked holds rather than the inbox it is filed in.
+
+    Every list that shows an inbox leaves these out, and Parked shows exactly
+    these. So the one test has to be shared by both, and by the sidebar's
+    counts and every bulk route that acts on "everything in this list". Two
+    copies of it would be a conversation that is in neither list, or in both.
+
+    Parked, *and* nothing else of the conversation is waiting in an inbox. The
+    second half is what a reply does. New mail lands in INBOX unparked, and the
+    conversation it belongs to is back on the desk as a whole. It is not split
+    between a fresh reply in the inbox and its history in Parked, with no sign
+    in either list that the other half exists. Press the key again and the
+    whole of it goes back. The mark on the older placements is left alone
+    rather than cleared, so a reply that is itself filed away hands the
+    conversation straight back to Parked.
+
+    A conversation is its thread within one account, or the message alone when
+    it was never threaded. That is the same key the list collapses rows by.
+
+    Correlated on ``MessageLocation`` only, so the caller needs that table in
+    its FROM and nothing else. The bulk routes select placements without the
+    message they belong to. Cheap where it matters, because ``parked`` is
+    tested first and is false on nearly every row.
+    """
+    me = aliased(Message)
+    kin = aliased(Message)
+    other = aliased(MessageLocation)
+    box = aliased(Mailbox)
+    awake = (
+        select(other.id)
+        .select_from(me)
+        .join(kin, and_(kin.account_id == me.account_id,
+                        or_(kin.id == me.id,
+                            and_(me.thread_id.is_not(None),
+                                 kin.thread_id == me.thread_id))))
+        .join(other, other.message_pk == kin.id)
+        .join(box, box.id == other.mailbox_id)
+        .where(me.id == MessageLocation.message_pk,
+               box.role == "inbox",
+               other.deleted.is_(False),
+               ~other.parked)
+    ).exists()
+    # The bare column rather than `IS TRUE`, because that is the predicate
+    # ix_location_parked is declared with. The planner only uses a partial
+    # index for a query whose condition it can see implies the index's own.
+    return and_(MessageLocation.parked, ~awake)
 
 
 class Setting(Base):

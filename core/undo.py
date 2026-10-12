@@ -44,12 +44,19 @@ from .models import Mailbox, Message, MessageLocation
 # emptying the Trash still appears in the panel — as one line saying it cannot be
 # undone, which is more use to someone reading their recent activity than not
 # appearing at all.
-LOGGED_TYPES = ("move", "delete")
+#
+# "park" is the odd one out, because it is never an instruction to anyone.
+# Parking is this app's own mark on a placement (MessageLocation.parked) and no
+# mail server hears of it. So its rows are written already "done", as a record,
+# the same way a move on an imported account is recorded
+# (app/mailops.py::_record_local_move). They exist only so the keypress shows
+# up here and can be taken back.
+LOGGED_TYPES = ("move", "delete", "park")
 
 # What the panel calls the operation. Carried on the row rather than inferred,
 # because "move to Trash" and "trash" are the same IMAP command and very
 # different sentences, and only the endpoint that was called knows which it was.
-KINDS = ("trash", "archive", "move", "delete", "undo", "remind")
+KINDS = ("trash", "archive", "move", "delete", "undo", "remind", "park", "unpark")
 
 
 class Unrestorable(RuntimeError):
@@ -81,6 +88,10 @@ def snapshot(db, loc: MessageLocation) -> dict:
     destroys them: a message read in the inbox and then archived carries its
     \\Seen on the archive copy, and putting it back has to put that back too or
     undoing an archive silently marks the mail unread.
+
+    ``parked`` travels for the same reason. Archiving something out of Parked
+    and pressing Undo has to put it back in Parked, not in the inbox it was
+    parked to keep out of.
     """
     mb = db.get(Mailbox, loc.mailbox_id)
     return {
@@ -95,6 +106,7 @@ def snapshot(db, loc: MessageLocation) -> dict:
         "draft": loc.draft,
         "deleted": loc.deleted,
         "keywords": list(loc.keywords or []),
+        "parked": loc.parked,
     }
 
 
@@ -140,6 +152,9 @@ def restore(db, msg: Message, snaps: list[dict], touched: set[int]) -> int:
             draft=bool(snap.get("draft")),
             deleted=bool(snap.get("deleted")),
             keywords=list(snap.get("keywords") or []),
+            # Absent on snapshots taken before parking existed, which were
+            # never of a parked placement.
+            parked=bool(snap.get("parked")),
         ))
         touched.add(mailbox_id)
         restored += 1

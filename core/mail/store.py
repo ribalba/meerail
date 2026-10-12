@@ -94,6 +94,29 @@ def _local_state(db: Session, message_pk: int) -> dict:
     return {"seen": any(r.seen for r in rows), "flagged": any(r.flagged for r in rows)}
 
 
+def _parked_here(db: Session, message_pk: int, mailbox_id: int) -> bool:
+    """Is this message already parked in this folder, under some other UID?
+
+    Parking is a mark on a placement (MessageLocation.parked), and two things
+    replace a placement without the mail going anywhere. One is the optimistic
+    row a queued move wrote giving way to the server's own
+    (drop_pending_placement, below). The other is a folder rebuilt under a new
+    UIDVALIDITY handing every message a fresh UID. Neither is the user filing
+    the mail, so neither may un-park it. Without this the conversation would
+    reappear in the inbox the moment the sync catches up with it.
+
+    The same folder only. A copy turning up in another folder is the message
+    being filed there, which is exactly the thing that takes it out of Parked.
+    """
+    return db.scalar(
+        select(MessageLocation.id).where(
+            MessageLocation.message_pk == message_pk,
+            MessageLocation.mailbox_id == mailbox_id,
+            MessageLocation.parked.is_(True),
+        ).limit(1)
+    ) is not None
+
+
 def _queue_flag_catchup(
     db: Session, message_pk: int, mailbox_id: int, uid: int, ahead: list[str]
 ) -> None:
@@ -334,7 +357,8 @@ def upsert_location(
         ahead = [name for name in _INHERITED if local.get(name) and not flags.get(name)]
         if ahead:
             flags = {**flags, **{name: True for name in ahead}}
-        loc = MessageLocation(message_pk=message_pk, mailbox_id=mailbox_id, imap_uid=uid)
+        loc = MessageLocation(message_pk=message_pk, mailbox_id=mailbox_id, imap_uid=uid,
+                              parked=_parked_here(db, message_pk, mailbox_id))
         db.add(loc)
         if ahead:
             _queue_flag_catchup(db, message_pk, mailbox_id, uid, ahead)

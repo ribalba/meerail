@@ -785,3 +785,22 @@ def send_action_state(outbound_id: int) -> dict | None:
         a = rows[0]
         return {"status": a.status, "attempts": a.attempts, "updated_at": a.updated_at,
                 "error": a.error, "payload": dict(a.payload or {})}
+
+
+def message_pk_for(email: str, message_id: str) -> int:
+    """The primary key of the message stored under this Message-ID (no brackets)."""
+    with session() as db:
+        account = db.query(Account).filter(Account.email == email.lower()).one()
+        return (db.query(Message.id)
+                .filter(Message.account_id == account.id, Message.message_id == message_id)
+                .one()[0])
+
+
+def parked_placements(email: str, message_pk: int) -> list[dict]:
+    """Where a message is filed, with the Parked mark each placement carries."""
+    with session() as db:
+        rows = db.query(MessageLocation, Mailbox).join(
+            Mailbox, Mailbox.id == MessageLocation.mailbox_id
+        ).filter(MessageLocation.message_pk == message_pk).all()
+        return [{"imap_name": mb.imap_name, "imap_uid": loc.imap_uid,
+                 "deleted": loc.deleted, "parked": loc.parked} for loc, mb in rows]

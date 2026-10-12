@@ -44,6 +44,7 @@ App.undo = (function () {
   const VERB = {
     trash: "Trashed", archive: "Archived", move: "Moved",
     delete: "Deleted", undo: "Put back", remind: "Snoozed",
+    park: "Parked", unpark: "Returned",
   };
 
   function collapsed() { return localStorage.getItem(STORE_KEY) === "1"; }
@@ -78,6 +79,7 @@ App.undo = (function () {
                : "1 message";
     const where = item.kind === "move" && item.to ? ` to ${item.to}`
                 : item.kind === "undo" && item.to ? ` in ${item.to}`
+                : item.kind === "unpark" ? " to the inbox"
                 : "";
     return `${verb} ${what}${where}`;
   }
@@ -114,7 +116,7 @@ App.undo = (function () {
     // older build carries none. There is no way to say that in the sidebar
     // without it outliving its usefulness by months, so it is in the README.
     const rows = !items.length
-      ? `<div class="rc-empty">Mail you trash, archive or move shows up here.</div>`
+      ? `<div class="rc-empty">Mail you trash, archive, move or park shows up here.</div>`
       : items.map((item) => {
           const when = item.at ? App.relTime(item.at) : "";
           // An attempt that failed outranks the server's own verdict on the row:
@@ -263,12 +265,16 @@ App.undo = (function () {
      work, but the count and the subject are not known yet, and a row that
      rewrote itself under the pointer a moment after appearing would be worse
      than one that says it is still settling. */
+  //
+  // Parking says which way it went in the answer (`op_kind`), because the
+  // bulk routes carry the direction in the body, where a path cannot see it.
   function record(path, body) {
     const hit = KIND_FOR.find(([re]) => re.test(path));
-    if (!hit) return;
+    const kind = body.op_kind || (hit && hit[1]);
+    if (!kind) return;
     items = [{
       op_id: body.op_id,
-      kind: hit[1],
+      kind,
       count: body.moved || 1,
       subject: "",
       thread: null,

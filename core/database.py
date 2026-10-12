@@ -588,6 +588,14 @@ def init_db() -> None:
             "ALTER TABLE outbound ADD COLUMN IF NOT EXISTS draft_state JSONB",
             "ALTER TABLE outbound ADD COLUMN IF NOT EXISTS "
             "revision INTEGER NOT NULL DEFAULT 0",
+            # Parked mail (MessageLocation.parked). Nothing is parked on the
+            # upgrade that adds it, which is what FALSE says, and a constant
+            # default is a catalog change rather than a rewrite of the table.
+            # The index is partial and starts out empty.
+            "ALTER TABLE message_locations ADD COLUMN IF NOT EXISTS "
+            "parked BOOLEAN NOT NULL DEFAULT FALSE",
+            "CREATE INDEX IF NOT EXISTS ix_location_parked "
+            "ON message_locations (mailbox_id) WHERE parked",
         ):
             _run_migration(stmt)
 

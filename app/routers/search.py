@@ -394,13 +394,13 @@ def search(
     # in the inbox — and it would go on naming a folder the mail has left.
     placed: dict[int, list[tuple]] = {}
     if ids:
-        for pk, seen, flagged, mb_id, role, name in db.execute(
+        for pk, seen, flagged, mb_id, role, name, parked in db.execute(
             select(MessageLocation.message_pk, MessageLocation.seen, MessageLocation.flagged,
-                   Mailbox.id, Mailbox.role, Mailbox.display_name)
+                   Mailbox.id, Mailbox.role, Mailbox.display_name, MessageLocation.parked)
             .join(Mailbox, Mailbox.id == MessageLocation.mailbox_id)
             .where(MessageLocation.message_pk.in_(ids), MessageLocation.deleted.is_(False))
         ).all():
-            placed.setdefault(pk, []).append((seen, flagged, mb_id, role, name))
+            placed.setdefault(pk, []).append((seen, flagged, mb_id, role, name, parked))
 
     def _where(pk: int) -> dict:
         """The seen/flagged/folders part of one row.
@@ -410,7 +410,8 @@ def search(
         aggregate this replaced defaulted to.
         """
         here = placed.get(pk, [])
-        folders = folders_of((mb_id, role, name) for _, _, mb_id, role, name in here)
+        folders = folders_of((mb_id, role, name, parked)
+                             for _, _, mb_id, role, name, parked in here)
         return {
             "seen": all(p[0] for p in here),
             "flagged": any(p[1] for p in here),

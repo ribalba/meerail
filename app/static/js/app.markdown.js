@@ -399,13 +399,17 @@ App.markdown = (function () {
         if (seen + n.data.length >= off) { node = n; at = off - seen; break; }
         seen += n.data.length;
       }
-      const r = document.createRange();
-      if (node) r.setStart(node, Math.max(0, Math.min(at, node.data.length)));
-      else { r.selectNodeContents(div); r.collapse(false); }
-      r.collapse(true);
+      // One collapse(), never removeAllRanges() followed by addRange(). In the
+      // moment between those two the editor has no selection at all, and
+      // Chromium answers that by resetting the input method, which on Wayland
+      // is a text-input disable() and enable(). This runs after every
+      // keystroke, so the input method was torn down under every key typed.
+      // KDE's press-and-hold accent popup lost the held key that way and the
+      // key just repeated, and any IME that keeps state across keys would
+      // lose it the same way.
       const sel = window.getSelection();
-      sel.removeAllRanges();
-      sel.addRange(r);
+      if (node) sel.collapse(node, Math.max(0, Math.min(at, node.data.length)));
+      else sel.collapse(div, div.childNodes.length);
     }
 
     function placeGlobal(off) {

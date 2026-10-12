@@ -80,7 +80,11 @@ SQL
 
 **`message_locations`** — which folders a message sits in, plus its per-folder
 flags: `message_pk`, `mailbox_id`, `imap_uid`, `seen`, `flagged`, `answered`,
-`draft`, `deleted`. A message can appear in several mailboxes.
+`draft`, `deleted`, `parked`. A message can appear in several mailboxes.
+`parked` is true on inbox placements the user moved to meerail's Parked folder.
+The mail is still in the server's inbox. meerail's inbox views leave a parked
+placement out unless another message of the same conversation sits in an inbox
+unparked.
 
 **`recipients`** — `message_pk`, `kind` (`from`|`to`|`cc`|`bcc`|`reply_to`),
 `name`, `address`. Join here to find mail *to* someone; `from_addr` on

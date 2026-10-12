@@ -24,7 +24,7 @@ from core import undo
 from core.database import get_db
 from ..deps import require_ui_auth
 from .messages import _resolve_mailbox_ids
-from core.models import Mailbox, Message, MessageLocation
+from core.models import Mailbox, Message, MessageLocation, parked_out
 
 router = APIRouter(prefix="/api/messages", tags=["actions"], dependencies=[Depends(require_ui_auth)])
 
@@ -218,6 +218,8 @@ def bulk_trash_all(req: BulkTrashAllRequest, db: DBSession = Depends(get_db)):
     q = select(MessageLocation).where(MessageLocation.deleted.is_(False))
     if req.scope == "flagged":
         q = q.where(MessageLocation.flagged.is_(True))
+    elif req.scope == "parked":
+        q = q.where(parked_out())
     else:
         ids = _resolve_mailbox_ids(db, req.mailbox_id, req.scope)
         if not ids:
@@ -227,7 +229,11 @@ def bulk_trash_all(req: BulkTrashAllRequest, db: DBSession = Depends(get_db)):
                 status_code=400,
                 detail="These messages are already in Trash. Emptying the Trash deletes "
                        "them from the server for good, which is a separate action.")
-        q = q.where(MessageLocation.mailbox_id.in_(ids))
+        # What the list showed, and so what "all of them" can mean. An inbox
+        # list leaves parked mail out (list_messages), and "Delete all 40 in
+        # Inbox" reaching into the two hundred sitting in Parked would be a
+        # delete of mail nobody was looking at.
+        q = q.where(MessageLocation.mailbox_id.in_(ids), ~parked_out())
     if trash_ids:
         q = q.where(MessageLocation.mailbox_id.not_in(trash_ids))
     if req.unread_only:
@@ -327,6 +333,8 @@ def bulk_move_all(req: BulkMoveAllRequest, db: DBSession = Depends(get_db)):
                 MessageLocation.mailbox_id != target.id))
     if req.scope == "flagged":
         q = q.where(MessageLocation.flagged.is_(True))
+    elif req.scope == "parked":
+        q = q.where(parked_out())
     else:
         ids = _resolve_mailbox_ids(db, req.mailbox_id, req.scope)
         if not ids:
@@ -334,7 +342,9 @@ def bulk_move_all(req: BulkMoveAllRequest, db: DBSession = Depends(get_db)):
         if ids == [target.id]:
             raise HTTPException(status_code=400,
                                 detail=mailops.already_there(target))
-        q = q.where(MessageLocation.mailbox_id.in_(ids))
+        # Parked mail is not in the list this selector was read off. See
+        # bulk_trash_all.
+        q = q.where(MessageLocation.mailbox_id.in_(ids), ~parked_out())
     if req.unread_only:
         q = q.where(MessageLocation.seen.is_(False))
 
@@ -702,7 +712,10 @@ def bulk_purge_all(req: BulkPurgeAllRequest, db: DBSession = Depends(get_db)):
     for account_id in accounts:
         _require_local(db, account_id)
 
-    conds = [MessageLocation.mailbox_id.in_(ids)]
+    # Parked mail is not in the list this selector was read off. See
+    # bulk_trash_all. Here that is the difference between deleting what was on
+    # screen and destroying the only copy of something that was not.
+    conds = [MessageLocation.mailbox_id.in_(ids), ~parked_out()]
     if req.unread_only:
         conds.append(MessageLocation.seen.is_(False))
     remaining = db.scalar(
@@ -717,6 +730,135 @@ def bulk_purge_all(req: BulkPurgeAllRequest, db: DBSession = Depends(get_db)):
     mailops.announce(db, accounts, deleted)
     return {"ok": True, "deleted": deleted, "removed": len(loc_ids),
             "done": remaining <= len(loc_ids)}
+
+
+# --- Parked -------------------------------------------------------------------
+#
+# Taking mail off the inbox without filing it anywhere, and putting it back.
+# What that is, and why nothing here reaches a mail server, is in
+# app/mailops.py under "parking". The routes are shaped like the filing ones
+# above (one conversation, the ticked rows, everything a selector matches) so
+# the browser can treat Park as one more verb. Two differences fall out of
+# there being no server in it. Nothing is queued, so there is no agent to wake.
+# Nothing is moved, so there are no folder counts to redo. The event is what
+# tells every open tab to redraw its lists and the sidebar.
+
+
+class BulkParkRequest(BulkTrashRequest):
+    """The ticked rows, and which way they are going."""
+    parked: bool = True
+
+
+class BulkParkAllRequest(BulkTrashAllRequest):
+    """Everything matching the list selector, and which way it is going."""
+    parked: bool = True
+
+
+def _parked_reply(changed: int, op_id: str, parked: bool) -> dict:
+    """What the browser is told, ``op_kind`` included. The Recent actions panel
+    puts its row up from this answer before the server's own list arrives, and
+    a path cannot say which way a bulk request went (app.undo.js::record)."""
+    return {"ok": True, "moved": changed, "op_id": op_id, "parked": parked,
+            "op_kind": mailops.PARK if parked else mailops.UNPARK}
+
+
+@router.post("/bulk/park")
+def bulk_park(req: BulkParkRequest, db: DBSession = Depends(get_db)):
+    """Park the ticked rows, or put them back in the inbox.
+
+    Conversations, like every bulk route. The rows are threads, and the whole
+    of each one goes, including a reply that arrived after the list was drawn.
+    Rows with nothing to change are passed over rather than failing the rest,
+    the same way bulk_trash passes over rows that have gone. Those are rows
+    already parked, or not in an inbox at all, which a selection in Flagged
+    can hold.
+    """
+    by_account: dict[int, tuple[set[str], set[int]]] = {}
+    for item in req.items:
+        threads, loose = by_account.setdefault(item.account_id, (set(), set()))
+        if item.thread_id:
+            threads.add(item.thread_id)
+        elif item.message_id:
+            loose.add(item.message_id)
+
+    op_id = undo.new_op_id()
+    changed = 0
+    for account_id, (threads, loose) in by_account.items():
+        match = []
+        if threads:
+            match.append(Message.thread_id.in_(threads))
+        if loose:
+            match.append(Message.id.in_(loose))
+        if not match:
+            continue
+        msgs = db.execute(
+            select(Message)
+            .where(Message.account_id == account_id, or_(*match))
+            .options(selectinload(Message.locations))
+        ).scalars().all()
+        changed += mailops.set_parked(db, msgs, req.parked, op_id)
+
+    db.commit()
+    if changed:
+        events.publish({"type": "present", "moved": changed})
+    return _parked_reply(changed, op_id, req.parked)
+
+
+@router.post("/bulk/park-all")
+def bulk_park_all(req: BulkParkAllRequest, db: DBSession = Depends(get_db)):
+    """Park everything an inbox list shows, or put everything in Parked back.
+
+    The first thing anybody does with a new Parked is clear a backlog, the
+    three hundred mails that have sat in the inbox for months being neither
+    work nor reminders. Ticking them a page at a time is not that, so this
+    takes the selector the list was built from, like bulk_trash_all.
+
+    Only the two selectors where the verb means something. Parking is about the
+    inbox, so it takes an inbox (one, or All Inboxes). Putting back is about
+    Parked, so it takes Parked. Anything else is refused rather than read
+    generously. "Park everything flagged" would reach into every folder, and
+    the inbox copies are only some of what that list shows.
+
+    Chunked and looped by the client like the other selector routes, although
+    each chunk is cheap. The work is a column on rows already in memory. The
+    reason is the queue rows the Recent actions panel is built from, one per
+    message, which for a twenty-thousand-message inbox is not one transaction.
+    Each chunk is its own operation, for the reason bulk_trash_all gives. The
+    selector only ever matches placements that still have to change, so a
+    chunk can never match again and the loop cannot fail to end.
+    """
+    q = select(MessageLocation).where(MessageLocation.deleted.is_(False))
+    if req.parked:
+        ids = _resolve_mailbox_ids(db, req.mailbox_id, req.scope)
+        inboxes = set(db.execute(
+            select(Mailbox.id).where(Mailbox.id.in_(ids), Mailbox.role == "inbox")
+        ).scalars().all()) if ids else set()
+        if not inboxes:
+            raise HTTPException(status_code=400,
+                                detail="Only mail in an inbox can be parked.")
+        q = q.where(MessageLocation.mailbox_id.in_(inboxes),
+                    MessageLocation.parked.is_(False))
+    else:
+        if req.scope != "parked":
+            raise HTTPException(status_code=400,
+                                detail="Only mail in Parked can be put back in the inbox.")
+        q = q.where(parked_out())
+    if req.unread_only:
+        q = q.where(MessageLocation.seen.is_(False))
+
+    remaining = db.scalar(select(func.count()).select_from(q.subquery())) or 0
+    locs = db.execute(q.limit(BULK_ALL_CHUNK)).scalars().all()
+    pks = {loc.message_pk for loc in locs}
+    msgs = db.execute(
+        select(Message).where(Message.id.in_(pks)).options(selectinload(Message.locations))
+    ).scalars().all() if pks else []
+
+    op_id = undo.new_op_id()
+    changed = mailops.set_parked(db, msgs, req.parked, op_id)
+    db.commit()
+    if changed:
+        events.publish({"type": "present", "moved": changed})
+    return {**_parked_reply(changed, op_id, req.parked), "done": remaining <= len(locs)}
 
 
 @router.post("/{message_id}/mark")
@@ -875,3 +1017,28 @@ def move(message_id: int, mailbox_id: int, source_mailbox_id: int | None = None,
         raise HTTPException(status_code=400, detail="Invalid target mailbox")
     # See _message_move for what leaving the source out means.
     return _message_move(db, msg, target, "move", source_mailbox_id)
+
+
+@router.post("/{message_id}/park")
+def park(message_id: int, parked: bool = True, db: DBSession = Depends(get_db)):
+    """Take this message's conversation off the inbox into Parked, or back again.
+
+    Named by a message rather than by a thread, like "remind me". The server
+    resolves the conversation (mailops.conversation_of), so one route serves a
+    threaded conversation and a message that never got threaded alike, and a
+    reply that landed after the reader was drawn goes with the rest.
+
+    A request that changes nothing is refused with the reason rather than
+    answered "ok". A move into the folder a message is already in follows the
+    same rule (mailops.already_there), for the same reason. A keypress that
+    silently did nothing reads as a keypress that is broken.
+    """
+    msg = _get_message(db, message_id)
+    msgs = mailops.conversation_of(db, msg)
+    op_id = undo.new_op_id()
+    changed = mailops.set_parked(db, msgs, parked, op_id)
+    if not changed:
+        raise mailops.not_parked(db, msgs, parked)
+    db.commit()
+    events.publish({"type": "present", "moved": changed})
+    return _parked_reply(changed, op_id, parked)

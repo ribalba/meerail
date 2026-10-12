@@ -301,6 +301,17 @@ App.api = {
     return this.del(`/api/messages/${id}/remind?restore=${restore ? 1 : 0}`);
   },
   reminders() { return this.get("/api/reminders"); },
+  // Parked. `parked` false is the way back to the inbox. The conversation is
+  // resolved by the server from the one message named, as "remind me" is. The
+  // bulk pair takes the ticked rows or the list selector, like Delete does.
+  // None of these reaches a mail server. See app/mailops.py, "parking".
+  park(id, parked) { return this.post(`/api/messages/${id}/park?parked=${parked ? 1 : 0}`); },
+  bulkPark(items, parked) {
+    return this.request("POST", "/api/messages/bulk/park", { items, parked });
+  },
+  bulkParkAll(selector, parked) {
+    return this.request("POST", "/api/messages/bulk/park-all", { ...selector, parked });
+  },
 
   // The two AI features (app/routers/ai.py). Every one of these is proxied by
   // the server: the provider key is never sent to the page, so there is no
@@ -421,6 +432,9 @@ const ICON_PATHS = {
   clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
   // A bell — "remind me", and the folder of mail waiting on one.
   bell: '<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>',
+  // A parking sign, the P in a rounded square. Parked, and the key that
+  // puts mail there.
+  parked: '<rect x="3" y="3" width="18" height="18" rx="3"/><path d="M9.5 17V7h3.5a3 3 0 0 1 0 6H9.5"/>',
   // Tray with an arrow into it — save the attachment you are looking at.
   download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',
   // Arrow leaving a box — hand the attachment to the browser's own viewer.
@@ -453,7 +467,7 @@ App.icon = function (name, size = 18, fill = false) {
 
 App.roleIcon = function (role) {
   return { inbox: "inbox", sent: "sent", drafts: "drafts", archive: "archive",
-    trash: "trash", junk: "junk", all: "all", flagged: "flag" }[role] || "folder";
+    trash: "trash", junk: "junk", all: "all", flagged: "flag", parked: "parked" }[role] || "folder";
 };
 
 // Where a message is filed, as chips: an icon for the folder's role and the
@@ -476,6 +490,11 @@ App.roleIcon = function (role) {
 // place a message is filed, which is the case where it is the answer: mail that
 // has been taken out of every folder and is now only in the archive of
 // everything.
+//
+// A parked inbox copy is drawn as Parked. The server still reports its role as
+// inbox, because that is where the mail is filed and other things read the
+// role. Only the chip says where the user put it. See folders_of in
+// app/routers/messages.py.
 App.folderChips = function (folders, accountId) {
   const all = folders || [];
   const filed = all.filter((f) => f.role !== "all");
@@ -483,12 +502,14 @@ App.folderChips = function (folders, accountId) {
   if (!list.length) return "";
   const boxes = (App.shell && App.shell.mailboxesFor(accountId)) || [];
   const path = (f) => {
+    if (f.parked) return "Parked";
     const mb = boxes.find((b) => b.id === f.mailbox_id);
     return (mb && (mb.path || mb.display_name)) || f.name;
   };
   const chips = list.slice(0, 2).map((f) =>
-    `<span class="folder-chip" title="In ${App.esc(path(f))}">${App.icon(App.roleIcon(f.role), 11)}` +
-    `<span class="fc-name">${App.esc(f.name)}</span></span>`).join("");
+    `<span class="folder-chip" title="In ${App.esc(path(f))}">` +
+    `${App.icon(App.roleIcon(f.parked ? "parked" : f.role), 11)}` +
+    `<span class="fc-name">${App.esc(f.parked ? "Parked" : f.name)}</span></span>`).join("");
   const rest = list.slice(2);
   return chips + (rest.length
     ? `<span class="folder-chip" title="Also in ${App.esc(rest.map(path).join(", "))}"

@@ -21,7 +21,7 @@ from ..mail.render import sanitize_html
 from .mailboxes import ROLE_ORDER
 from core.models import (
     Account, Attachment, Mailbox, Message, MessageLocation, Recipient, Reminder, Setting,
-    still_filed,
+    parked_out, still_filed,
 )
 
 router = APIRouter(prefix="/api", tags=["messages"], dependencies=[Depends(require_ui_auth)])
@@ -64,7 +64,7 @@ def _readable(db: DBSession, message_id: int) -> Message:
 
 
 def folders_of(placements) -> list[dict]:
-    """Where a message is filed, from ``(mailbox id, role, display name)`` triples.
+    """Where a message is filed, from ``(mailbox id, role, display name, parked)``.
 
     The chips the list and the reader draw over a message: which folder it is
     actually in, which is the one thing neither a search result nor a
@@ -75,10 +75,18 @@ def folders_of(placements) -> list[dict]:
     folders, so Inbox leads and a custom folder trails wherever the message
     turns up. The leaf name only: the full path is the browser's to add, out of
     the folder tree it already holds (see App.folderChips).
+
+    ``parked`` rides along rather than replacing the role. The mail really is
+    in INBOX (see MessageLocation.parked), and the browser reads the role to
+    decide things that parking does not change, such as where a move starts
+    from and whether Send & Archive applies. Only the chip says Parked instead.
+    A folder counts as parked only when every copy of the message in it is.
     """
     seen: dict[int, dict] = {}
-    for mailbox_id, role, name in placements:
-        seen[mailbox_id] = {"mailbox_id": mailbox_id, "role": role, "name": name}
+    for mailbox_id, role, name, parked in placements:
+        before = seen.get(mailbox_id)
+        seen[mailbox_id] = {"mailbox_id": mailbox_id, "role": role, "name": name,
+                            "parked": bool(parked) and (before is None or before["parked"])}
     return sorted(seen.values(),
                   key=lambda f: (ROLE_ORDER.get(f["role"], 8), f["name"].lower()))
 
@@ -99,7 +107,7 @@ def _thread_counts(db: DBSession, keys: set[tuple[int, str]]) -> dict[tuple[int,
 def list_messages(
     db: DBSession = Depends(get_db),
     mailbox_id: int | None = None,
-    scope: str | None = Query(None, description="unified_inbox | flagged"),
+    scope: str | None = Query(None, description="unified_inbox | flagged | reminders | parked"),
     unread_only: bool = False,
     # Bounded at both ends. A ceiling alone leaves the floor open, and a negative
     # limit is not a smaller page: SQLite reads it as "no limit at all" and
@@ -165,11 +173,21 @@ def list_messages(
                 select(Reminder.message_pk)
                 .where(Reminder.state == "pending", Reminder.thread_id.is_(None))),
         ))
+    elif scope == "parked":
+        # Inbox mail the user took off the inbox without filing it anywhere
+        # (app/mailops.py, "parking"). Every account's, like All Inboxes. It is
+        # one place to the person who put things there, not one per account.
+        j = j.where(parked_out())
     else:
         ids = _resolve_mailbox_ids(db, mailbox_id, scope)
         if not ids:
             return {"rows": [], "total": 0}
-        j = j.where(MessageLocation.mailbox_id.in_(ids))
+        # Parked mail is still filed in INBOX, and this is what keeps it out of
+        # the inbox lists. Applied to every folder rather than only to inboxes,
+        # because nothing outside an inbox is ever parked and elsewhere it is a
+        # test that is always true. A folder list that could hide mail without
+        # Parked showing it would be the one way to lose sight of some.
+        j = j.where(MessageLocation.mailbox_id.in_(ids), ~parked_out())
 
     if unread_only:
         j = j.where(MessageLocation.seen.is_(False))
@@ -377,8 +395,8 @@ def _message_detail(db: DBSession, msg: Message, load_remote: bool,
         # behind — a message filed into a folder made a minute ago must still
         # say where it is.
         "locations": folders_of(
-            (mb.id, mb.role, mb.display_name)
-            for mb in (db.get(Mailbox, l.mailbox_id) for l in locs)
+            (mb.id, mb.role, mb.display_name, l.parked)
+            for l, mb in ((l, db.get(Mailbox, l.mailbox_id)) for l in locs)
         ),
         "attachments": [
             {"id": a.id, "filename": a.filename, "content_type": a.content_type,

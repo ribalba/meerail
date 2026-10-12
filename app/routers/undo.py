@@ -4,6 +4,11 @@ What can be undone is deliberately narrow: the actions that file mail somewhere
 else — trash, archive, move, and the bulk versions of all three. See core/undo.py
 for why, and for the two payload keys everything here reads.
 
+Parking is listed beside them because it takes mail off the inbox like the
+others, but none of what follows is about it. No mail server ever heard of it,
+so it is undone by turning a mark back (_unpark) and has none of the states
+below.
+
 There are exactly three things that can happen when Undo is pressed, and which
 one it is depends only on how far the queued move has got:
 
@@ -390,6 +395,16 @@ def undo_operation(op_id: str, db: DBSession = Depends(get_db)):
                    "nothing left here to put back.")
     if all((a.payload or {}).get("undone_at") for a in actions):
         raise HTTPException(status_code=409, detail="This has already been undone.")
+    # Parking never reached a mail server, so none of what follows applies to
+    # it. There is no queued row to cancel, no applied move to reverse, and no
+    # UID that can have gone stale. It is a mark, and taking it back is turning
+    # it the other way. Kept out of the loop below rather than branched inside
+    # it, because one keypress is one kind of operation and the two never mix.
+    if all(a.type == "park" for a in actions):
+        restored = _unpark(db, actions)
+        db.commit()
+        events.publish({"type": "present", "moved": restored})
+        return {"ok": True, "restored": restored}
     if any(a.status in UNMATCHABLE for a in actions):
         raise HTTPException(
             status_code=400,
@@ -569,8 +584,48 @@ def _reverse(db: DBSession, action: PendingAction, touched: set[int], op_id: str
         if e.status_code == 409:
             raise HTTPException(status_code=409, detail=SYNCING) from e
         raise
+    # Mail archived out of Parked goes back to Parked, not to the inbox it was
+    # parked to stay out of. The placement just written is the optimistic one
+    # the reverse move left in the inbox, and the real one inherits the mark
+    # when the move lands (core/mail/store.py::_parked_here). A restore from
+    # the queue does the same thing through the snapshot itself (core/undo.py).
+    if any(snap.get("parked") and snap.get("mailbox_id") == home.id
+           for snap in payload.get("undo_from") or []):
+        for loc in msg.locations:
+            if loc.mailbox_id == home.id:
+                loc.parked = True
     _mark_undone(action, cancelled=False)
     return 1
+
+
+def _unpark(db: DBSession, actions: list[PendingAction]) -> int:
+    """Take back a park, or a putting-back. Returns how many messages turned.
+
+    Each row names the message, the inbox folders the keypress changed, and
+    which way it turned them (app/mailops.py::set_parked). This turns them the
+    other way. Asked of the placements as they are now rather than of anything
+    remembered, so a placement the sync has since replaced under a new UID is
+    still found, because it carries the mark with it (core/mail/store.py::
+    _parked_here). A message that has left the inbox since has nothing left to
+    turn and is passed over. Whatever filed it is the more recent instruction.
+    """
+    restored = 0
+    for action in actions:
+        payload = action.payload or {}
+        if payload.get("undone_at"):
+            continue                      # a retry finishing what a 409 interrupted
+        msg = db.get(Message, action.message_pk) if action.message_pk else None
+        if msg is not None:
+            was = bool(payload.get("parked"))
+            boxes = set(payload.get("mailbox_ids") or [])
+            turned = False
+            for loc in msg.locations:
+                if loc.mailbox_id in boxes and not loc.deleted and loc.parked == was:
+                    loc.parked = not was
+                    turned = True
+            restored += turned
+        _mark_undone(action, cancelled=False)
+    return restored
 
 
 def _home(db: DBSession, action: PendingAction, payload: dict) -> Mailbox | None:

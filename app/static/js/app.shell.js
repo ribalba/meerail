@@ -54,6 +54,24 @@ App.shell = (function () {
 
   function register(sel) { selections[sel.key] = sel; return sel; }
 
+  // What an empty Parked says in place of "No messages". The folder is new and
+  // exists in no other mail client, so the empty folder is where it has to
+  // explain itself. Built on demand because App.icon is only read at render.
+  function parkedEmpty() {
+    return `<div class="list-empty parked-empty">
+      <div class="pe-icon">${App.icon("parked", 28)}</div>
+      <p class="pe-title">Nothing parked</p>
+      <p>Parked is for mail you want out of your inbox that is neither a task nor
+        a reminder. A newsletter to read some day, a receipt to keep at hand, a
+        thread you were only copied on.</p>
+      <p>Press <kbd>p</kbd> on a conversation to park it here, and <kbd>p</kbd>
+        again to put it back in the inbox. When someone replies to a parked
+        conversation, it comes back to the inbox by itself.</p>
+      <p>Parked exists only in this meerail. Your mail server and your other mail
+        apps still show this mail in the inbox.</p>
+    </div>`;
+  }
+
   function renderSidebar() {
     const tree = $("#mailbox-tree");
     const activeKey = selection ? selection.key : null;
@@ -79,12 +97,35 @@ App.shell = (function () {
     register({ key: "reminders", title: "Reminders", showAccount: true,
                params: { scope: "reminders" } });
 
+    // Inbox mail taken off the inbox without being filed anywhere (see
+    // app/mailops.py, "parking"). One folder for every account, like All
+    // Inboxes, and always drawn, unlike the Outbox and Reminders. An empty
+    // Parked is not a state to hide, it is where the folder explains what it
+    // is for (`empty`, handed to App.list).
+    //
+    // Drawn directly under the inbox it is taken from. With several accounts
+    // that is All Inboxes. With one it is that account's Inbox in the tree
+    // below, which is the only inbox row there is.
+    register({ key: "parked", title: "Parked", showAccount: multi, parked: true,
+               params: { scope: "parked" }, empty: parkedEmpty() });
+    const parkedRow = () => mailboxRow(selections["parked"], "parked", "Parked",
+      sidebar.smart.parked_unread, activeKey);
+    let parkedDrawn = false;
+    const treeInbox = !multi && sidebar.accounts.some(
+      (a) => a.mailboxes.some((mb) => mb.role === "inbox"));
+
     let favs = "";
     if (multi) {
       register({ key: "unified", title: "All Inboxes", showAccount: true, ageTint: true,
                  params: { scope: "unified_inbox" } });
       favs += mailboxRow(selections["unified"], "inbox", "All Inboxes",
         sidebar.smart.unified_inbox_unread, activeKey);
+    }
+    // No inbox to sit under (one account that has not listed its folders yet),
+    // so it leads the list instead of going missing.
+    if (!treeInbox) {
+      favs += parkedRow();
+      parkedDrawn = true;
     }
     // Shown only when it has something to say, and first when it does. An empty
     // outbox is the normal state and a permanent row for it would be furniture;
@@ -148,6 +189,10 @@ App.shell = (function () {
                    role: mb.role, params: { mailbox_id: mb.id } });
         html += mailboxRow(selections[key], App.roleIcon(mb.role), mb.display_name, mb.unread,
           activeKey, { id: mb.id, on: mb.favorite }, "", mb.depth, acc.local ? mb.id : 0);
+        if (!parkedDrawn && mb.role === "inbox") {
+          html += parkedRow();
+          parkedDrawn = true;
+        }
       }
     }
     tree.innerHTML = html;
@@ -362,7 +407,7 @@ App.shell = (function () {
       if (request !== listRequest || selection !== selected
           || (App.search && App.search.isActive())) return;
       listTotal = data.total || 0;
-      App.list.render(data.rows, selected.showAccount, selected.ageTint);
+      App.list.render(data.rows, selected.showAccount, selected.ageTint, selected.empty);
       App.list.setMore(hasMore() ? loadMore : null);
     } catch (e) {
       if (request !== listRequest || selection !== selected) return;
@@ -471,6 +516,18 @@ App.shell = (function () {
   // rows, which are queries rather than folders. Read by app.bulk.js, which has
   // one button whose meaning depends on it.
   function currentRole() { return (selection && selection.role) || ""; }
+
+  // What Park means for the list on screen. "park" in an inbox list (one inbox,
+  // or All Inboxes), "unpark" in Parked, and "" anywhere else. A search counts
+  // as anywhere else, because its rows can come from any folder at all. The
+  // bulk bar offers the button from this, and the reader reads it to know
+  // whether a parked conversation leaves the list it was opened from.
+  function parkWay() {
+    if (!selection || (App.search && App.search.isActive())) return "";
+    if (selection.parked) return "unpark";
+    if (selection.key === "unified" || selection.role === "inbox") return "park";
+    return "";
+  }
 
   // The verb that belongs to the folder itself rather than to a selection.
   // Exactly one so far — Empty Trash — and it is drawn only where standing in
@@ -838,6 +895,7 @@ App.shell = (function () {
     if (kind === "flagged") return select(selections["flagged"]);
     if (kind === "outbox") return select(selections["outbox"]);
     if (kind === "reminders") return select(selections["reminders"]);
+    if (kind === "parked") return select(selections["parked"]);
     if (kind === "unified" && selections["unified"]) return select(selections["unified"]);
     if (!sidebar || !sidebar.accounts.length) return;
     const acc = sidebar.accounts[0];
@@ -948,7 +1006,8 @@ App.shell = (function () {
 
   return { boot, currentMailboxId, mailboxesFor, accounts, reloadList, goto,
            openSettings, closeSettings, settingsOpen,
-           closeFolder, folderOpen, listSelector, currentTitle, currentRole, paintPaneAction,
+           closeFolder, folderOpen, listSelector, currentTitle, currentRole, parkWay,
+           paintPaneAction,
            listTotal: () => listTotal,
            moveFolder, moveFolderAndOpen, openFocusedFolder, setFolderKeyFocus };
 })();

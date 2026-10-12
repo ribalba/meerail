@@ -9,7 +9,7 @@ from core.ingest import FOLDER_SEP
 from .. import events, mailops
 from ..deps import require_ui_auth
 from core.models import (
-    Account, Mailbox, MessageLocation, Outbound, PendingAction, Reminder, utcnow,
+    Account, Mailbox, MessageLocation, Outbound, PendingAction, Reminder, parked_out, utcnow,
 )
 
 router = APIRouter(prefix="/api/mailboxes", tags=["mailboxes"], dependencies=[Depends(require_ui_auth)])
@@ -93,6 +93,26 @@ def list_mailboxes(db: DBSession = Depends(get_db)):
     ).all():
         counts[mid] = (int(total), int(unread))
 
+    # The share of each inbox that Parked holds instead (core/models.py::
+    # parked_out). Asked separately and taken off the totals above rather than
+    # folded into that query as a filter. This one reads the handful of parked
+    # rows through their own partial index, and the query above is the hot one
+    # that every refresh of every tab pays for. Summed, it is Parked's own row.
+    parked: dict[int, tuple[int, int]] = {}
+    for mid, total, unread in db.execute(
+        select(
+            MessageLocation.mailbox_id,
+            func.count(),
+            func.count().filter(MessageLocation.seen.is_(False)),
+        )
+        .where(MessageLocation.deleted.is_(False), parked_out())
+        .group_by(MessageLocation.mailbox_id)
+    ).all():
+        parked[mid] = (int(total), int(unread))
+    for mid, (p_total, p_unread) in parked.items():
+        total, unread = counts.get(mid, (0, 0))
+        counts[mid] = (max(0, total - p_total), max(0, unread - p_unread))
+
     # Messages, not placements: the Flagged list is a list of flagged mail (see
     # app/routers/messages.py::list_messages), and on a label server one such
     # mail is filed in two or three folders at once. Counting the placements
@@ -159,7 +179,11 @@ def list_mailboxes(db: DBSession = Depends(get_db)):
                   "outbox_unsent": int(outbox_unsent or 0),
                   "outbox_failing": int(outbox_failing or 0),
                   "reminders_pending": int(reminders_pending or 0),
-                  "reminders_overdue": int(reminders_overdue or 0)},
+                  "reminders_overdue": int(reminders_overdue or 0),
+                  # Placements, like every folder count here, so the badge on
+                  # Parked counts what the inbox badge stopped counting.
+                  "parked_total": sum(t for t, _ in parked.values()),
+                  "parked_unread": sum(u for _, u in parked.values())},
     }
 
 

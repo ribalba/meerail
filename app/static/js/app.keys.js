@@ -121,9 +121,13 @@ App.keys = (function () {
         // A whole message per press. PgUp/PgDn jump to the ends of a thread and
         // Space pages through it; in a conversation of thirty replies neither
         // is a way to get to the next message, which is what these two are for.
+        //
+        // Back is Shift+N, the way a pager reads "the other way". It used to
+        // be p, and p is Park now (below). Shift reaches the table as the
+        // capital letter, so no special case is needed for it.
         { keys: ["n"], show: "n", label: "Next message in thread",
           run: (e) => App.reader.scrollMsg(1, e.repeat) },
-        { keys: ["p"], show: "p", label: "Previous message in thread",
+        { keys: ["N"], show: "⇧ N", label: "Previous message in thread",
           run: (e) => App.reader.scrollMsg(-1, e.repeat) },
         // Display-only, and handled ahead of the table in handle() like the
         // other modified keys: the same jump for hands that reach for a paging
@@ -151,6 +155,8 @@ App.keys = (function () {
         // being able to ask when the answer is nothing.
         { chord: ["g", "r"], show: "g r", label: "Go to Reminders",
           run: () => App.shell.goto("reminders") },
+        { chord: ["g", "p"], show: "g p", label: "Go to Parked",
+          run: () => App.shell.goto("parked") },
       ],
     },
     {
@@ -168,6 +174,13 @@ App.keys = (function () {
           run: () => App.reader.action("move") },
         { keys: ["b"], show: "b", label: "Remind me later…",
           run: () => App.reader.action("remind") },
+        // A toggle. In the inbox it parks the conversation, in Parked it puts
+        // it back. With rows ticked it acts on those rather than on the open
+        // thread, the same rule Delete follows. A ticked list where the bar
+        // offers no Park (a search, Archive) leaves the key alone instead of
+        // reaching past the selection to the thread behind it.
+        { keys: ["p"], show: "p", label: "Park / back to inbox",
+          run: () => (App.bulk.isActive() ? App.bulk.park() : App.reader.action("park")) },
         // Backspace too: the Mac "delete" key reports Backspace, not Delete.
         // With rows ticked this deletes the selection rather than the open
         // thread — that is the whole point of having ticked them.

@@ -97,10 +97,21 @@ App.bulk = (function () {
            ${App.icon("trash", 14)} ${busy ? "Deleting…" : "Delete permanently"}</button>`
       : "";
 
+    // Park in an inbox list, Back to Inbox in Parked, and nothing anywhere
+    // else. A selection in Archive or a search can hold no inbox mail at all,
+    // and a button that mostly answers with a refusal is not offered.
+    const way = App.shell.parkWay();
+    const parkBtn = way
+      ? `<button class="bulk-btn" type="button" data-act="park" ${busy ? "disabled" : ""}>
+           ${App.icon(way === "park" ? "parked" : "inbox", 14)}
+           ${way === "park" ? "Park" : "Back to Inbox"}</button>`
+      : "";
+
     el.innerHTML = `
       <span class="bulk-count">${label}</span>
       ${escalate}
       <span class="bulk-spacer"></span>
+      ${parkBtn}
       ${move}
       <button class="bulk-btn danger" type="button" data-act="trash" ${busy ? "disabled" : ""}>
         ${App.icon("trash", 14)} ${busy ? "Deleting…" : verb}</button>
@@ -170,9 +181,15 @@ App.bulk = (function () {
   // already in. Excluding the current folder is not tidiness — a move into the
   // folder the mail is already in is refused by the server, and offering it is
   // offering an error.
+  //
+  // In Parked the inbox is left out as well. Parked mail is already filed in
+  // the inbox, so a move there has nothing to move, and Back to Inbox beside
+  // this button is the verb that does what it would have meant.
   function moveTargets(accountId) {
     const here = App.shell.currentMailboxId();
-    return App.shell.mailboxesFor(accountId).filter((mb) => mb.id !== here);
+    const parked = App.shell.parkWay() === "unpark";
+    return App.shell.mailboxesFor(accountId)
+      .filter((mb) => mb.id !== here && !(parked && mb.role === "inbox"));
   }
 
   let menu = null;
@@ -276,6 +293,69 @@ App.bulk = (function () {
       App.list.clearSelection();
     } catch (e) {
       alert("Could not move: " + e.message);
+    } finally {
+      busy = false;
+      render();
+      await App.shell.reloadList();
+    }
+  }
+
+  // --- Park ---
+
+  // The ticked rows, in one request. Conversations, like every bulk verb.
+  async function parkSelected(parked) {
+    const items = App.list.selection().map((r) => ({
+      account_id: r.account_id, thread_id: r.thread_id || null,
+      message_id: r.thread_id ? null : r.id,
+    }));
+    if (!items.length) return 0;
+    const res = await App.api.bulkPark(items, parked);
+    return res.moved || 0;
+  }
+
+  // Everything the list selector matches, a chunk per call, looped exactly
+  // like moveFolder(). Clearing a backlog out of the inbox is what this is for.
+  async function parkFolder(parked) {
+    const selector = App.shell.listSelector();
+    if (!selector) return 0;
+    let done = false;
+    let moved = 0;
+    while (!done) {
+      const res = await App.api.bulkParkAll(selector, parked);
+      moved += res.moved || 0;
+      done = res.done;
+      if (res.moved === 0) break;   // nothing shifted, so stop rather than spin
+    }
+    return moved;
+  }
+
+  // The button, and the p key while rows are ticked. Answers false, at once
+  // rather than through a promise, where the bar offers no Park, so the key is
+  // left to the browser rather than spent.
+  function park() {
+    const way = App.shell.parkWay();
+    if (busy || !way || !scope()) return false;
+    runPark(way === "park");
+    return true;
+  }
+
+  async function runPark(parked) {
+    // Only the folder-wide version asks, on the same rule as Move. A ticked
+    // handful is on screen, and the pages nobody has looked at are not.
+    if (folderMode && !confirm(
+      `${parked ? "Park" : "Put back"} all ${plural(scope(), "conversation", "conversations")} ` +
+      `in ${App.shell.currentTitle()}${parked ? "" : " into the inbox"}?` +
+      `\n\nThis includes messages not currently on screen.`)) return;
+
+    busy = true;
+    render();
+    try {
+      if (folderMode) await parkFolder(parked);
+      else await parkSelected(parked);
+      folderMode = false;
+      App.list.clearSelection();
+    } catch (e) {
+      alert(`Could not ${parked ? "park" : "put back"}: ` + e.message);
     } finally {
       busy = false;
       render();
@@ -538,12 +618,13 @@ App.bulk = (function () {
       else if (btn.dataset.act === "all") escalate();
       else if (btn.dataset.act === "trash") trash();
       else if (btn.dataset.act === "purge") purge();
+      else if (btn.dataset.act === "park") park();
       else if (btn.dataset.act === "move") openMenu(btn);
     });
     render();
   }
 
-  return { init, sync, selectAllLoaded, clear, trash, purge, emptyOpenFolder,
+  return { init, sync, selectAllLoaded, clear, trash, purge, park, emptyOpenFolder,
            // Whether Shift+Delete has anything to do — the keyboard's version of
            // the button only existing on imported mail. See app.keys.js.
            canPurge: () => importedOnly() && !inTrash(),

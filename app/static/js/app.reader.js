@@ -313,6 +313,10 @@ App.reader = (function () {
     { act: "archive", icon: "archive", title: "Archive" },
     { act: "trash", icon: "trash", title: "Delete" },
     { act: "move", icon: "move", title: "Move to folder" },
+    // Takes the conversation off the inbox like a filing verb, without filing
+    // it anywhere a mail server would know about. The title and the lit state
+    // follow which way it would go (see parkWay).
+    { act: "park", icon: "parked", title: "Park" },
     // Beside the filing verbs because it is one: "remind me" files the
     // conversation away too, and differs only in coming back by itself.
     { act: "remind", icon: "bell", title: "Remind me later" },
@@ -482,17 +486,25 @@ App.reader = (function () {
     // or a redraw mid-search would take the caret out of it.
     const acts = document.getElementById("reader-actions");
     const m = targetMsg();
+    const way = parkWay();
     acts.innerHTML = BAR_BUTTONS.filter(
       (b) => (!b.tasks || tasksOn()) && (!b.ai || aiOn())
     ).map((b) => {
       if (b.sep) return `<span class="tb-sep"></span>`;
       const flagged = b.act === "flag" && m && m.flagged;
-      const off = b.act !== "new" && !m;
+      // Lit while the conversation is in Parked, like Flag while it is flagged.
+      // Not filled, though. A filled square would swallow the P.
+      const parked = b.act === "park" && way === "unpark";
+      // Park has nothing to act on when no part of the conversation is in an
+      // inbox (Archive, Sent), and a button that can only answer with a refusal
+      // is greyed out instead.
+      const off = (b.act !== "new" && !m) || (b.act === "park" && !way);
       // Delete is a different verb in Trash — there is nowhere left to file the
       // conversation, so the button destroys it — and the tooltip is where that
       // has to be said before the click rather than after it.
-      const title = b.act === "trash" && inTrash() ? "Delete forever" : b.title;
-      return `<button class="tb-btn${flagged ? " on" : ""}" data-act="${b.act}"
+      const title = b.act === "trash" && inTrash() ? "Delete forever"
+        : parked ? "Back to Inbox" : b.title;
+      return `<button class="tb-btn${flagged || parked ? " on" : ""}" data-act="${b.act}"
         title="${title}" aria-label="${title}"${off ? " disabled" : ""}
         >${App.icon(b.icon, 18, !!flagged)}</button>`;
     }).join("");
@@ -960,6 +972,61 @@ App.reader = (function () {
     finishRemove(going, App.api.bulkPurge(items), !!one);
   }
 
+  // --- Parked -------------------------------------------------------------
+  // Which way Park goes for the conversation on screen. "park" while any of it
+  // sits in an inbox unparked, "unpark" while every inbox copy of it is in
+  // Parked, and "" when none of it is in an inbox at all, so there is nothing
+  // to park. Read off the same marks the server lists by. One unparked inbox
+  // copy (a reply that has just arrived) is the conversation back in the inbox
+  // as a whole. See parked_out in core/models.py.
+  function parkWay() {
+    const msgs = currentThread ? currentThread.messages : [];
+    let inbox = false;
+    let waiting = false;
+    for (const m of msgs) {
+      for (const l of m.locations || []) {
+        if (l.role !== "inbox") continue;
+        inbox = true;
+        if (!l.parked) waiting = true;
+      }
+    }
+    return !inbox ? "" : waiting ? "park" : "unpark";
+  }
+
+  // One call for the conversation, named by its newest message. The server
+  // resolves the thread itself, so a reply that landed after this pane was
+  // drawn goes with it.
+  //
+  // Out of the list it was opened from when that list is the inbox and the
+  // conversation is being parked, or Parked and it is being put back. There it
+  // goes the way an archive does, before the server answers (finishRemove).
+  // Anywhere else (Flagged, a search, the other way round in an inbox) the
+  // row stays where it is, so the pane is redrawn from the server's answer
+  // instead, the way taking a reminder back is.
+  async function parkThread() {
+    const way = parkWay();
+    if (!way) return;
+    const msgs = currentThread.messages;
+    const target = msgs[msgs.length - 1];
+    const call = App.api.park(target.id, way === "park");
+    if (App.shell && App.shell.parkWay() === way) return finishRemove(msgs.slice(), call);
+    const threadId = currentThread.thread_id;
+    const accountId = msgs[0].account_id;
+    try {
+      await call;
+    } catch (e) {
+      return alert(e.message || "Could not park this conversation");
+    }
+    if (threadId) await openThread(threadId, accountId, target.id);
+    else {
+      for (const m of msgs) {
+        for (const l of m.locations || []) if (l.role === "inbox") l.parked = way === "park";
+      }
+      rerender();
+    }
+    if (App.shell) App.shell.reloadList();
+  }
+
   // --- "Remind me" --------------------------------------------------------
   // One call for the conversation, like archive: the server files every message
   // of the thread and every folder each of them sits in, so a reply that landed
@@ -1071,6 +1138,7 @@ App.reader = (function () {
       if (act === "more") return anchor && openOverflowMenu(m, anchor, one);
       if (act === "move") return anchor && openMoveMenu(m, anchor, one);
       if (act === "remind") return anchor && App.reminders.open(m, anchor);
+      if (act === "park") return parkThread();
       if (act === "task") return App.tasks.open(m);
       if (act === "ai") return App.ai.openThread(m);
       if (act === "reply") return App.compose.openReply(m.id, "reply");

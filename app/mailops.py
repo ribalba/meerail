@@ -40,7 +40,7 @@ from __future__ import annotations
 
 from fastapi import HTTPException
 from sqlalchemy import delete, select
-from sqlalchemy.orm import Session as DBSession
+from sqlalchemy.orm import Session as DBSession, selectinload
 
 from core import undo
 from core.events import publish_command
@@ -706,6 +706,116 @@ def move_to(db: DBSession, msg: Message, source_mailbox_id: int, target: Mailbox
         if target is not None:
             touched.add(target.id)
     return True
+
+
+# --- parking ------------------------------------------------------------------
+#
+# Parked is the third folder this app keeps that no mail server has, beside the
+# Outbox and Reminders. It holds mail that is not a task and not a reminder, and
+# that the user wants off the inbox all the same. Parking files nothing. The
+# placements stay in INBOX with their UIDs and flags, and what changes is a mark
+# on them (MessageLocation.parked). The inbox lists leave marked placements out
+# and the Parked list shows them, see core/models.py::parked_out. So there is no
+# queued move, no agent, no gap between the keypress and the server agreeing,
+# and none of the refusals the rest of this module is made of. The whole
+# operation is this transaction.
+#
+# The price is that only this install knows. Another client, or meerail on a
+# second machine, still shows the mail in the inbox. That is the trade the
+# feature was asked for, and it is also what makes it safe. The one thing
+# parking cannot do is lose a message, because it never touches one.
+
+# What the panel and the refusals call the two directions.
+PARK, UNPARK = "park", "unpark"
+
+
+def conversation_of(db: DBSession, msg: Message) -> list[Message]:
+    """Every message of this one's conversation, locations loaded.
+
+    Parking acts on the conversation for the reason archive does
+    (actions._thread_move). Mail arrives as a thread, and a conversation half
+    parked is a conversation still in the inbox. Resolved here rather than in
+    the browser so a reply ingested since the reader was drawn goes with it.
+    """
+    if not msg.thread_id:
+        return [msg]
+    return list(db.execute(
+        select(Message)
+        .where(Message.account_id == msg.account_id, Message.thread_id == msg.thread_id)
+        .options(selectinload(Message.locations))
+    ).scalars().all())
+
+
+def inbox_ids(db: DBSession, account_ids: set[int]) -> set[int]:
+    """These accounts' inbox folders, the only folders anything is parked out of."""
+    if not account_ids:
+        return set()
+    return set(db.execute(
+        select(Mailbox.id).where(Mailbox.account_id.in_(account_ids), Mailbox.role == "inbox")
+    ).scalars().all())
+
+
+def set_parked(db: DBSession, msgs: list[Message], parked: bool,
+               op_id: str | None = None) -> int:
+    """Park these messages, or bring them back to the inbox. Returns how many changed.
+
+    Every live inbox placement of each message, including one a queued move
+    has only just written (store.place_pending). The mark rides on it, and the
+    real placement inherits it when the move lands (store._parked_here).
+    Placements in any other folder are left alone. A Proton label or \\All is
+    not the inbox, and parking says nothing about it.
+
+    Messages, not placements, is what comes back, for the reason move_messages
+    counts that way. The number is read by a person.
+
+    With an ``op_id`` each message that changed gets a queue row written
+    already "done". It is a record of the keypress and never an instruction, so
+    the agent passes over it (agent/actions.py::_claimable) and the Recent
+    actions panel lists it beside the moves (core/undo.py::LOGGED_TYPES). Undo
+    reads back which folders it touched and turns the mark the other way.
+
+    Not committed here, and there is nothing to recount. The folder totals the
+    agent keeps (recompute_counts) are the server's view of INBOX, which has
+    not changed.
+    """
+    inboxes = inbox_ids(db, {m.account_id for m in msgs})
+    changed = 0
+    for msg in msgs:
+        flipped = set()
+        for loc in msg.locations:
+            if loc.mailbox_id in inboxes and not loc.deleted and loc.parked != parked:
+                loc.parked = parked
+                flipped.add(loc.mailbox_id)
+        if not flipped:
+            continue
+        changed += 1
+        if op_id is not None:
+            enqueue(db, msg.account_id, msg.id, "park",
+                    {**undo.fields(op_id, PARK if parked else UNPARK, None),
+                     "parked": parked, "mailbox_ids": sorted(flipped)},
+                    status="done")
+    return changed
+
+
+def not_parked(db: DBSession, msgs: list[Message], parked: bool) -> HTTPException:
+    """The refusal for a park (or unpark) that changed nothing.
+
+    Two different reasons, and the sentence has to say which. A conversation
+    already where it was asked to go is a keypress that did its job some time
+    ago. That is a 409, like a move into the folder a message is already in
+    (already_there). One that is not in an inbox at all is a request this
+    cannot carry out, so it is a 400. Parked holds inbox mail, and moving
+    archived mail back into the inbox on the server only to hide it again here
+    is not what anybody pressing P meant.
+    """
+    if not parked:
+        return HTTPException(status_code=409, detail="This is not in Parked.")
+    inboxes = inbox_ids(db, {m.account_id for m in msgs})
+    if any(loc.mailbox_id in inboxes and not loc.deleted for m in msgs for loc in m.locations):
+        return HTTPException(status_code=409, detail="This is already in Parked.")
+    return HTTPException(
+        status_code=400,
+        detail="Only mail in an inbox can be parked, and this conversation is not in one.")
 
 
 # --- destroying mail that exists nowhere else ---------------------------------

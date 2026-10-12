@@ -448,6 +448,19 @@ body.resizing { cursor: col-resize; user-select: none; }
 }
 .list-empty, .reader-empty { color: var(--text-faint); text-align: center; padding: 3rem 1rem;
   font-size: .9rem; }
+/* An empty Parked explains what the folder is for (app.shell.js::parkedEmpty).
+   Three short paragraphs rather than a line, so they are set as prose. Still
+   centred as a block, but left-aligned and in the readable grey, because faint
+   centred text over several lines is hard to read. */
+.parked-empty { max-width: 26rem; margin: 0 auto; text-align: left; color: var(--text-muted);
+  line-height: 1.45; }
+.parked-empty p { margin: 0 0 .7rem; }
+.parked-empty .pe-icon { display: flex; justify-content: center; color: var(--text-faint);
+  margin-bottom: .5rem; }
+.parked-empty .pe-title { text-align: center; color: var(--text); font-weight: 600; }
+.parked-empty kbd { font-family: var(--font); font-size: .78rem; color: var(--text);
+  background: var(--bg); border: 1px solid var(--border-strong); border-bottom-width: 2px;
+  border-radius: 5px; padding: 0 .3rem; }
 .list-more { display: block; width: calc(100% - 1.5rem); margin: .5rem auto 1rem;
   padding: .5rem; background: none; border: 1px solid var(--border); border-radius: 6px;
   color: var(--text-muted); font: inherit; font-size: .85rem; cursor: pointer; }

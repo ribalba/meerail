@@ -19,6 +19,9 @@ App.list = (function () {
   let selected = new Set();  // row ids ticked for a bulk action
   let anchorId = null;       // where the last plain tick landed, for shift-range
   let moreFn = null;         // caller's "fetch the next page" hook, or null at the end
+  let emptyHtml = null;      // what this list says when it is empty, see render()
+
+  const NO_MESSAGES = `<div class="list-empty">No messages</div>`;
 
   // --- Age tint ---
   // How many days of age take a row from untinted to fully red. 0 turns the
@@ -307,8 +310,14 @@ App.list = (function () {
   // your inbox unanswered", so it is asked for by the inbox views and left off
   // everywhere else (Sent, Archive, Flagged, search results), where an old
   // message is just an old message.
-  function render(data, showAccount, ageTint = false) {
+  //
+  // `empty` is the caller's too. A folder that only means something once you
+  // know what it is for (Parked) says so in place of "No messages". It is kept
+  // for drop(), which empties the same list one filed row at a time, and every
+  // render without one goes back to the plain sentence.
+  function render(data, showAccount, ageTint = false, empty = null) {
     tintOn = !!ageTint;
+    emptyHtml = empty;
     // Remember where the cursor sat so a refresh (or an archive that drops the
     // focused row) leaves it on the same spot rather than snapping to the top.
     const prevIdx = focusIndex();
@@ -316,7 +325,7 @@ App.list = (function () {
     host.innerHTML = "";
     rows = [];
     if (!data.length) {
-      host.innerHTML = `<div class="list-empty">No messages</div>`;
+      host.innerHTML = emptyHtml || NO_MESSAGES;
       focusId = null;
       selected.clear();
       anchorId = null;
@@ -367,7 +376,7 @@ App.list = (function () {
     if (anchorId !== null && !rows.some((r) => r.id === anchorId)) anchorId = null;
     changed();
     if (!rows.length) {
-      document.getElementById("message-list").innerHTML = `<div class="list-empty">No messages</div>`;
+      document.getElementById("message-list").innerHTML = emptyHtml || NO_MESSAGES;
       focusId = null;
       if (App.reader && !App.reader.isOpen()) App.reader.renderEmpty();
     } else if (focusId !== null && !rows.some((r) => r.id === focusId)) {
@@ -380,6 +389,7 @@ App.list = (function () {
     activeId = null; focusId = null; rows = [];
     selected.clear(); anchorId = null;
     moreFn = null;
+    emptyHtml = null;
     changed();
   }
 
