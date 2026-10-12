@@ -641,7 +641,11 @@ mark.hit.hit-on { background: #ff8a3d; box-shadow: 0 0 0 2px #ff8a3d; }
   /* So a row that has not been measured yet cannot push the pane into a
      horizontal scroll, and so scrollWidth means "what this needs" — which is
      what app.reader.js::measureToolbar reads. */
-  overflow: hidden; }
+  overflow: hidden;
+  /* Buttons, not text. Ctrl+A selects the whole card (app.reader.js::selectAll),
+     and labels lit up between the sender and the body read as part of what a
+     copy takes, which they are not. */
+  user-select: none; }
 /* The shared hover tint is this strip's own background — invert it here. */
 .msg-toolbar .tb-btn:hover:not(:disabled) { background: var(--bg); }
 /* Buttons keep their size instead of shrinking. The default flex-shrink was
@@ -764,6 +768,10 @@ mark.hit.hit-on { background: #ff8a3d; box-shadow: 0 0 0 2px #ff8a3d; }
    measured — see fitFrame() in app.reader.js. transform-origin has to be the
    top-left or a scaled-down body drifts away from the header above it. */
 .msg-body-frame { width: 100%; border: none; display: block; transform-origin: top left; }
+/* Ctrl+A selects the card a frame sits in, and Chrome washes a selected frame
+   over in grey, the way it does an image. The mail inside shows a selection of
+   its own, so all the wash adds is a white page turned grey. */
+.msg-body-frame::selection { background: transparent; }
 .msg-body-text { padding: .9rem 1.1rem 1.1rem; white-space: pre-wrap; word-wrap: break-word;
   font-size: .9rem; line-height: 1.5; }
 

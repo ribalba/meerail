@@ -242,7 +242,8 @@ App.keys = (function () {
         { show: "⌘/Ctrl F", label: "Find in thread" },
         { show: "⌘/Ctrl ↵", label: "Send message" },
         // Handled ahead of the table in handle() — modified keys never reach it.
-        { show: "⌘/Ctrl A", label: "Select all in list" },
+        // Which of the three depends on the pane, and on pressing it twice.
+        { show: "⌘/Ctrl A", label: "Select list / mail / thread" },
         // Escape is listed under Navigate — it steps back a pane once there is
         // nothing left to close, and one row for it is enough.
         { keys: ["?"], show: "?", label: "Toggle this box", run: () => toggleBox() },
@@ -380,8 +381,17 @@ App.keys = (function () {
     // Ctrl/Cmd+A over the list ticks every conversation on it. Only out here:
     // in the composer or the search box the browser's select-all-text is what
     // the key is for, and taking it would be maddening.
+    //
+    // With the keyboard on a conversation it selects the mail instead, the
+    // message you are on and then the whole thread on a second press. Ticking
+    // every row of the list from inside a message was never what anyone meant,
+    // and with Delete one key away it was a dangerous thing to leave lying there.
     if (mod && !e.altKey && (e.key === "a" || e.key === "A")) {
       if (isTyping(e.target) || isTyping(document.activeElement)) return;
+      if (current() === "reader") {
+        if (App.reader.selectAll()) e.preventDefault();
+        return;
+      }
       if (!App.bulk.selectAllLoaded()) return;         // empty list — let the browser have it
       e.preventDefault();
       return;

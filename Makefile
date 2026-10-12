@@ -1,7 +1,8 @@
 # meerail — convenience targets.
 #
-# Primary deploy is the Dockerized server; the agent runs natively next to
-# Proton Bridge. `make up` runs the whole app; `make agent` runs the connector.
+# Primary deploy is the Dockerized server. `make up` runs the whole app with the
+# agent in Docker on the host network (Linux). On macOS/Windows run the agent
+# natively next to Proton Bridge with `make agent`.
 
 COMPOSE ?= docker compose
 
@@ -42,8 +43,8 @@ BUILDER    ?= meerail
 
 help:
 	@echo "meerail targets:"
-	@echo "  make up      - build + run the full server stack (server + postgres + tika)"
-	@echo "  make down    - stop the stack"
+	@echo "  make up      - build + run the full stack detached (server + postgres + tika + agent, Linux only)"
+	@echo "  make down    - stop the stack, agent included"
 	@echo "  make logs    - tail server logs"
 	@echo "  make infra   - run only postgres + tika (for native server dev)"
 	@echo "  make dev     - run the server natively with --reload (needs 'make infra' + venv)"
@@ -71,11 +72,15 @@ help:
 	@echo "  make images      - build the three release images for this machine only"
 	@echo "  make images-push - build them for amd64+arm64 and push to Docker Hub"
 
+# The whole stack including the Dockerized agent, detached. This is the Linux
+# setup (the agent overlay needs host networking, see docker-compose.agent.yml).
+# `down` names the same files, or the agent container would be left behind as
+# an orphan of the project.
 up:
-	$(COMPOSE) up --build
+	$(COMPOSE) $(AGENT_FILES) up --build -d
 
 down:
-	$(COMPOSE) down
+	$(COMPOSE) $(AGENT_FILES) down
 
 logs:
 	$(COMPOSE) logs -f server

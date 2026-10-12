@@ -288,6 +288,12 @@ App.reader = (function () {
         // shortcuts would silently stop working. Forward them back out — this
         // reaches across only because the sandbox allows same-origin.
         if (App.keys) doc.addEventListener("keydown", App.keys.handle);
+        // Ctrl+A's selection reaches into every body (see selectAll), so a copy
+        // taken in here, and a click that starts a selection of its own, are its
+        // business too. A press in here takes the keyboard to the reader.
+        doc.addEventListener("copy", onCopy);
+        doc.addEventListener("selectionchange", onSelectionChange);
+        doc.addEventListener("pointerdown", onPress);
         // Same reach, for the reason mail needs it most: the link text in an
         // HTML body is the sender's to write, and the address behind it is not
         // visible anywhere else in the frame.
@@ -738,6 +744,190 @@ App.reader = (function () {
     if (keyFocus === state) return;
     keyFocus = state;
     renderBar();
+  }
+
+  // --- Select all (Ctrl/Cmd+A, from app.keys.js) ---
+  //
+  // The first press selects the message you are on, a second press the whole
+  // conversation. It used to tick every row on the list instead, which is what
+  // the key still does with the keyboard on the list. Here it is the mail you
+  // are looking at that you want, mostly to copy it out.
+  //
+  // A selection belongs to one document, and every HTML body is a document of
+  // its own, so no single range can hold a message, let alone a thread. Each
+  // document gets a range of its own, and they are remembered here. The
+  // browser's copy would still only take the part in the document that has the
+  // focus, which is the header without the body or the body without the header.
+  // So while the selection is still the one made here, a copy writes the text
+  // out itself, in the From/To/Date/Subject shape app/threadtext.py gives the AI.
+  let picked = null;    // { ids, ranges } of the last press, or null
+  // The message the mouse last went down in, by id so that folding a card (a
+  // redraw) does not lose it. Remembered rather than read off the caret, because
+  // a click inside a selection leaves no caret at all in Chrome. It clears the
+  // selection and puts nothing in its place.
+  let pressedMid = null;
+
+  function bodyFrames(wraps) {
+    const out = [];
+    for (const wrap of wraps) {
+      for (const frame of wrap.querySelectorAll(".msg-body-frame")) {
+        let doc = null;
+        // Same caution as markRoots(), since a frame mid-navigation throws.
+        try { doc = frame.contentDocument; } catch (_) { /* not ours to read */ }
+        if (doc && doc.body) out.push(doc);
+      }
+    }
+    return out;
+  }
+
+  // Compared by its boundaries rather than by asking whether anything is
+  // selected, because the question is whether you have changed it since.
+  function ours(entry) {
+    // A frame that has been redrawn since has no window, and so no selection.
+    const sel = entry.doc.defaultView ? entry.doc.getSelection() : null;
+    if (!sel || sel.rangeCount !== 1) return false;
+    const r = sel.getRangeAt(0);
+    return r.startContainer === entry.sc && r.startOffset === entry.so
+      && r.endContainer === entry.ec && r.endOffset === entry.eo;
+  }
+
+  function stillPicked() { return !!picked && picked.ranges.every(ours); }
+
+  // A click that starts a selection of your own only clears the document it
+  // lands in. The others would go on showing the rest of the thread selected,
+  // so they are taken down with it. Only where the range is still ours, so the
+  // selection you have just started is left alone.
+  function onSelectionChange() {
+    if (!picked || stillPicked()) return;
+    const was = picked;
+    picked = null;
+    for (const entry of was.ranges) if (ours(entry)) entry.doc.getSelection().removeAllRanges();
+  }
+
+  function onCopy(e) {
+    if (!stillPicked() || !e.clipboardData) return;
+    e.clipboardData.setData("text/plain", copyText(picked.ids));
+    e.preventDefault();
+  }
+
+  // A press inside the conversation takes the keyboard with it, the way a click
+  // on a row takes it to the list (see App.keys.focus). Without it a click into
+  // a mail left the arrows walking the list behind it, and Ctrl+A ticking every
+  // row on it rather than selecting the mail you had just clicked into.
+  //
+  // A press inside a body frame arrives on the frame's own document. The frame
+  // element is its place in this page, and so in a message.
+  function onPress(e) {
+    const doc = e.target.ownerDocument;
+    const el = doc === document ? e.target : doc.defaultView && doc.defaultView.frameElement;
+    const wrap = el && el.closest && el.closest(".thread-msg");
+    pressedMid = wrap ? wrap.dataset.mid : null;
+    if (currentThread && App.keys) App.keys.focus("reader");
+  }
+
+  function onScreen(el) {
+    const p = pane();
+    if (!p) return false;
+    const box = p.getBoundingClientRect();
+    const r = el.getBoundingClientRect();
+    return r.bottom > box.top + stuckTop() && r.top < box.bottom;
+  }
+
+  // Which message "the one you are on" is. The one you last clicked in, while
+  // it is still on screen. A click in one you have since scrolled away from is
+  // not where you are, and n/N and PgUp/PgDn forget it (see scrollMsg), since
+  // they say where you are going in so many words.
+  function msgAt() {
+    const msgs = rows();
+    if (!msgs.length) return null;
+    const pressed = msgs.find((el) => el.dataset.mid === pressedMid);
+    if (pressed && onScreen(pressed)) return pressed;
+    // Failing that, the message being read. That is the one at the top of the
+    // pane, on the same line scrollMsg() parks a header on. Scrolled to the end
+    // it is the newest one, even when that is too short to reach the top, which
+    // is how a conversation opens.
+    const p = pane();
+    if (p.scrollTop + p.clientHeight >= p.scrollHeight - 2) return msgs[msgs.length - 1];
+    const line = p.getBoundingClientRect().top + stuckTop() + 10;
+    return msgs.filter((el) => el.getBoundingClientRect().top <= line + 4).pop() || msgs[0];
+  }
+
+  // Answers false when there is no conversation, so the key goes back to the
+  // browser.
+  function selectAll() {
+    if (!currentThread) return false;
+    const all = rows();
+    if (!all.length) return false;
+    // A second press widens it to the thread, as long as the selection is still
+    // the one the first press made and you are still on that message. Having
+    // moved on to another one, n/N say, starts over there instead. A third press
+    // has nowhere wider to go and keeps the thread.
+    const here = msgAt();
+    const wide = stillPicked() && picked.ids.includes(here.dataset.mid);
+    const wraps = wide ? all : [here];
+    const ranges = [];
+    const put = (doc, r) => {
+      const sel = doc.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(r);
+      ranges.push({ doc, sc: r.startContainer, so: r.startOffset,
+                    ec: r.endContainer, eo: r.endOffset });
+    };
+    const top = document.createRange();
+    top.setStartBefore(wraps[0]);
+    top.setEndAfter(wraps[wraps.length - 1]);
+    put(document, top);
+    const inside = bodyFrames(wraps);
+    for (const doc of inside) {
+      const r = doc.createRange();
+      r.selectNodeContents(doc.body);
+      put(doc, r);
+    }
+    // Anything you had selected in another body by hand would otherwise stay lit
+    // beside the message this press picked, and read as part of it.
+    for (const doc of bodyFrames(all)) {
+      if (!inside.includes(doc)) doc.getSelection().removeAllRanges();
+    }
+    picked = { ids: wraps.map((w) => w.dataset.mid), ranges };
+    return true;
+  }
+
+  // What a copy of the selection writes. The body is the text as it is drawn
+  // where there is a frame to read it from. Everywhere else it is body_plain as
+  // the server sent it, which is the plain text the reader shows, kept with its
+  // quote markers rather than read back off the rendered markdown. A folded
+  // message has no body on screen and is copied whole all the same, because
+  // "the whole thread" means the mail, not what happens to be unfolded.
+  function bodyText(m) {
+    if (m.content_status && m.content_status !== "full") {
+      return "[the body of this message is not stored here]";
+    }
+    let text = "";
+    const wrap = document.querySelector(`#reader-content .thread-msg[data-mid="${m.id}"]`);
+    const frame = wrap && wrap.querySelector(".msg-body-frame");
+    if (frame) {
+      try { text = frame.contentDocument.body.innerText; } catch (_) { /* fall through */ }
+    }
+    if (!text.trim()) text = m.body_plain || "";
+    return text.trim() || "[no text content]";
+  }
+
+  function copyText(ids) {
+    const who = (name, address) => (name && address ? `${name} <${address}>` : address || name || "");
+    const msgs = currentThread.messages.filter((m) => ids.includes(String(m.id)));
+    return msgs.map((m, i) => {
+      const head = msgs.length > 1 ? [`--- Message ${i + 1} of ${msgs.length} ---`] : [];
+      head.push(`From: ${who(m.from_name, m.from_addr)}`);
+      for (const [kind, label] of [["to", "To"], ["cc", "Cc"]]) {
+        const list = (m.recipients[kind] || []).map((r) => who(r.name, r.address)).filter(Boolean);
+        if (list.length) head.push(`${label}: ${list.join(", ")}`);
+      }
+      if (m.date) head.push(`Date: ${App.fmtDateFull(m.date)}`);
+      head.push(`Subject: ${m.subject || "(no subject)"}`);
+      const files = (m.attachments || []).map((a) => a.filename).filter(Boolean);
+      if (files.length) head.push(`Attachments: ${files.join(", ")}`);
+      return head.join("\n") + "\n\n" + bodyText(m);
+    }).join("\n\n");
   }
 
   // Which folder placement a move acts on: the folder you are looking at, else
@@ -1541,6 +1731,8 @@ App.reader = (function () {
     renderId += 1;
     frames = 0;
     settled = false;
+    // Ctrl+A's ranges point into the messages and frames about to be replaced.
+    picked = null;
     renderBar();
     const host = document.getElementById("reader-content");
     const empty = document.getElementById("reader-empty");
@@ -1596,6 +1788,7 @@ App.reader = (function () {
     // Picked up where this conversation was left, counting the visits before
     // this one — not started over.
     viewed = loadViewed();
+    pressedMid = null;
     rerender(true);
     // clear() drops the ↑↓ marker along with the thread it belonged to, which
     // is right when the pane empties — but archiving from here empties it and
@@ -1615,6 +1808,7 @@ App.reader = (function () {
     marks = [];
     resetFind();
     viewed = new Set();
+    pressedMid = null;
     keyFocus = false;
     rerender();
   }
@@ -1647,6 +1841,7 @@ App.reader = (function () {
   function scrollEnd(dir) {
     const p = pane();
     if (!p) return false;
+    pressedMid = null;     // a jump says where you are now, see msgAt()
     p.scrollTo({ top: dir > 0 ? p.scrollHeight : 0, behavior: "smooth" });
     return true;
   }
@@ -1661,6 +1856,7 @@ App.reader = (function () {
   function scrollMsg(dir, held) {
     const p = pane();
     if (!p) return false;
+    pressedMid = null;     // a jump says where you are now, see msgAt()
     // The line scrollToMsg() parks a header on: the top of the pane, clear of
     // the sticky bars. A message sitting within a few pixels of it is the one
     // being read rather than one to jump to, which is what keeps a press going
@@ -1749,6 +1945,11 @@ App.reader = (function () {
   document.querySelector(".reading-pane")
     .addEventListener("scroll", updateEarlier, { passive: true });
 
+  // The page's half of what mountFrame() wires up in each body frame.
+  document.addEventListener("copy", onCopy);
+  document.addEventListener("selectionchange", onSelectionChange);
+  document.getElementById("reader-content").addEventListener("pointerdown", onPress);
+
   // The pane rather than the toolbars, for two reasons. The divider between the
   // list and the reader is draggable, so the width that decides this changes
   // without any message being re-rendered — and watching the pane means one
@@ -1774,6 +1975,8 @@ App.reader = (function () {
     // — which it has to be asked about, since the query can still be lit, or
     // the box still standing open on a phone, with the caret long gone from it.
     focusFind, clearFind, closeFind, findActive: () => !!findQ || findOpen,
+    // Ctrl/Cmd+A with the keyboard in this pane: the message, then the thread.
+    selectAll,
     // How many messages the open conversation holds — App.ai says so before it
     // sends any of them to a provider.
     threadSize: () => (currentThread ? (currentThread.messages || []).length : 0),
