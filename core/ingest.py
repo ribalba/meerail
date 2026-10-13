@@ -888,8 +888,20 @@ def delete_orphan_messages(db, account: Account, now=None, limit: int = 1000) ->
     """
     now = now or utcnow()
     placed = select(MessageLocation.id).where(MessageLocation.message_pk == Message.id).exists()
+    # A row the agent settled as stale is not on its way anywhere either, since
+    # its UID names nothing any more (agent/actions.py::_settle_stale). Counting
+    # it as queued for good kept every message whose move found it gone from the
+    # server (SourceGone) in the database forever, in no folder, with all its
+    # bytes. It is let go only once it is ORPHAN_GRACE old, though. A message the
+    # server still holds under its old UID is placed again by the reconcile
+    # sweep (agent/sync.py::_restore_unplaced), not by the folder walk, and the
+    # sweep only runs every few passes. The release waits for many of those.
+    # Refused rows always count, as before.
     queued = select(PendingAction.id).where(
-        PendingAction.message_pk == Message.id, PendingAction.status != "done").exists()
+        PendingAction.message_pk == Message.id,
+        PendingAction.status != "done",
+        ~((PendingAction.status == "stale")
+          & (PendingAction.updated_at < now - ORPHAN_GRACE))).exists()
     stale = db.execute(
         select(Message.id).where(
             Message.account_id == account.id,

@@ -644,6 +644,7 @@ def move_to(db: DBSession, msg: Message, source_mailbox_id: int, target: Mailbox
             _record_local_move(db, msg, source, target, op_id, op_kind, undo_from, loc)
         enqueue_action = False
 
+    left: set[int] = set()      # \All placements a delete for good takes with it
     if enqueue_action:
         if is_pending(loc):
             outcome = _retarget_pending(db, msg, target, loc, op_id, op_kind)
@@ -692,6 +693,7 @@ def move_to(db: DBSession, msg: Message, source_mailbox_id: int, target: Mailbox
             # than the one destructive operation being the only invisible one.
             enqueue(db, msg.account_id, msg.id, "delete",
                     {**uid_ref(source, loc), **undo.fields(op_id, "delete", None)})
+            left = _leave_everything(db, msg, loc)
 
     if target is not None:
         if local:
@@ -700,12 +702,48 @@ def move_to(db: DBSession, msg: Message, source_mailbox_id: int, target: Mailbox
             place_pending(db, msg, target.id, loc)
     db.delete(loc)
     if touched is None:
-        recompute(db, {source.id} | ({target.id} if target is not None else set()))
+        recompute(db, {source.id} | ({target.id} if target is not None else set()) | left)
     else:
         touched.add(source.id)
+        touched.update(left)
         if target is not None:
             touched.add(target.id)
     return True
+
+
+def _leave_everything(db: DBSession, msg: Message, deleting: MessageLocation) -> set[int]:
+    """Take a message that is being deleted for good out of \\All here as well.
+
+    Returns the folders it was taken out of, for the recount.
+
+    On a server where folders are labels, the copy in \\All is the same message
+    as the one in Trash, and deleting it for good takes it out of \\All on the
+    server too. Left in place here, it went on showing in All Mail until a
+    reconcile noticed, which on a large Trash is hours after Empty Trash, and
+    anything done to it there was aimed at a message the server was about to
+    destroy. On 2026-08-20 that is how 622 emptied messages were trashed a second
+    time from All Mail before the agent had applied the delete. The second move
+    found nothing left to move and the messages showed in Trash here for good
+    (see agent/actions.py::SourceGone).
+
+    Only \\All, and only when \\All is all that is left. On a plain IMAP server a
+    message filed in two real folders is two messages there, and deleting the
+    one in Trash leaves the other where it is. One row can stand for two server
+    messages in the same way (identical bytes in two folders, or under a
+    Dovecot virtual \\All), and then the \\All placement may be the other one's.
+    Should the delete never go through, the reconcile sweep puts the placement
+    back once the action stops counting as in flight (agent/sync.py
+    ::_restore_unplaced), because the server still lists it.
+    """
+    rest = [other for other in msg.locations
+            if other is not deleting and not is_pending(other)]
+    if any(not _is_everything(db, other.mailbox_id) for other in rest):
+        return set()
+    left: set[int] = set()
+    for other in rest:
+        left.add(other.mailbox_id)
+        db.delete(other)
+    return left
 
 
 # --- parking ------------------------------------------------------------------

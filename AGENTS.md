@@ -99,7 +99,7 @@ Any plain IMAP/SMTP account (Gmail, Fastmail, Dovecot) works the same way.
 | `app/grammar.py` | Grammar and spelling checks: the settings row, UTF-16 segment offsets, the LanguageTool client, and the privacy guard that refuses a public `grammar.url`. |
 | `app/static/` | The SPA: `index.html`, `css/mail.css`, `js/app.*.js`. |
 | `tests/` | The pytest suite: `conftest.py` (safety guard), `dbfixture.py` (seeding), `helpers.py` (HTTP). |
-| `tools/` | `import_mbox.py` (+ `import-mbox.sh`), plus four maintenance scripts that are dry-run unless given `--apply`: `file_sent.py`, `migrate_blobs.py`, `reparse_forwards.py`, `restore_pending.py`. |
+| `tools/` | `import_mbox.py` (+ `import-mbox.sh`), plus five maintenance scripts that are dry-run unless given `--apply`: `file_sent.py`, `migrate_blobs.py`, `repair_placements.py`, `reparse_forwards.py`, `restore_pending.py`. |
 | `journal/` | The standalone journal server. `app/journal.py` and `core/journal.py` are its client. |
 | `tika/` | Tika image. The reasoning behind `tika-config.json` lives in `tika/README.md`, because the JSON cannot hold comments. |
 | `electron/` | Desktop wrapper. `electron/main.js` is the real file; the root `main.js` is a byte-identical stray copy. |

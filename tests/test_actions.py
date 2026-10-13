@@ -440,6 +440,33 @@ def test_archive_falls_back_to_all_mail(account):
     assert [m for m in moves if m["payload"]["to_folder"] == "[Gmail]/All Mail"]
 
 
+def test_archiving_into_all_mail_writes_no_placeholder_beside_the_real_copy(account):
+    """Every Gmail inbox message is in All Mail already, so archiving one only
+    takes its INBOX label off. No new UID turns up in All Mail, nothing arrives
+    to retire a placeholder, and each archive used to leave one behind for good
+    beside the real placement."""
+    email, aid = account["email"], account["id"]
+    tok = "GMAILTOK" + uuid.uuid4().hex[:6]
+    mid = f"g-{uuid.uuid4().hex}@t"
+    dbfixture.ingest_raw_message(email, make_message(
+        f"<{mid}>", f"Subject {tok}", "x@y.com", email, f"{tok} body", T0), uid=1)
+    assert dbfixture.record_placement(email, mid, uid=40, folder="[Gmail]/All Mail",
+                                      role_hint="\\All") is True
+
+    _, r = api("GET", f"/api/search?q={tok}&account_id={aid}")
+    [row] = r["rows"]
+    code, body = api("POST", f"/api/messages/threads/{row['thread_id']}/archive"
+                             f"?account_id={aid}")
+    assert code == 200, body
+
+    assert [(p["imap_name"], p["imap_uid"]) for p in dbfixture.placements(email, row["id"])] \
+        == [("[Gmail]/All Mail", 40)]
+    # The server is still told: the INBOX label has to come off there too.
+    moves = [x for x in _actions(email) if x["type"] == "move"]
+    assert [(m["payload"]["from_folder"], m["payload"]["to_folder"]) for m in moves] \
+        == [("INBOX", "[Gmail]/All Mail")]
+
+
 def test_archive_prefers_a_folder_called_archive_over_all_mail(account):
     """The fallback above is for accounts with nowhere else to file, and this
     account has somewhere: a folder called Archive whose role was never recorded.
@@ -826,6 +853,47 @@ def test_empty_trash_says_what_it_could_not_delete_yet(account):
     assert api("GET", f"/api/messages/{mid}")[0] == 200
     assert not any(a["type"] == "delete" and a["message_pk"] == mid
                    for a in _actions(email))
+
+
+def test_emptying_trash_on_a_label_server_takes_the_mail_out_of_all_mail_too(account):
+    """On Proton the copy in All Mail is the message in Trash, and deleting it
+    for good takes it out of All Mail on the server as well. Left listed here,
+    it stayed in All Mail for the hours the agent took to work through a large
+    Trash, and 622 such messages were trashed a second time from there. Mail
+    filed somewhere real is a different matter, and stays where it is."""
+    email, aid = account["email"], account["id"]
+    tok = "EMPTIEDTOK" + uuid.uuid4().hex[:6]
+    gone, kept = (f"{p}-{uuid.uuid4().hex}@t" for p in ("gone", "kept"))
+    dbfixture.ingest_raw_message(email, make_message(
+        f"<{gone}>", f"Emptied {tok}", "x@y.com", email, "body", T0),
+        uid=7, folder="Trash", role_hint="\\Trash")
+    dbfixture.record_placement(email, gone, uid=70, folder="All Mail", role_hint="\\All")
+    dbfixture.ingest_raw_message(email, make_message(
+        f"<{kept}>", f"Bystander {tok}", "x@y.com", email, "body", T0), uid=3)
+    dbfixture.record_placement(email, kept, uid=71, folder="All Mail", role_hint="\\All")
+    # In Trash and in INBOX at once, which on a plain server is two messages.
+    # The All Mail placement may then be the other one's, and it stays.
+    both = f"both-{uuid.uuid4().hex}@t"
+    dbfixture.ingest_raw_message(email, make_message(
+        f"<{both}>", f"Twice {tok}", "x@y.com", email, "body", T0), uid=8,
+        folder="Trash", role_hint="\\Trash")
+    dbfixture.record_placement(email, both, uid=4, folder="INBOX")
+    dbfixture.record_placement(email, both, uid=72, folder="All Mail", role_hint="\\All")
+
+    code, body = api("POST", "/api/messages/bulk/empty-trash",
+                     {"mailbox_id": _trash_id(email), "confirm": True})
+    assert code == 200 and body["deleted"] == 2, body
+
+    _, found = api("GET", f"/api/search?q={tok}&account_id={aid}")
+    assert sorted(r["subject"] for r in found["rows"]) == [f"Bystander {tok}", f"Twice {tok}"]
+    twice = next(r for r in found["rows"] if r["subject"] == f"Twice {tok}")
+    _, detail = api("GET", f"/api/messages/{twice['id']}")
+    assert sorted(f["role"] for f in detail["locations"]) == ["all", "inbox"]
+    # One delete per Trash copy. Nothing is sent about All Mail, since the
+    # server takes a message out of there by itself.
+    deletes = [a for a in _actions(email) if a["type"] == "delete"]
+    assert sorted((d["payload"]["folder"], d["payload"]["uid"]) for d in deletes) \
+        == [("Trash", 7), ("Trash", 8)]
 
 
 def test_mail_deleted_for_good_stops_being_readable_at_once(account):

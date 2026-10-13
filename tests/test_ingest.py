@@ -255,6 +255,42 @@ def _seed_folder(email, folder, role_hint):
         uid=1, folder=folder, role_hint=role_hint)
 
 
+def test_mail_filed_under_its_bytes_is_found_by_them_once_the_id_is_free(account):
+    """The report "Meerail stellt emails doppelt dar": one mail, twice in Trash.
+
+    A draft and the mail it became share a Message-ID and differ in their
+    bytes, so the sent copy is filed under its hash while the draft holds the
+    id. Then the draft leaves Drafts and its row is collected. Ingest looked the
+    id up and nothing else, so the copy a later move landed was stored as a
+    second message, and the placement written ahead of the server, still
+    waiting on the first one, was never retired.
+    """
+    email, aid = account["email"], account["id"]
+    tok = "TWICETOK" + uuid.uuid4().hex[:6]
+    mid = f"<sent-{uuid.uuid4().hex}@t>"
+    draft = make_message(mid, f"Report {tok}", email, "friend@example.com",
+                         "half written", T0)
+    sent = make_message(mid, f"Report {tok}", email, "friend@example.com",
+                        "the finished text", T0)
+    dbfixture.ingest_raw_message(email, draft, uid=1, folder="Drafts", role_hint="\\Drafts")
+    dbfixture.ingest_raw_message(email, sent, uid=1, folder="Sent", role_hint="\\Sent")
+    dbfixture.set_present(email, "Drafts", [])          # sent, so the draft is gone
+
+    _seed_folder(email, "Trash", "\\Trash")
+    _, found = api("GET", f"/api/search?q={tok}&account_id={aid}")
+    [row] = found["rows"]
+    code, body = api("POST", f"/api/messages/{row['id']}/trash")
+    assert code == 200, body
+
+    # The move lands, and the next pass fetches the copy it made.
+    dbfixture.ingest_raw_message(email, sent, uid=2, folder="Trash", role_hint="\\Trash")
+
+    _, found = api("GET", f"/api/search?q={tok}&account_id={aid}")
+    assert [r["id"] for r in found["rows"]] == [row["id"]]
+    assert [(p["imap_name"], p["imap_uid"]) for p in dbfixture.placements(email, row["id"])] \
+        == [("Trash", 2)]
+
+
 class _Bridge:
     """The one thing _store_chunk asks a server for: raw messages, by UID.
 
@@ -817,6 +853,36 @@ def test_a_message_a_queued_action_still_names_is_not_collected(account):
 
     assert dbfixture.collect_orphans(email, after_hours=12) == 0
     assert dbfixture.message_count(email) == 1
+
+
+def test_a_message_whose_move_was_dropped_as_stale_is_collected_in_time(account):
+    """A stale row will never run (agent/actions.py::_settle_stale), so it is
+    not a message on its way anywhere. The move that finds its message already
+    gone from the server is settled that way, and as long as the row counted
+    as queued, the message stayed in the database for good, in no folder.
+
+    Not at once, though. A message the server still holds under its old UID is
+    placed again by the reconcile sweep, which only runs every few passes, and
+    until then it is unplaced here without being gone."""
+    from core.models import Message, PendingAction, utcnow
+
+    email = account["email"]
+    raw = make_message(f"<stale-{uuid.uuid4().hex}@t>", "Gone before it moved", "x@y.com",
+                       email, "body", T0)
+    dbfixture.ingest_raw_message(email, raw, uid=1)
+    dbfixture.queue_move_for(email, "Gone before it moved")
+    dbfixture.drop_placements(email, "INBOX")
+    assert dbfixture.settle_actions(email, "stale") == 1
+    # Dropped ten hours from now, long after the message was last touched.
+    with dbfixture.session() as db:
+        pk = db.query(Message.id).filter(Message.subject == "Gone before it moved",
+                                         Message.account_id == account["id"]).scalar()
+        for action in db.query(PendingAction).filter(PendingAction.message_pk == pk):
+            action.updated_at = utcnow() + timedelta(hours=10)
+
+    assert dbfixture.collect_orphans(email, after_hours=12) == 0     # two hours after
+    assert dbfixture.collect_orphans(email, after_hours=17) == 1     # seven hours after
+    assert dbfixture.message_count(email) == 0
 
 
 def test_removed_folders_and_their_orphaned_messages_are_pruned(account):

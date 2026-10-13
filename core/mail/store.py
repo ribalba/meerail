@@ -270,11 +270,24 @@ def place_pending(
     archived out of all three into the same folder — three calls, one row. A
     SELECT would not see the row the first call has only added (autoflush is
     off), and the second would hit the unique constraint.
+
+    Nothing is written where the server already has the message. Archiving on
+    Gmail is INBOX to All Mail, and every inbox message is in All Mail already.
+    The move only takes the INBOX label off, no new UID turns up in All Mail,
+    and so nothing ever arrived to retire a placement written here. Each
+    archive left one behind for good, beside the real one. A placement in
+    the target that the server has confirmed is the message being there, and
+    it is returned as it is, flags included, because those are the server's.
     """
     uid = pending_uid(msg.id)
     loc = next((item for item in msg.locations
                 if item.mailbox_id == mailbox_id and item.imap_uid == uid), None)
     if loc is None:
+        there = next((item for item in msg.locations
+                      if item.mailbox_id == mailbox_id and not is_pending(item)
+                      and not item.deleted), None)
+        if there is not None:
+            return there
         loc = MessageLocation(mailbox_id=mailbox_id, imap_uid=uid)
         msg.locations.append(loc)
     if flags_from is not None:
@@ -639,6 +652,32 @@ def ingest_raw(
         msg = db.execute(
             select(Message).where(
                 Message.account_id == account.id, Message.dedup_key == dedup_key
+            )
+        ).scalar_one_or_none()
+    elif msg is None and parsed.content_key != dedup_key:
+        # Nothing holds the id, but these very bytes may be stored already,
+        # filed under their hash by the branch above at a time when another row
+        # held the id. That other row does not have to stay. It can be a copy
+        # the server later replaced, a draft or a Sent copy Proton rewrote after
+        # sending, and once its last placement goes the row is collected. From
+        # then on the id names nothing, so looking up the id alone sent every
+        # further copy of the surviving message into a row of its own.
+        #
+        # Every further copy is exactly what a move produces. Trashing or
+        # archiving such a message wrote the usual placement ahead of the
+        # server, the copy the move landed then arrived as a second message,
+        # and the placement waiting for it was never retired. The reader showed
+        # the mail twice in the target folder, once for real and once from a
+        # placement nothing backs (reported in October 2026 as "Meerail stellt
+        # emails doppelt dar", both copies in Trash). A plain second label did
+        # the same without any move, in All Mail next to Sent.
+        #
+        # The importer has always asked both keys (tools/import_mbox.py), and
+        # the sync path asks both now. A row found here needs no same_message
+        # check, because its key is the hash of these bytes.
+        msg = db.execute(
+            select(Message).where(
+                Message.account_id == account.id, Message.dedup_key == parsed.content_key
             )
         ).scalar_one_or_none()
 

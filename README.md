@@ -1235,6 +1235,46 @@ and nothing is deleted; a message already on the server is left alone, so re-run
 safe. It reuses `agent/.venv` and talks to Bridge and Postgres over the loopback ports, so
 the stack has to be up.
 
+### Mail shown twice, or in a folder the server has emptied
+
+Versions up to 0.3.4 could leave two kinds of leftovers behind.
+
+- **The same mail stored twice.** A message stored under a hash of its bytes, because another
+  copy held its Message-ID at the time, could not be found again once that copy was gone. The
+  next copy of it became a second message, and trashing or archiving it showed the mail twice
+  in the target folder. Proton Bridge can also hand out one message as two different byte
+  strings (a new `X-Pm-Gluon-Id` and new MIME boundaries after it rebuilds its cache), which
+  meerail stored as two messages as well.
+- **Placeholders that never went away.** Filing a message shows it in the target folder at once,
+  and the server's copy replaces that placeholder when the move lands. A move applied after
+  the message had already been deleted for good found nothing to move, so no copy ever came.
+  Those messages show in Trash although the server no longer has them, and Empty Trash leaves
+  them alone, because it takes them for moves still on their way. Archiving on Gmail left a
+  placeholder beside the real copy in All Mail, for the same reason.
+
+The agent now drops a move whose message has already left the source folder, a permanent
+delete on Proton takes the message out of All Mail straight away, and a message is looked up
+by its bytes as well as its Message-ID. `tools/repair_placements.py` repairs what is already
+in the database:
+
+```bash
+tools/repair_placements.py                       # what it would do
+tools/repair_placements.py --apply               # merge duplicates, drop placeholders
+tools/repair_placements.py --apply --forget      # also forget mail no server holds
+```
+
+`--apply` merges every duplicate into one message, keeping its read state, reminders and
+history, and drops placeholders the server's own placements already answer for. Mail that
+exists only in meerail is left alone unless `--forget` is given too. The tool then first asks
+the server whether it has the message after all, in the folder the placeholder claims, in All
+Mail and in the folder the move came from. It only deletes the message if the server
+definitely does not have it, and only after writing its bytes to an mbox under `backups/`
+(or `--backup-to`), which `tools/import-mbox.sh` can read back. `tools/restore_pending.py`
+is the other way out for that mail, and puts it back on the server instead. Merges and
+deletes lock their rows first, so the agent can keep running. Re-running is safe. Like
+`restore_pending.py` it needs Postgres on the loopback port, and `--forget` needs Bridge as
+well.
+
 ### Sent mail on plain IMAP servers
 
 Sending hands the message to the SMTP server, and nothing in that conversation puts a copy

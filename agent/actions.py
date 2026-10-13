@@ -161,6 +161,31 @@ class StaleUid(RuntimeError):
     """
 
 
+class SourceGone(StaleUid):
+    """The UID a move was queued for is not in its folder any more.
+
+    Something got there first. The user deleted the message for good while the
+    move was still queued, or another client filed it somewhere else. (An
+    earlier attempt of this same move whose answer was lost looks the same from
+    the source folder, and is told apart by finding the message in the target,
+    see _still_to_move.) A server never hands out a UID twice within one
+    UIDVALIDITY, so the number will not name anything again, which is the same
+    verdict as an epoch change. No retry can succeed, and the row is settled as
+    stale (see _settle_stale).
+
+    Applying the move anyway is what used to happen. IMAP answers a COPY or a
+    MOVE of a UID that does not exist with OK and does nothing, so the action
+    was recorded as done, and the placement the UI had written into the target
+    folder waited for a server copy that was never coming. On 2026-08-20 that
+    left 622 messages showing in Trash here that were gone from the server, and
+    Empty Trash could not take them out, because it leaves the placements of
+    moves alone while it believes they are still on their way. Settling the row
+    as stale takes that placement back at once. Wherever the server does hold
+    the message, the sync places it again, the folder walk when it arrived
+    under a new UID and the reconcile sweep otherwise.
+    """
+
+
 class Refused(RuntimeError):
     """The server was asked, and said no to something no retry can change.
 
@@ -462,7 +487,7 @@ def _uidvalidity(info) -> int | None:
         return None
 
 
-def _select_verified(db, c, action: PendingAction, folder: str) -> None:
+def _select_verified(db, c, action: PendingAction, folder: str) -> dict:
     """Open the folder this action names, and refuse unless it is still the
     folder the action was written against.
 
@@ -492,8 +517,11 @@ def _select_verified(db, c, action: PendingAction, folder: str) -> None:
     Refusing is on the safe side of all of it: a flag not set can be set again, a
     move not made can be made again, and a message not deleted is still there to
     delete. The opposite mistake is somebody's mail.
+
+    Returns SELECT's answer, which _still_to_move reads EXISTS and UIDNEXT from.
     """
-    live = _uidvalidity(c.select_folder(folder))
+    info = c.select_folder(folder)
+    live = _uidvalidity(info)
     known = (action.payload or {}).get("uidvalidity")
     try:
         known = int(known) if known is not None else None
@@ -515,6 +543,7 @@ def _select_verified(db, c, action: PendingAction, folder: str) -> None:
             f"{folder} is on UIDVALIDITY {live}, not the {known} uid {uid} was recorded "
             f"under — the folder has been rebuilt since, so that number no longer names "
             f"the message this was queued for")
+    return info if isinstance(info, dict) else {}
 
 
 def _identity(db, action: PendingAction) -> tuple[str | None, str | None]:
@@ -532,6 +561,51 @@ def _identity(db, action: PendingAction) -> tuple[str | None, str | None]:
         select(Message.message_id, Message.content_hash).where(Message.id == action.message_pk)
     ).first()
     return (row[0], row[1]) if row else (None, None)
+
+
+def _still_to_move(db, c, action: PendingAction, folder: str, info: dict) -> bool:
+    """Is the message this move names still in the folder it is leaving?
+
+    True is the ordinary answer, and the move goes ahead. False means an earlier
+    attempt already put it in the target and only the answer was lost, so there
+    is nothing left to do and the move counts as done. A message that has left
+    for anywhere else raises SourceGone.
+
+    Asked with the folder selected and its epoch checked (_select_verified), so
+    the UID still means what it meant when the move was queued. "Not there" is
+    believed only on the evidence the sync asks for before it prunes anything
+    (agent/sync.py::_uid_list_is_trustworthy). The folder's whole UID list has
+    to be as long as SELECT's EXISTS count, and the UID has to be one the folder
+    has handed out, below UIDNEXT. Proton Bridge answers SEARCH short, or with
+    nothing, while it is still loading a mailbox, and dropping a move on that
+    answer would lose what the user asked for. Short of that evidence this
+    raises an ordinary error and the move is tried again on a later pass, which
+    is also what a SEARCH that fails outright does. That is the opposite of
+    _still_present below, where the unclear answer is the safe one to act on.
+    """
+    p = action.payload or {}
+    uid = p.get("uid")
+    if c.search(["UID", uid]):
+        return True
+    listed = c.search(["ALL"])
+    exists = int(info.get(b"EXISTS") or 0)
+    if len(listed) < exists:
+        raise RuntimeError(
+            f"{folder} did not list uid {uid}, but it answered with {len(listed)} of its "
+            f"{exists} messages, so whether the message is still there is not known yet")
+    uidnext = info.get(b"UIDNEXT")
+    if uidnext is not None and uid >= int(uidnext):
+        raise RuntimeError(
+            f"{folder} has not handed out uid {uid} yet (UIDNEXT is {uidnext}), so its "
+            f"answer about that message cannot be trusted yet")
+    if uid in listed:
+        return True
+    if _copy_landed(c, uid, p["to_folder"], *_identity(db, action)):
+        return False
+    raise SourceGone(
+        f"uid {uid} is no longer in {folder}, and the message is not in "
+        f"{p['to_folder']} either. It was deleted, or another client filed it "
+        f"somewhere else, so there is nothing left to move")
 
 
 def _still_present(c, uid: int) -> bool:
@@ -558,7 +632,9 @@ def apply_action(db, bridge, account, action: PendingAction) -> None:
             c.remove_flags([p["uid"]], p["remove"])
 
     elif t == "move":
-        _select_verified(db, c, action, p["from_folder"])
+        info = _select_verified(db, c, action, p["from_folder"])
+        if not _still_to_move(db, c, action, p["from_folder"], info):
+            return
         if _is_all_mail(db, action.account_id, p["from_folder"]):
             # \All is not a folder a message can be taken out of. On Proton and
             # Gmail it is the union of everything the account holds — filing to

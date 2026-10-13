@@ -378,7 +378,10 @@ class Client:
     the source folder still holds the UID once the COPY has run — false on a
     server where folders are labels and the COPY was itself the move — and
     ``uidvalidity`` the UID epoch SELECT reports, which is what says whether the
-    numbers in the queue still mean anything (see EPOCH).
+    numbers in the queue still mean anything (see EPOCH). ``in_source`` is
+    whether the UID is in the source folder before anything has been done to
+    it. False is a message that left before the move came round, deleted for
+    good or filed elsewhere by another client.
 
     Every command that acts on messages records *which folder was selected* when
     it ran, because that is what IMAP acts on: `UID COPY 7 Trash` copies the
@@ -388,10 +391,18 @@ class Client:
     """
 
     def __init__(self, capabilities=(), source_keeps_uid=True, uidvalidity=EPOCH,
-                 in_target=(), target_body=None, refuses=(), refusal=None):
+                 in_target=(), target_body=None, refuses=(), refusal=None, in_source=True,
+                 exists=None, uidnext=None, all_uids=None):
         self.calls = []
         self.capabilities = set(capabilities)
         self.source_keeps_uid = source_keeps_uid
+        self.in_source = in_source
+        self.copied = False
+        # What SELECT says about the folder, and what SEARCH ALL lists. Left
+        # out, SELECT reports neither count and the list follows in_source.
+        self.exists = exists
+        self.uidnext = uidnext
+        self.all_uids = all_uids
         self.uidvalidity = uidvalidity
         # Folders the server will not accept mail into, and how it says so. A
         # tagged NO ("operation not allowed", the default here) is a verdict on
@@ -420,11 +431,17 @@ class Client:
     def select_folder(self, name, readonly=False):
         self.selected = name
         self.calls.append(("peek", name) if readonly else ("select", name))
-        return {b"UIDVALIDITY": self.uidvalidity}
+        info = {b"UIDVALIDITY": self.uidvalidity}
+        if self.exists is not None:
+            info[b"EXISTS"] = self.exists
+        if self.uidnext is not None:
+            info[b"UIDNEXT"] = self.uidnext
+        return info
 
     def copy(self, uids, to_folder):
         self.calls.append(("copy", self.selected, uids, to_folder))
         self._answer(to_folder)
+        self.copied = True
 
     def move(self, uids, to_folder):
         self.calls.append(("move", self.selected, uids, to_folder))
@@ -440,7 +457,13 @@ class Client:
         self.calls.append(("search", criteria))
         if criteria[0] == "HEADER":                    # "is it in the target already?"
             return [1] if criteria[2] in self.in_target else []
-        return [criteria[1]] if self.source_keeps_uid else []
+        if criteria == ["ALL"]:
+            if self.all_uids is not None:
+                return list(self.all_uids)
+            return [7] if self.in_source else []
+        if not self.in_source:
+            return []
+        return [criteria[1]] if self.source_keeps_uid or not self.copied else []
 
     def delete_messages(self, uids):
         self.calls.append(("delete", self.selected, uids))
@@ -520,7 +543,7 @@ def test_a_hand_rolled_move_removes_the_source_copy():
     # the copy's is the *source*: the check above leaves the target selected, and
     # a COPY sent in that state copies the target's own uid 7 — or nothing — and
     # the source is expunged either way on the strength of it.
-    assert calls == [("select", "INBOX"),
+    assert calls == [("select", "INBOX"), ("search", ["UID", 7]),
                      ("peek", "Trash"), ("search", ["HEADER", "MESSAGE-ID", MSGID]),
                      ("select", "INBOX"),
                      ("copy", "INBOX", [7], "Trash"),
@@ -594,7 +617,7 @@ def test_a_hand_rolled_move_refuses_rather_than_expunge_the_whole_folder():
     with pytest.raises(RuntimeError, match="UIDPLUS"):
         _move(client)
 
-    assert client.calls == [("select", "INBOX"),
+    assert client.calls == [("select", "INBOX"), ("search", ["UID", 7]),
                             ("peek", "Trash"), ("search", ["HEADER", "MESSAGE-ID", MSGID]),
                             ("select", "INBOX"),
                             ("copy", "INBOX", [7], "Trash"),
@@ -747,6 +770,101 @@ def test_a_dropped_move_takes_back_the_copy_the_ui_filed(monkeypatch):
 
     assert action.status == "stale"
     assert dropped == [(55, 3)]
+
+
+@pytest.mark.parametrize("capabilities, role", [
+    (("MOVE", "UIDPLUS"), "inbox"),      # the server's own MOVE
+    (("UIDPLUS",), "inbox"),             # COPY, then the removal by hand
+    (("MOVE", "UIDPLUS"), "all"),        # out of \All, which is the COPY alone
+])
+def test_a_move_whose_message_has_already_left_the_folder_moves_nothing(capabilities, role):
+    """IMAP answers a COPY or MOVE of a UID that is not there with OK. Sent
+    anyway, the move was recorded as done, and the placement the UI had filed
+    in Trash waited for a copy the server was never going to make. That is how
+    622 messages emptied out of Trash came back into it here, a second trash
+    from All Mail having been queued before the first delete was applied."""
+    client = Client(capabilities=capabilities, in_source=False)
+
+    with pytest.raises(agent_actions.SourceGone):
+        _move(client, role=role)
+
+    assert not [c for c in client.calls if c[0] in ("copy", "move", "delete", "expunge")]
+
+
+def test_a_move_whose_message_has_left_is_dropped_and_its_placement_taken_back(
+        monkeypatch, capsys):
+    """Dropped like a move from an older epoch, and for the same reason: the UID
+    will not name anything again. The placement the UI filed in the target goes
+    with it, which is what keeps the folder from showing mail no server holds."""
+    action = Action("move", {"uid": 7, "from_folder": "All Mail", "to_folder": "Trash",
+                             "uidvalidity": EPOCH})
+    action.message_pk = 55
+    db = DB([action])
+    db.scalar = lambda _stmt: 3                    # the Trash folder's id
+    dropped = []
+    monkeypatch.setattr(agent_actions.store, "drop_pending_placement",
+                        lambda _db, pk, mailbox_id: dropped.append((pk, mailbox_id)))
+    monkeypatch.setattr(agent_actions, "_identity", lambda _db, _a: (MSGID, MOVED_HASH))
+    client = Client(capabilities=("MOVE", "UIDPLUS"), in_source=False)
+    bridge = type("B", (), {"acc": Account(), "ops": lambda _self: client})()
+
+    applied, failed, _sent = agent_actions.drain_actions(db, bridge, AccountRow())
+
+    assert (applied, failed) == (0, 0)
+    assert action.status == "stale"
+    assert dropped == [(55, 3)]
+    assert "no longer in All Mail" in capsys.readouterr().out
+
+
+
+@pytest.mark.parametrize("exists, uidnext", [(3, None), (0, 5)])
+def test_a_short_answer_from_the_source_folder_does_not_drop_the_move(exists, uidnext):
+    """Proton Bridge answers SEARCH short, or with nothing, while it is still
+    loading a mailbox. "Not there" is only believed on the evidence the sync
+    asks for before it prunes, the whole list as long as EXISTS and the UID one
+    the folder has handed out. Short of that the move is tried again later."""
+    client = Client(capabilities=("MOVE", "UIDPLUS"), in_source=False,
+                    exists=exists, uidnext=uidnext, all_uids=[])
+
+    with pytest.raises(RuntimeError) as raised:
+        _move(client)
+
+    assert not isinstance(raised.value, agent_actions.StaleUid)
+    assert not [c for c in client.calls if c[0] in ("copy", "move")]
+
+
+def test_a_move_whose_earlier_attempt_landed_is_done_not_dropped():
+    """The answer to the first attempt was lost, and the message has already
+    left the source folder because it is in the target. That is the move having
+    happened, and undo has to be able to take it back like any other."""
+    client = Client(capabilities=("MOVE", "UIDPLUS"), in_source=False, in_target=[MSGID])
+
+    calls = _move(client)
+
+    assert not [c for c in calls if c[0] in ("copy", "move")]
+    assert ("peek", "Trash") in calls
+
+def test_a_move_that_could_not_ask_whether_its_message_is_there_is_retried():
+    """Only a definite "not there" drops a move. A SEARCH that failed says
+    nothing about the message, and dropping on it would lose a move that may
+    still be needed, so it is an ordinary failure and the row stays queued."""
+    action = Action("move", {"uid": 7, "from_folder": "INBOX", "to_folder": "Trash",
+                             "uidvalidity": EPOCH})
+    action.message_pk = 55
+    db = DB([action])
+    client = Client(capabilities=("MOVE", "UIDPLUS"))
+
+    def broken(_criteria):
+        raise OSError("connection reset by peer")
+
+    client.search = broken
+    bridge = type("B", (), {"acc": Account(), "ops": lambda _self: client})()
+
+    _applied, failed, _sent = agent_actions.drain_actions(db, bridge, AccountRow())
+
+    assert failed == 1
+    assert action.status == "pending" and action.attempts == 1
+    assert not [c for c in client.calls if c[0] == "move"]
 
 
 class FoldersDB(DB):

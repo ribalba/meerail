@@ -515,6 +515,19 @@ def apply_actions(email: str, minutes_ago: int = 0) -> int:
         return len(rows)
 
 
+def settle_actions(email: str, status: str) -> int:
+    """Settle every queued action the way the agent settles one it will not
+    apply, "stale" for a UID that names nothing any more (agent/actions.py)."""
+    with session() as db:
+        account = db.query(Account).filter(Account.email == email.lower()).one()
+        rows = db.query(PendingAction).filter(PendingAction.account_id == account.id,
+                                              PendingAction.status == "pending").all()
+        for a in rows:
+            a.status = status
+            a.updated_at = utcnow()
+        return len(rows)
+
+
 def fail_actions(email: str, attempts: int, error: str = "move failed: nope") -> int:
     """Leave every queued action having failed `attempts` times, as a run of
     unsuccessful passes does. Nothing retires it — the agent never gives up on a
