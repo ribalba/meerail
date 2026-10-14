@@ -51,7 +51,18 @@ COPY --from=jars /tika-extras /tika-extras
 # because the compose files that use this image are also the ones a user already
 # has on disk from an earlier install — a fix that only takes effect when they
 # also update their compose file is a fix most people never get.
-COPY tika-config.json log4j2.xml /meerail/
+#
+# The mode is set here because COPY otherwise keeps the one the file has in the
+# build context, and makes it owned by root. A checkout made under umask 077 has
+# these files at 0600, so the uid Tika runs as (35002, set by the base image)
+# could not read either of them. The server then refused to start with
+# AccessDeniedException on /meerail/tika-config.json, after log4j had already
+# failed with "No configuration found". The images CI pushes were never
+# affected, only `build: ./tika` from such a checkout (reported 2026-10-14).
+# It is 0755 and not 0644 because BuildKit gives the same mode to the /meerail
+# directory it creates for the copy. A directory without the x bit cannot be
+# entered, and the result is the same AccessDeniedException for every checkout.
+COPY --chmod=0755 tika-config.json log4j2.xml /meerail/
 
 # The stock entrypoint, with those two files wired in. Copied rather than
 # extended because there is no way to append to an ENTRYPOINT: upstream's is
