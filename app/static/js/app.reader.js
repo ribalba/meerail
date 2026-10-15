@@ -475,6 +475,7 @@ App.reader = (function () {
 
   function tasksOn() { return !!(App.tasks && App.tasks.enabled()); }
   function aiOn() { return !!(App.ai && App.ai.enabled()); }
+  function calendarOn() { return !!(App.calendar && App.calendar.enabled()); }
 
   // Is there anything in this attachment a model could be asked about? Text the
   // server extracted (`has_text`, decided there because only the server can see
@@ -1566,6 +1567,31 @@ App.reader = (function () {
       wrap.appendChild(banner);
     }
 
+    // A calendar event the mail carries can go into meercal from here. Up by
+    // the header rather than down with the attachment chips, because the
+    // invitation is usually the reason the mail was sent, and the chips sit
+    // under a body that can run to pages. One strip per file. Only once a
+    // meercal address is saved (see App.calendar), and only for files whose
+    // bytes are still stored. A pruned attachment is a name with nothing
+    // behind it to import.
+    if (calendarOn()) {
+      const events = (m.attachments || []).filter((a) => a.calendar && a.stored !== false);
+      events.forEach((a) => {
+        const strip = document.createElement("div");
+        strip.className = "calendar-banner";
+        // With one file, "this message" says it. With several, each strip has
+        // to name its own, or they read as the same sentence twice.
+        const text = events.length > 1
+          ? `${App.esc(a.filename || "An attachment")} contains a calendar event.`
+          : "This message contains a calendar event.";
+        strip.innerHTML = `${App.icon("calendar", 15)}
+          <span class="cb-text">${text}</span>
+          <button type="button">Add to meercal</button>`;
+        strip.querySelector("button").addEventListener("click", () => App.calendar.open(m, a));
+        wrap.appendChild(strip);
+      });
+    }
+
     const body = document.createElement("div");
     if (m.content_status && m.content_status !== "full") {
       // Outside the content window: the headers are all there ever was here (or
@@ -1965,6 +1991,7 @@ App.reader = (function () {
   // `redraw` is exported so App.tasks can put the Add Task buttons up (or take
   // them down) the moment the Meerato URL changes, rather than at the next
   // thread open — both the bar and the per-message toolbars carry one.
+  // App.calendar uses it the same way for the meercal strips.
   return { openThread, clear, action, scrollBy, scrollEnd, scrollMsg, setKeyFocus, renderEmpty,
     redraw: () => rerender(), isOpen: () => !!currentThread,
     // The composer previews a forwarded original in the same document the

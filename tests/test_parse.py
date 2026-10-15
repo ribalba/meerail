@@ -4,8 +4,8 @@ from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.utils import format_datetime
 
-from core.mail.parse import (header_message_id, html_to_text, leading_prefix,
-                             normalize_subject, parse_email)
+from core.mail.parse import (header_message_id, html_to_text, is_calendar_part,
+                             leading_prefix, normalize_subject, parse_email)
 from core.mail.threading import _new_thread_id
 from helpers import PNG_1x1, make_message
 
@@ -468,3 +468,163 @@ def test_header_message_id_none_without_one():
     assert header_message_id(b"From: <a@b>\r\nSubject: no id\r\n\r\n") is None
     assert header_message_id(b"") is None
     assert header_message_id(None) is None
+
+
+# The event an invitation carries. Base64 on the wire (EmailMessage encodes bytes
+# that way), so what the parser decodes has to come back as exactly these bytes.
+_VCALENDAR = (
+    b"BEGIN:VCALENDAR\r\n"
+    b"VERSION:2.0\r\n"
+    b"PRODID:-//Microsoft Corporation//Outlook 16.0 MIMEDIR//EN\r\n"
+    b"METHOD:REQUEST\r\n"
+    b"BEGIN:VEVENT\r\n"
+    b"UID:040000008200E00074C5B7101A82E00800000000\r\n"
+    b"DTSTART:20260310T090000Z\r\n"
+    b"DTEND:20260310T093000Z\r\n"
+    b"SUMMARY:Planning\r\n"
+    b"END:VEVENT\r\n"
+    b"END:VCALENDAR\r\n"
+)
+
+
+def _outlook_invite(mid: str = "<invite@x>", cid: str | None = None,
+                    name: str | None = None, repeat: bool = False) -> EmailMessage:
+    """An invitation the way Outlook and Exchange send one.
+
+    The event is a third alternative next to the text and the HTML, and no file
+    is attached anywhere. iter_attachments() yields nothing for an alternative,
+    so this shape used to be stored with no attachment at all and the
+    invitation could not be found.
+    """
+    m = EmailMessage()
+    m["Message-ID"] = mid
+    m["Subject"] = "Invitation: Planning"
+    m["From"] = "Organizer <org@example.com>"
+    m["To"] = "me@proton.me"
+    m["Date"] = format_datetime(WHEN)
+    m.set_content("OUTLOOKBODY you are invited")
+    m.add_alternative("<p>OUTLOOKHTML you are invited</p>", subtype="html")
+    params = {"method": "REQUEST", "charset": "utf-8"}
+    if name:
+        params["name"] = name
+    for _ in range(2 if repeat else 1):
+        m.add_alternative(_VCALENDAR, maintype="text", subtype="calendar",
+                          params=params, cid=cid)
+    return m
+
+
+def _calendars(p):
+    return [a for a in p.attachments if is_calendar_part(a.content_type, a.filename)]
+
+
+def test_outlook_invitation_in_an_alternative_is_stored_as_a_file():
+    p = parse_email(_outlook_invite().as_bytes())
+    assert len(p.attachments) == 1
+    att = p.attachments[0]
+    assert att.filename == "invite.ics"
+    assert att.content_type == "text/calendar"
+    # Not inline: the reader lists only non-inline attachments, and an invitation
+    # nobody can see is the fault this fixes.
+    assert att.is_inline is False
+    assert att.content_id is None
+    assert att.payload == _VCALENDAR
+    # The body is still the text the sender wrote, not the calendar.
+    assert "OUTLOOKBODY" in p.body_text
+    assert "BEGIN:VCALENDAR" not in p.body_text
+    assert "OUTLOOKHTML" in p.body_html
+
+
+def test_gmail_invitation_is_stored_once():
+    # Gmail and Thunderbird send the event twice, as an alternative and as an
+    # invite.ics attachment. The attachment was always stored, and lifting the
+    # alternative as well would show two files for one meeting.
+    m = _outlook_invite("<gmail-invite@x>")
+    m.add_attachment(_VCALENDAR, maintype="application", subtype="ics",
+                     filename="invite.ics")
+    assert m.get_content_type() == "multipart/mixed"
+    p = parse_email(m.as_bytes())
+    calendars = _calendars(p)
+    assert len(calendars) == 1
+    assert calendars[0].content_type == "application/ics"
+    assert calendars[0].filename == "invite.ics"
+    assert calendars[0].payload == _VCALENDAR
+
+
+def test_invitation_inside_a_forwarded_message_stays_in_it():
+    # The forwarded invitation belongs to the forwarded message, which is kept
+    # whole as its .eml. Lifting it out would offer the reader somebody else's
+    # meeting as though it had been sent to them.
+    outer = EmailMessage()
+    outer["Message-ID"] = "<fwd-invite@x>"
+    outer["Subject"] = "Fwd: Invitation: Planning"
+    outer["From"] = "a@b.com"
+    outer["To"] = "c@d.com"
+    outer["Date"] = format_datetime(WHEN)
+    outer.set_content("COVERNOTE see below")
+    outer.add_attachment(_outlook_invite("<inner-invite@x>"))
+    p = parse_email(outer.as_bytes())
+    assert [a.content_type for a in p.attachments] == ["message/rfc822"]
+    assert _calendars(p) == []
+    # The invitation is still there, inside the .eml it came in.
+    assert _VCALENDAR in parse_email(p.attachments[0].payload).attachments[0].payload
+
+
+def test_calendar_alternative_keeps_its_own_filename():
+    p = parse_email(_outlook_invite(name="Planning.ics").as_bytes())
+    assert [a.filename for a in p.attachments] == ["Planning.ics"]
+    assert p.attachments[0].content_type == "text/calendar"
+
+
+def test_calendar_alternative_with_a_content_id_is_stored_once():
+    # A Content-ID would otherwise make the cid sweep file the same part a
+    # second time, as an inline copy nobody sees.
+    p = parse_email(_outlook_invite(cid="<cal1@x>").as_bytes())
+    assert len(p.attachments) == 1
+    assert p.attachments[0].content_id == "cal1@x"
+    assert p.attachments[0].is_inline is False
+
+
+def test_repeated_calendar_alternative_is_stored_once():
+    p = parse_email(_outlook_invite(repeat=True).as_bytes())
+    assert len(p.attachments) == 1
+    assert p.attachments[0].payload == _VCALENDAR
+
+
+def test_is_calendar_part():
+    assert is_calendar_part("text/calendar; method=REQUEST", None)
+    assert is_calendar_part("text/calendar", "")
+    assert is_calendar_part("Application/ICS", None)
+    assert is_calendar_part(" application/ics ; name=invite.ics", None)
+    assert is_calendar_part("application/octet-stream", "Meeting.ICS")
+    assert is_calendar_part(None, "invite.ics ")
+    assert not is_calendar_part("text/plain", "notes.txt")
+    assert not is_calendar_part("application/octet-stream", "calendar.ics.zip")
+    assert not is_calendar_part("message/rfc822", "Invitation.eml")
+    assert not is_calendar_part(None, None)
+    assert not is_calendar_part("", "")
+
+
+def test_a_calendar_part_marked_inline_is_still_listed():
+    """Some senders put the text/calendar beside the body in multipart/mixed
+    and mark it inline. iter_attachments() collects it, but an inline row is
+    left out of the reader's list, so the one file the mail is about would be
+    stored and never shown. It is also nameless, and gets the name a lifted
+    invitation gets."""
+    m = EmailMessage()
+    m["Message-ID"] = "<inline-cal@x>"
+    m["Subject"] = "Invitation: Planning"
+    m["From"] = "org@example.com"
+    m["To"] = "me@proton.me"
+    m["Date"] = format_datetime(WHEN)
+    m.set_content("INLINEBODY you are invited")
+    m.add_attachment(_VCALENDAR, maintype="text", subtype="calendar",
+                     disposition="inline", params={"method": "REQUEST"})
+
+    p = parse_email(m.as_bytes())
+
+    cals = _calendars(p)
+    assert len(cals) == 1
+    assert cals[0].is_inline is False
+    assert cals[0].filename == "invite.ics"
+    assert cals[0].payload == _VCALENDAR
+    assert "INLINEBODY" in p.body_text

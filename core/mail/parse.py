@@ -2,11 +2,13 @@
 
 Uses the stdlib ``email`` package with the modern ``policy.default`` so header
 decoding, ``get_body`` and ``iter_attachments`` do most of the MIME-tree walking
-for us. Two places where their answer is not the one a mail reader wants are
-corrected here, both to do with a part that carries other parts: ``get_body``
-stops short of a message attached to a message, and ``iter_attachments`` will
-hand back a container as though it were a file. See ``_body_with_forwards`` and
-``_attachment_parts``.
+for us. Three places where their answer is not the one a mail reader wants are
+corrected here, all to do with a part that carries other parts. ``get_body``
+stops short of a message attached to a message. ``iter_attachments`` will hand
+back a container as though it were a file, and it never looks inside a
+``multipart/alternative`` at all, which is where Outlook puts a calendar
+invitation. See ``_body_with_forwards``, ``_attachment_parts`` and
+``_calendar_parts``.
 """
 
 from __future__ import annotations
@@ -487,7 +489,71 @@ def _attachment_filename(part: EmailMessage) -> str:
             name = (subject or "forwarded message")[:1000]
         if not name.lower().endswith(".eml"):
             name += ".eml"
+    if not name and _content_type(part) in CALENDAR_TYPES:
+        # An invitation part rarely names itself. "attachment" says nothing
+        # about it, and the name is what a calendar program looks at when the
+        # file is saved and opened.
+        return "invite.ics"
     return name or "attachment"
+
+
+# The two MIME types a calendar invitation travels as. text/calendar is the iMIP
+# one (RFC 6047), the part Outlook, Exchange and Gmail put into the message
+# itself. application/ics is the file Gmail and Thunderbird attach next to it,
+# usually named invite.ics.
+CALENDAR_TYPES = frozenset({"text/calendar", "application/ics"})
+
+
+def is_calendar_part(content_type: str | None, filename: str | None) -> bool:
+    """Whether a MIME part, or a stored attachment row, holds a calendar.
+
+    The parser asks it of the parts it has collected, and the server asks it of
+    stored attachment rows when it decides what a message can hand to meercal.
+    Both have to get the same answer, which is why it lives here and takes plain
+    strings rather than a part.
+
+    The type is compared without its parameters (``text/calendar;
+    method=REQUEST`` is the usual spelling) and without case, because MIME types
+    are case-insensitive and senders do write ``Application/ICS``. A name ending
+    in ``.ics`` counts on its own, because plenty of senders attach the file as
+    ``application/octet-stream`` and leave the extension to say what it is.
+    """
+    ctype = (content_type or "").split(";", 1)[0].strip().lower()
+    if ctype in CALENDAR_TYPES:
+        return True
+    return (filename or "").strip().lower().endswith(".ics")
+
+
+def _calendar_parts(part: EmailMessage, depth: int = 0):
+    """Every calendar part in this message's own tree, wherever it sits.
+
+    The counterpart of ``_attachment_parts`` for the one kind of file that
+    ``iter_attachments`` cannot see. Outlook and Exchange send an invitation as
+    a third alternative next to the text and the HTML, inside a
+    ``multipart/alternative``, with no file attached anywhere. ``iter_attachments``
+    returns nothing at all for an alternative (every member of one counts as
+    body), so the invitation was never stored, and the message looked like any
+    other mail.
+
+    The walk opens every container but never a ``message/*`` part. An invitation
+    inside a forwarded message belongs to that message, not to the one that
+    forwards it, and the forward is already kept whole as its .eml attachment.
+    Lifting it out would offer the reader somebody else's meeting as though it
+    had been sent to them. The depth bound is the one ``_attachment_parts``
+    uses, for the same reason.
+    """
+    if depth >= _MAX_PART_DEPTH or part.get_content_maintype() == "message":
+        return
+    if not part.is_multipart():
+        if _content_type(part) in CALENDAR_TYPES:
+            yield part
+        return
+    try:
+        children = list(part.iter_parts())
+    except Exception:
+        return
+    for child in children:
+        yield from _calendar_parts(child, depth + 1)
 
 
 def normalize_subject(subject: str) -> str:
@@ -644,15 +710,58 @@ def parse_email(raw: bytes) -> ParsedEmail:
         if cid:
             cid = strip_nuls(cid).strip().strip("<>").strip()
             seen_cids.add(cid)
+        filename = _attachment_filename(part)[:1024]
+        ctype = _content_type(part)
         attachments.append(
             ParsedAttachment(
-                filename=_attachment_filename(part)[:1024],
-                content_type=_content_type(part),
+                filename=filename,
+                content_type=ctype,
                 content_id=(cid[:512] if cid else None),
-                is_inline=(part.get_content_disposition() == "inline"),
+                # A calendar part is never inline, whatever its disposition
+                # says. Some senders mark the text/calendar beside the body
+                # inline, and an inline row is left out of the list the reader
+                # shows, which would hide the one file the mail is about. It
+                # would also count as the calendar already found, so nothing
+                # below would offer it instead.
+                is_inline=(part.get_content_disposition() == "inline"
+                           and not is_calendar_part(ctype, filename)),
                 payload=payload,
             )
         )
+
+    # An invitation that came only as the calendar alternative of the body (the
+    # Outlook and Exchange shape, see _calendar_parts) is filed as an attachment
+    # of its own, so the reader lists it as a file and can offer it to meercal.
+    # This only happens when nothing collected above is a calendar already. Gmail
+    # and Thunderbird send the same invitation twice, once as an alternative and
+    # once as an invite.ics attachment, and lifting the alternative as well would
+    # show two files for one meeting. The lifted part is never inline, whatever
+    # the alternative said, because inline parts are left out of the attachment
+    # list the reader shows.
+    if not any(is_calendar_part(a.content_type, a.filename) for a in attachments):
+        lifted: set[bytes] = set()
+        for part in _calendar_parts(msg):
+            try:
+                payload = part.get_payload(decode=True) or b""
+            except Exception:
+                payload = b""
+            # An empty part is nothing to add to a calendar. The same calendar
+            # twice (some senders repeat it) is still one invitation.
+            if not payload or payload in lifted:
+                continue
+            lifted.add(payload)
+            raw_cid = part.get("Content-ID")
+            cid = strip_nuls(raw_cid).strip().strip("<>").strip() if raw_cid else ""
+            if cid:
+                # Claimed here, or the cid sweep below would file this same part
+                # a second time as an inline copy.
+                seen_cids.add(cid)
+            filename = strip_nuls(part.get_filename() or "").strip() or "invite.ics"
+            attachments.append(
+                ParsedAttachment(filename=filename[:1024], content_type=_content_type(part),
+                                 content_id=(cid[:512] or None), is_inline=False,
+                                 payload=payload)
+            )
 
     # iter_attachments() skips inline images inside multipart/related (they count
     # as part of the body), so cid: references would have nothing to resolve to.

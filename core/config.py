@@ -270,6 +270,7 @@ _SECTION_KEYS: dict[str, dict[str, str]] = {
         "hsts_max_age_days": "hsts_max_age_days",
         "max_request_bytes": "max_request_bytes",
         "meerato_allow_private_hosts": "meerato_allow_private_hosts",
+        "meercal_allow_private_hosts": "meercal_allow_private_hosts",
         "llm_allow_private_hosts": "llm_allow_private_hosts",
         "llm_timeout_seconds": "llm_timeout_seconds",
         "llm_max_thread_chars": "llm_max_thread_chars",
@@ -511,6 +512,15 @@ class Settings(BaseSettings):
     # network, which is the deployment it was written for; leave it off on
     # anything internet-facing. See app/meerato.py.
     meerato_allow_private_hosts: bool = False
+
+    # The same switch for "Add to meercal". It is separate from Meerato's
+    # because the two are separate decisions. A meercal is far more likely to
+    # sit on the same machine or LAN as this server (it is a self-hosted
+    # calendar, and the usual setup puts it on the same Docker network), but
+    # that is a reason to turn this on deliberately, not to start with it on.
+    # The address is typed into Settings and fetched by the server, so the
+    # probe argument above applies word for word. See app/meercal.py.
+    meercal_allow_private_hosts: bool = False
 
     # --- the AI features (app/llm.py, app/routers/ai.py) ---------------------
     #

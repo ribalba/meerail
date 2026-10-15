@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session as DBSession, selectinload
+from sqlalchemy.orm.exc import StaleDataError
 
 from .. import events, mailops
 from core import undo
@@ -861,22 +862,56 @@ def bulk_park_all(req: BulkParkAllRequest, db: DBSession = Depends(get_db)):
     return {**_parked_reply(changed, op_id, req.parked), "done": remaining <= len(locs)}
 
 
+# Tries at a read or flag change while the message's placements move under it.
+# The second is the one that lands in practice; see _change_flags.
+_FLAG_ATTEMPTS = 3
+
+
+def _change_flags(db: DBSession, message_id: int, change, value: bool) -> None:
+    """Apply ``change`` (mailops.set_seen or set_flagged) to a message, and commit.
+
+    The change reads the message's placements, edits them in memory and writes
+    them back by primary key, and a move can delete those rows in between. The
+    usual way to get there is opening a conversation and trashing it straight
+    away. The reader marks the mail read in requests nobody waits for, the trash
+    commits first, and the UPDATE then matches no row. SQLAlchemy calls that
+    StaleDataError. It was a 500 in the server log ("expected to update 2
+    row(s); 0 were matched", a GitHub notification in INBOX and All Mail on
+    Proton, reported 2026-10-15), and the read was lost with it, so the mail
+    sat in Trash unread.
+
+    A failed attempt has written nothing, so rolling back and starting over is
+    safe. The next pass reads the placements the move left behind, in practice
+    the pending one in Trash, and the change lands there. upsert_location
+    carries it onto the real placement once the server has made the move. A
+    message that is gone altogether is a 404 from _get_message, exactly as if
+    the request had arrived a moment later. Mail that keeps moving under every
+    attempt gets a 409, which is what a change in flight answers elsewhere.
+    """
+    for _ in range(_FLAG_ATTEMPTS):
+        msg = _get_message(db, message_id)
+        try:
+            mailops.recompute(db, change(db, msg, value))
+            db.commit()
+            return
+        except StaleDataError:
+            db.rollback()
+    raise HTTPException(
+        status_code=409,
+        detail="This message is being moved right now, so its flags could not be "
+               "changed. Try again in a moment.")
+
+
 @router.post("/{message_id}/mark")
 def mark(message_id: int, seen: bool = True, db: DBSession = Depends(get_db)):
-    msg = _get_message(db, message_id)
-    touched = mailops.set_seen(db, msg, seen)
-    mailops.recompute(db, touched)
-    db.commit()
+    _change_flags(db, message_id, mailops.set_seen, seen)
     events.publish({"type": "flags", "message_id": message_id})
     return {"ok": True, "seen": seen}
 
 
 @router.post("/{message_id}/flag")
 def flag(message_id: int, flagged: bool = True, db: DBSession = Depends(get_db)):
-    msg = _get_message(db, message_id)
-    touched = mailops.set_flagged(db, msg, flagged)
-    mailops.recompute(db, touched)
-    db.commit()
+    _change_flags(db, message_id, mailops.set_flagged, flagged)
     events.publish({"type": "flags", "message_id": message_id})
     return {"ok": True, "flagged": flagged}
 

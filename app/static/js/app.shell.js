@@ -768,6 +768,66 @@ App.shell = (function () {
     }
   }
 
+  // --- Settings modal (meercal address and password) ---
+  // Wired once in wire() like the Meerato field above, and for the same
+  // reason. The password never comes back from the server, only a mask of
+  // eight bullets, and sending that mask back is how a save says "keep the
+  // stored one". So the mask is what goes into the field.
+  async function loadMeercal() {
+    const url = $("#meercal-url");
+    const pw = $("#meercal-password");
+    $("#meercal-warning").hidden = true;
+    const cfg = await App.calendar.refreshConfig();
+    // The server did not answer. Whatever the fields hold is still the best
+    // guess, and emptying them would invite saving an empty address.
+    if (!cfg) return;
+    // Checked per field and after the request, not before it. The caret can
+    // move while the answer is on its way, and the field it lands in keeps
+    // what is being typed while the other one is brought up to date.
+    if (document.activeElement !== url) url.value = cfg.url || "";
+    if (document.activeElement !== pw) pw.value = cfg.password || "";
+  }
+
+  async function saveMeercal() {
+    const url = $("#meercal-url");
+    const pw = $("#meercal-password");
+    const status = $("#meercal-status");
+    const warning = $("#meercal-warning");
+    const sentUrl = url.value.trim();
+    // Sent as typed. The server trims it, because meercal trims the bearer
+    // value it compares against, so a space at either end could never match.
+    const sentPw = pw.value;
+    status.classList.remove("error");
+    status.textContent = "Checking…";
+    warning.hidden = true;
+    let cfg;
+    try {
+      // The server asks meercal for its calendars before it stores anything,
+      // so "Saved" here means the address and the password work, not merely
+      // that they were written down.
+      cfg = await App.api.saveCalendarConfig(sentUrl, sentPw);
+    } catch (e) {
+      status.textContent = e.message || "Could not save";
+      status.classList.add("error");
+      return;
+    }
+    status.textContent = cfg.configured ? "Saved" : "Removed";
+    // Saved, but with something worth knowing (no calendar an event can go
+    // into, say). Kept on screen rather than timed out with the status,
+    // because it is the part that tells you what to do next.
+    if (cfg.warning) {
+      warning.textContent = cfg.warning;
+      warning.hidden = false;
+    }
+    // The stored address as the server spells it, and the mask in place of
+    // the password just typed. Only where the field still holds what was
+    // sent, so an edit made while meercal was being asked is not overwritten.
+    if (url.value.trim() === sentUrl) url.value = cfg.url || "";
+    if (pw.value === sentPw) pw.value = cfg.password || "";
+    await App.calendar.refreshConfig();
+    setTimeout(() => { status.textContent = ""; }, 2500);
+  }
+
   // --- Settings modal (send delay) ---
   // Server-side, unlike the two below it: the delay decides when the *agent*
   // may send, so it cannot live in one browser's localStorage — the message
@@ -816,6 +876,7 @@ App.shell = (function () {
     $("#settings-modal").hidden = false;
     renderSettingsAccounts();
     loadMeeratoUrl();
+    loadMeercal();
     // Owned by App.ai rather than by this file: the provider menu, the model
     // list and the key field are one form, and splitting it across two modules
     // only makes the module that has the state ask the one that has the fields.
@@ -925,6 +986,13 @@ App.shell = (function () {
     });
     $("#btn-refresh").addEventListener("click", requestRefresh);
     $("#meerato-save").addEventListener("click", saveMeeratoUrl);
+    $("#meercal-save").addEventListener("click", saveMeercal);
+    // Enter in either field saves, the way it does in the send delay below.
+    // The password field is where a person most expects that to work.
+    ["#meercal-url", "#meercal-password"].forEach((sel) =>
+      $(sel).addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); saveMeercal(); }
+      }));
     $("#send-delay-save").addEventListener("click", saveSendDelay);
     $("#send-delay").addEventListener("keydown", (e) => {
       if (e.key === "Enter") { e.preventDefault(); saveSendDelay(); }
@@ -982,6 +1050,9 @@ App.shell = (function () {
       App.keys.init();
       App.bulk.init();
       App.tasks.init();
+      // Like App.tasks it asks the server one question, and the meercal strips
+      // in the reader stay away until the answer says an address is saved.
+      App.calendar.init();
       App.ai.init();
       App.status.init();
       App.undo.init();

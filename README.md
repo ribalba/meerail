@@ -21,7 +21,8 @@ result says **which folder it was found in**, and each message in a thread says 
 the images, and the CSS that would otherwise fetch them for it · **hover a link and the address it
 really goes to** appears at the foot of the pane, with the host picked out of it ·
 read/flag/archive/delete and compose that **sync back to your mail server** over IMAP/SMTP · file
-a mail as a **Meerato task**, attachments and all · optional **AI help** — write the search query
+a mail as a **Meerato task**, attachments and all · put a calendar invitation into
+**meercal** · optional **AI help** — write the search query
 from a description, ask anything about a whole conversation, have a reminder time suggested from
 what the thread says, explain an attachment (Claude, OpenAI, or any OpenAI-compatible endpoint
 including a local Ollama) · light + dark, following the system or pinned to either in Settings.
@@ -543,6 +544,7 @@ keys unless you specifically want a per-machine override.
 | `hsts_max_age_days` | `HSTS_MAX_AGE_DAYS` | `365` | How long a browser remembers to reach this hostname over HTTPS only (`Strict-Transport-Security`), which removes the *first* plaintext request rather than turning it away. Sent only over HTTPS, so a localhost install never sees it. It is a promise browsers keep: for this long they will not speak `http://` to this name, and will not offer a way past a bad certificate. Set `0` while you are still moving the install between hostnames. `includeSubDomains` is deliberately not sent — add it at your proxy if the whole domain is yours to commit. |
 | `max_request_bytes` | `MAX_REQUEST_BYTES` | `8388608` | Ceiling on ordinary (JSON) request bodies; `0` is no limit. Uploads to the composer get `max_attachment_bytes` instead. Enforced before the body is read **and before it is authenticated** — FastAPI parses a request body before it runs the dependency that would have said 401, so without this a stranger chooses what an unauthenticated POST costs the server. A reverse proxy should cap bodies too; see [COOLIFY.md](COOLIFY.md). |
 | `meerato_allow_private_hosts` | `MEERATO_ALLOW_PRIVATE_HOSTS` | `false` | Let "Add Task" point at a Meerato on a private address (`10.x`, `192.168.x`, a container name, localhost). The URL is typed into Settings and fetched *by the server*, so leaving this off is what stops it being a way to aim this machine at whatever else is on its network. Turn it on when Meerato really is a peer service on your own network. |
+| `meercal_allow_private_hosts` | `MEERCAL_ALLOW_PRIVATE_HOSTS` | `false` | Let "Add to meercal" reach a meercal on a private address (`10.x`, `192.168.x`, a container name, localhost). meercal usually runs next to meerail, so most installs that use it will turn this on. It is off by default for the same reason as `meerato_allow_private_hosts`. The address is typed into Settings and fetched *by the server*. |
 | `llm_allow_private_hosts` | `LLM_ALLOW_PRIVATE_HOSTS` | `false` | Let the **Other (OpenAI-compatible)** AI provider point at a private address — which is what running a model locally means (Ollama on `127.0.0.1:11434`, LM Studio on `:1234`). Off by default for the same reason as `meerato_allow_private_hosts`: the base URL is typed into Settings and fetched *by the server*. Turn it on if your model is local; leave it off on anything internet-facing. Anthropic and OpenAI are fixed addresses in the code and are unaffected. |
 | `llm_timeout_seconds` | `LLM_TIMEOUT_SECONDS` | `180` | How long to wait for a model to answer. Generous on purpose — a long thread is tens of seconds of thinking before the first byte. Only the read side; failing to *reach* a provider still gives up in ten seconds. |
 | `llm_max_thread_chars` | `LLM_MAX_THREAD_CHARS` | `240000` | The most of one conversation "Ask AI" may send, in characters (roughly four to the token). A longer thread keeps its most recent end, and the dialog says how many messages were left out. |
@@ -868,6 +870,40 @@ dictionary and the rules you turned off, one per line, to edit by hand. These ar
 server, so every browser gets the same. While the checker is on, the browser's own spell check
 is switched off in the composer, so words are not underlined twice. With no checker configured,
 or with it turned off, the browser's spell check comes back.
+
+### Calendar invitations and meercal
+
+[meercal](https://github.com/ribalba/meercal) is the self-hosted calendar that
+goes with meerail. Once it is set up, a message that carries a calendar event
+(a meeting invitation, a booking, a ticket) gets a strip above its text with an
+**Add to meercal** button. The button shows what is in the file and asks which
+of your meercal calendars it should go into. Read-only calendars and
+subscriptions are not offered. meercal files the event, and pushes it on to the
+CalDAV server behind that calendar at its next sync if there is one. Importing
+the same invitation again updates the event rather than adding it twice,
+because meercal matches events by their UID.
+
+Set it up under **Settings → Calendar** with meercal's address and, if meercal
+has one, its password. meerail tries the pair before saving it. The password is
+stored encrypted and never sent back to the browser. A few things decide
+whether the server can reach meercal at all.
+
+- The request is made by the meerail **server**, not the browser. A meercal on
+  the same machine or Docker network is a private address, which needs
+  `meercal_allow_private_hosts = true` under `[server]`. Inside a container,
+  `localhost` is the container itself. Use meercal's container name on a shared
+  network instead (meercal's `docker-compose.meerail.yml` sets that up).
+- A password-protected meercal only answers over HTTPS or on loopback. Between
+  two containers that means HTTPS, or a meercal without a password on a
+  network nobody else can reach.
+- meerail does not reply to the organiser. meercal does not process iTIP, so
+  accepting or declining stays with the mail client or the calendar server.
+
+meerail finds the event in an attached `.ics` file, and also in the
+`text/calendar` part that Outlook and Exchange put inside the message body
+instead of attaching it. Mail stored before meerail looked for that part has no
+button yet. `tools/reparse_forwards.py --calendar` re-reads those messages from
+the copy meerail keeps of each one. It is a dry run unless you add `--apply`.
 
 ### What meerail deletes, and when
 

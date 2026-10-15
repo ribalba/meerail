@@ -764,6 +764,20 @@ mark.hit.hit-on { background: #ff8a3d; box-shadow: 0 0 0 2px #ff8a3d; }
   margin: .6rem 1.1rem 0; padding: .45rem .7rem; font-size: .82rem; color: var(--text-muted); }
 .remote-banner button { font: inherit; font-weight: 600; font-size: .8rem; border: none;
   background: var(--accent); color: #fff; border-radius: 6px; padding: .3rem .7rem; cursor: pointer; }
+/* The meercal strip on a message that carries a calendar event. The same box
+   as the remote-images banner above, since both say "this message has
+   something you can act on", with an icon in front so the two do not read as
+   one banner when a message has both. The text takes the slack and wraps, so
+   a long file name never pushes the button out of the card. */
+.calendar-banner { display: flex; align-items: center; gap: .55rem;
+  background: var(--bg-elev); border: 1px solid var(--border); border-radius: 7px;
+  margin: .6rem 1.1rem 0; padding: .45rem .7rem; font-size: .82rem; color: var(--text-muted); }
+.calendar-banner[hidden] { display: none; }
+.calendar-banner svg { flex: 0 0 auto; color: var(--accent); }
+.calendar-banner .cb-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.calendar-banner button { flex: 0 0 auto; font: inherit; font-weight: 600; font-size: .8rem;
+  border: none; background: var(--accent); color: #fff; border-radius: 6px;
+  padding: .3rem .7rem; cursor: pointer; white-space: nowrap; }
 /* Width and height are both set inline once the document has loaded and been
    measured — see fitFrame() in app.reader.js. transform-origin has to be the
    top-left or a scaled-down body drifts away from the header above it. */
@@ -1491,6 +1505,40 @@ mark.hit.hit-on { background: #ff8a3d; box-shadow: 0 0 0 2px #ff8a3d; }
   margin-top: 1rem; }
 .task-status-line { font-size: .78rem; color: var(--text-muted); }
 .task-status-line.error { color: var(--danger); }
+
+/* --- Add-to-meercal dialog --- */
+/* It reuses the task dialog's field, status line and button row. What is its
+   own is the box saying what meercal read in the file, set apart from the
+   choice under it because it is meercal's answer and not a field to fill. */
+.cal-preview { margin: 0 0 1rem; padding: .7rem .8rem; border-radius: 8px;
+  background: var(--bg-elev); border: 1px solid var(--border); font-size: .86rem; }
+.cal-file { display: flex; align-items: center; gap: .4rem; margin-bottom: .45rem;
+  font-size: .76rem; color: var(--text-muted); }
+.cal-file svg { flex: 0 0 auto; }
+.cal-file-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cal-titles { margin: 0 0 .35rem; padding: 0; list-style: none; font-weight: 600; }
+.cal-titles li { overflow-wrap: anywhere; }
+.cal-titles li + li { margin-top: .15rem; }
+.cal-titles .cal-more { font-weight: 400; color: var(--text-muted); }
+.cal-when { color: var(--text); }
+.cal-facts { margin: .35rem 0 0; font-size: .8rem; color: var(--text-muted); }
+/* Text, not a fill, so the darker amber on light (see --warning). */
+.cal-note { margin: .45rem 0 0; font-size: .8rem; color: var(--warning); }
+.cal-empty { margin: 0 0 .2rem; font-size: .86rem; color: var(--warning); }
+/* The menu with a dot in the chosen calendar's colour in front of it. A span,
+   because a label may only hold inline content, so it has to undo what the
+   task dialog's caption rule does to a span directly inside .task-field. */
+.task-field > .cal-pick { display: flex; align-items: center; gap: .5rem; margin: 0;
+  font-size: inherit; color: inherit; }
+.cal-pick select { flex: 1; min-width: 0; }
+.cal-swatch { flex: 0 0 auto; width: 14px; height: 14px; border-radius: 50%;
+  border: 1px solid var(--border-strong); }
+/* The Calendar section in Settings has two fields, so the second gets air
+   above it, as the spelling and grammar form does. */
+#calendar-settings > label:not(:first-child) { margin-top: .8rem; }
+/* "Saved, but" from the server. Stays until the next save or the next time
+   Settings opens, because it says what to change in meercal. */
+.calendar-warning { margin: .45rem 0 0; max-width: 62ch; color: var(--warning); }
 /* Name + colour are the two account fields the UI owns; the address itself is
    agent-provisioned and shown read-only underneath. */
 .sa-name { font: inherit; font-weight: 550; font-size: .9rem; width: 100%; box-sizing: border-box;
@@ -2207,6 +2255,11 @@ mark.hit.hit-on { background: #ff8a3d; box-shadow: 0 0 0 2px #ff8a3d; }
      and the home indicator. Gone for the same reason the sidebar sheet is. */
   .compose-keys { display: none; }
   .modal { width: min(480px, 94vw); max-height: 88vh; }
+  /* The rule above for inputs leaves selects out, and iOS zooms in on those
+     too. The meercal dialog's calendar menu is focused as soon as it opens. */
+  #calendar-modal select { font-size: 16px; }
+  /* A fingertip's worth of button on the meercal strip. */
+  .calendar-banner button { padding: .45rem .8rem; }
 
   /* Attachment viewer. Covers everything rather than living in the reading
      pane: the point is that the attachment gets the whole screen, and the only

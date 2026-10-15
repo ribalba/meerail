@@ -1,5 +1,6 @@
 """Integration tests for message actions (read/flag/trash) + agent-action queue."""
 
+import threading
 import uuid
 from datetime import timedelta
 
@@ -89,6 +90,54 @@ def test_trash_without_a_trash_folder_refuses_rather_than_deleting(account):
     assert "Trash" in body["detail"]
     assert mailbox_total(email) == before          # still in the inbox
     assert not _actions(email)                     # and nothing queued at the server
+
+
+def _flag_change_during_trash(account, path):
+    """Fire ``path`` at a message whose trash is half done, then let the trash land.
+
+    The request reads the INBOX placement, the trash deletes it and commits, and
+    the request's UPDATE of that placement then matches no row. Returns the
+    request's answer and where the message ended up.
+    """
+    email, aid = account["email"], account["id"]
+    _seed_trash(email)
+    mid, _ = ingest_one(email, aid, "RACETOK" + uuid.uuid4().hex[:6])
+
+    answer = {}
+    with dbfixture.trash_held_open(email, mid) as wait_for_blocked_update:
+        request = threading.Thread(
+            target=lambda: answer.update(reply=api("POST", path.format(mid=mid))))
+        request.start()
+        wait_for_blocked_update()
+    request.join(timeout=30)
+    assert not request.is_alive(), "the request never came back"
+    return answer["reply"], dbfixture.placements(email, mid)
+
+
+def test_reading_a_message_while_it_is_trashed(account):
+    """Opening a conversation and trashing it straight away must not end in a 500.
+
+    The reader marks every unread message read as it opens a conversation, and
+    nothing waits for those requests. Pressing delete a moment later races them.
+    When the trash committed first, the mark's UPDATE found its placements gone
+    and SQLAlchemy raised StaleDataError ("expected to update 2 row(s); 0 were
+    matched", a GitHub notification in INBOX and All Mail on Proton). The read
+    was lost with it, so the mail sat in Trash unread.
+    """
+    (code, body), placed = _flag_change_during_trash(
+        account, "/api/messages/{mid}/mark?seen=true")
+    assert code == 200, body
+    assert [p["imap_name"] for p in placed] == ["Trash"]
+    assert placed[0]["seen"] is True, "the read has to land on the copy in Trash"
+
+
+def test_flagging_a_message_while_it_is_trashed(account):
+    """The flag route has the same shape as mark and the same race."""
+    (code, body), placed = _flag_change_during_trash(
+        account, "/api/messages/{mid}/flag?flagged=true")
+    assert code == 200, body
+    assert [p["imap_name"] for p in placed] == ["Trash"]
+    assert placed[0]["flagged"] is True
 
 
 def test_archive_thread_clears_every_message_and_every_folder(account):

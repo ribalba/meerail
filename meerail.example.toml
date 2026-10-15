@@ -135,6 +135,13 @@ max_request_bytes = 8388608   # 8 MB
 # a peer service on your own network.
 meerato_allow_private_hosts = false
 
+# The same for "Add to meercal", the button that puts a calendar invitation
+# into meercal. meercal usually runs next to meerail (the same host, or the same
+# Docker network, reached by its container name), and every one of those is a
+# private address. So this is the switch most installs with meercal will turn
+# on. It is off by default for the reason above.
+meercal_allow_private_hosts = false
+
 # --- the AI features ---------------------------------------------------------
 #
 # Which model to use is NOT set here. The provider, the model name and the API

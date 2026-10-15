@@ -96,6 +96,7 @@ Any plain IMAP/SMTP account (Gmail, Fastmail, Dovecot) works the same way.
 | `app/mail/render.py` | nh3 HTML sanitizing, remote-content blocking, `cid:` rewriting. |
 | `app/searchquery.py` | Search syntax parser. |
 | `app/llm.py`, `aiprompts.py`, `threadtext.py` | AI providers, prompts, and conversation flattening. |
+| `app/meercal.py` | The meercal client for "Add to meercal": calendar list, preview and import of an `.ics` attachment, all through the `nethost` guard. meercal does the iCalendar parsing. |
 | `app/grammar.py` | Grammar and spelling checks: the settings row, UTF-16 segment offsets, the LanguageTool client, and the privacy guard that refuses a public `grammar.url`. |
 | `app/static/` | The SPA: `index.html`, `css/mail.css`, `js/app.*.js`. |
 | `tests/` | The pytest suite: `conftest.py` (safety guard), `dbfixture.py` (seeding), `helpers.py` (HTTP). |
@@ -370,6 +371,7 @@ these rules exists because something went wrong without it. The README section
 | `contacts`, `analytics`, `cleanup` | `/api/...` | autocomplete, stats, bulk-mail clusters |
 | `sync` | `/api/sync` | refresh, recheck, agent status |
 | `tasks`, `ai` | `/api/tasks`, `/api/ai` | Meerato, LLM features |
+| `calendar` | `/api/calendar` | meercal address and password, importing an `.ics` attachment |
 | `undo` | `/api/actions` | recent operations, undo |
 | `stream`, `version` | `/api/stream`, `/api/version` | SSE, update check |
 

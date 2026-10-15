@@ -427,6 +427,47 @@
           </p>
         </div>
 
+        <!-- Read and saved by app.shell.js (loadMeercal, saveMeercal). The
+             password field is new-password so the browser does not fill in
+             the password it keeps for meerail's own login. -->
+        <h3 class="settings-heading">Calendar</h3>
+        <div class="settings-section" id="calendar-settings">
+          <label for="meercal-url">meercal address</label>
+          <input type="text" id="meercal-url" autocomplete="off" spellcheck="false"
+            placeholder="http://meercal.example:8010" />
+          <label for="meercal-password">meercal password</label>
+          <input type="password" id="meercal-password" autocomplete="new-password"
+            spellcheck="false" />
+          <div class="sa-footer-actions">
+            <button type="button" id="meercal-save">Save</button>
+            <span class="sa-footer-status" id="meercal-status"></span>
+          </div>
+          <p class="small calendar-warning" id="meercal-warning" hidden></p>
+          <p class="muted small">
+            With an address saved, a strip appears on mail that carries a
+            calendar event, such as a meeting invitation or a booking. Its
+            <em>Add to meercal</em> button puts the event into the meercal
+            calendar you pick. Importing the same invitation again updates the
+            event instead of adding it twice. Leave the address empty to remove
+            the integration.
+          </p>
+          <p class="muted small">
+            The password is meercal's own server password. It is stored
+            encrypted on the meerail server and shown here as
+            <code>••••••••</code>. Leave the dots in place to keep it. Leave the
+            field empty if your meercal has no password.
+          </p>
+          <p class="muted small">
+            The meerail server makes these requests, not your browser. A
+            meercal on a private address (a container name, <code>192.168.x.x</code>,
+            <code>localhost</code>) therefore needs
+            <code>server.meercal_allow_private_hosts</code> in
+            <code>meerail.toml</code>. A meercal with a password only answers
+            over https or on loopback. Between two containers, use https, or run
+            meercal without a password on a private network.
+          </p>
+        </div>
+
         <h3 class="settings-heading">About</h3>
         <div class="settings-section">
           <!-- Filled by app.update.js from /api/version — the answer to "which
@@ -462,6 +503,26 @@
         <div class="task-actions">
           <span id="task-status-line" class="task-status-line"></span>
           <button id="task-create" class="btn-primary">Create Task</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add-to-meercal modal. Opened from the strip on a message that carries a
+       calendar event, which is only drawn once a meercal address is saved.
+       app.calendar.js fills #calendar-body with what meercal read in the file
+       and the calendars it could go into. -->
+  <div class="modal-backdrop" id="calendar-modal" hidden>
+    <div class="modal">
+      <div class="modal-head">
+        <h2>Add to meercal</h2>
+        <button class="icon-btn" id="btn-close-calendar" title="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div id="calendar-body"></div>
+        <div class="task-actions">
+          <span id="calendar-status-line" class="task-status-line" role="status"></span>
+          <button id="calendar-import" class="btn-primary">Add to calendar</button>
         </div>
       </div>
     </div>
@@ -944,6 +1005,7 @@
   <script src="/static/js/app.grammar.js"></script>
   <script src="/static/js/app.outbox.js"></script>
   <script src="/static/js/app.tasks.js"></script>
+  <script src="/static/js/app.calendar.js"></script>
   <script src="/static/js/app.ai.js"></script>
   <script src="/static/js/app.status.js"></script>
   <script src="/static/js/app.update.js"></script>

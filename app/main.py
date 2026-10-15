@@ -14,8 +14,8 @@ from core.database import dispose_pool, engine, init_db, pool_status
 from core.version import VERSION
 from .limits import MaxBodySize
 from .routers import (
-    accounts, actions, ai, analytics, auth, cleanup, compose, contacts, grammar, mailboxes,
-    messages, outbox, reminders, search, stream, sync, tasks, undo, version,
+    accounts, actions, ai, analytics, auth, calendar, cleanup, compose, contacts, grammar,
+    mailboxes, messages, outbox, reminders, search, stream, sync, tasks, undo, version,
 )
 from .deps import is_secure_request, require_ui_auth, ui_password
 from .staging import sweep_at_startup
@@ -279,6 +279,7 @@ app.include_router(analytics.router)
 app.include_router(cleanup.router)
 app.include_router(sync.router)
 app.include_router(tasks.router)
+app.include_router(calendar.router)
 app.include_router(ai.router)
 app.include_router(undo.router)
 app.include_router(stream.router)

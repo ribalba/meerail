@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session as DBSession
 
 from core import ingest
 from core.database import get_db
-from core.mail.parse import html_to_text
+from core.mail.parse import html_to_text, is_calendar_part
 from .. import reminders as reminders_core, searchquery
 from ..deps import require_ui_auth
 from ..mail.render import sanitize_html
@@ -405,7 +405,12 @@ def _message_detail(db: DBSession, msg: Message, load_remote: bool,
              # Is there anything for a model to read? Extracted text, or the
              # picture itself. Decided here because only the server can see the
              # first of the two — see the AI router's "explain this attachment".
-             "has_text": a.has_text}
+             "has_text": a.has_text,
+             # An iCalendar file, which the reader offers to put into meercal
+             # (app/routers/calendar.py). Decided by the same rule the parser
+             # used to store it and the import route uses to accept it, so the
+             # button and the route cannot disagree about what qualifies.
+             "calendar": is_calendar_part(a.content_type, a.filename)}
             for a in atts
         ],
     }

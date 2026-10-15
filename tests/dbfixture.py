@@ -16,8 +16,11 @@ port docker-compose publishes.
 from __future__ import annotations
 
 import contextlib
+import time
 from datetime import timedelta
 from email.utils import parseaddr
+
+from sqlalchemy import text
 
 from core import ingest
 from core.database import SessionLocal
@@ -127,7 +130,8 @@ def placements(email: str, message_pk: int) -> list[dict]:
             Mailbox, Mailbox.id == MessageLocation.mailbox_id
         ).filter(MessageLocation.message_pk == message_pk).all()
         return [{"imap_name": mb.imap_name, "imap_uid": loc.imap_uid,
-                 "deleted": loc.deleted, "local": mb.local} for loc, mb in rows]
+                 "deleted": loc.deleted, "local": mb.local, "seen": loc.seen,
+                 "flagged": loc.flagged} for loc, mb in rows]
 
 
 def _mailbox(db, account: Account, imap_name: str, role_hint: str = "",
@@ -817,3 +821,45 @@ def parked_placements(email: str, message_pk: int) -> list[dict]:
         ).filter(MessageLocation.message_pk == message_pk).all()
         return [{"imap_name": mb.imap_name, "imap_uid": loc.imap_uid,
                  "deleted": loc.deleted, "parked": loc.parked} for loc, mb in rows]
+
+
+@contextlib.contextmanager
+def trash_held_open(email: str, message_pk: int):
+    """Trash a message in a transaction that stays open until the block ends.
+
+    What a trash request does to the rows: every placement the message had is
+    deleted and a pending one is written in Trash. The difference is the
+    timing. Nothing is committed until the ``with`` block ends, so a request
+    that touches those placements meanwhile has read rows that are about to go
+    and waits on their locks when it writes. That is the race between opening
+    a conversation (which marks it read) and trashing it a moment later, held
+    still long enough to test.
+
+    Yields a function that returns once another session is waiting to UPDATE
+    message_locations, which is how a test knows the request it fired has got
+    as far as the race and not merely been sent.
+    """
+    from core.mail.store import pending_uid
+
+    def wait_for_blocked_update(timeout: float = 10.0) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with session() as probe:
+                waiting = probe.execute(text(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE datname = current_database() AND wait_event_type = 'Lock' "
+                    "AND query ILIKE 'UPDATE message_locations%'")).scalar()
+            if waiting:
+                return
+            time.sleep(0.05)
+        raise AssertionError("no request ever waited on the trashed placements")
+
+    with session() as db:
+        account = db.query(Account).filter(Account.email == email.lower()).one()
+        trash = db.query(Mailbox).filter(Mailbox.account_id == account.id,
+                                         Mailbox.role == "trash").one()
+        db.query(MessageLocation).filter(MessageLocation.message_pk == message_pk).delete()
+        db.add(MessageLocation(message_pk=message_pk, mailbox_id=trash.id,
+                               imap_uid=pending_uid(message_pk)))
+        db.flush()
+        yield wait_for_blocked_update

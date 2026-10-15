@@ -338,6 +338,25 @@ App.api = {
   taskOptions() { return this.get("/api/tasks/options"); },
   createTask(payload) { return this.post("/api/tasks", payload); },
 
+  // "Add to meercal" (app/routers/calendar.py), proxied like the task calls
+  // above. meercal's password is kept on the server and only ever comes back
+  // here as a mask, so every request that reaches meercal is the server's.
+  // An empty url removes the integration, and a password equal to the mask
+  // keeps the stored one.
+  calendarConfig() { return this.get("/api/calendar/config"); },
+  saveCalendarConfig(url, password) {
+    return this.put("/api/calendar/config", { url, password });
+  },
+  // What meercal reads in the file, and the calendars it could go into. Asked
+  // fresh each time the dialog opens, because both belong to meercal.
+  calendarImportOptions(attachmentId) {
+    return this.get(`/api/calendar/attachments/${encodeURIComponent(attachmentId)}`);
+  },
+  importCalendar(attachmentId, calendarId) {
+    return this.post("/api/calendar/import",
+                     { attachment_id: attachmentId, calendar_id: calendarId });
+  },
+
   replyContext(id, mode) { return this.get(`/api/compose/reply-context/${id}?mode=${mode}`); },
   // Which of the user's own addresses they normally write to these people from.
   // Resolves to null when the mailbox has nothing to say about them.
@@ -430,6 +449,9 @@ const ICON_PATHS = {
   stats: '<line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>',
   // A clock — mail whose body is outside the content window.
   clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+  // A wall calendar with its two rings. A mail that carries an event, and the
+  // strip that hands it to meercal.
+  calendar: '<rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>',
   // A bell — "remind me", and the folder of mail waiting on one.
   bell: '<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>',
   // A parking sign, the P in a rounded square. Parked, and the key that
