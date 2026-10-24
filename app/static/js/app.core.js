@@ -38,6 +38,26 @@ function sourceParam(mailboxId, lead) {
   return mailboxId == null ? "" : `${lead}source_mailbox_id=${mailboxId}`;
 }
 
+// The other copies of a message that the same change is meant for, as the
+// repeated `also` the server reads. These are the same mail delivered to a
+// second account (a BCC to your other address), or one message per other
+// account of a conversation for park and remind. With none to name it adds
+// nothing, so a call about a mail that lives in one account is the call it
+// always was. `lead` is the separator, as in sourceParam.
+function alsoParam(also, lead) {
+  const ids = (also || []).filter((id) => id != null);
+  return ids.length ? lead + ids.map((id) => `also=${encodeURIComponent(id)}`).join("&") : "";
+}
+
+// One conversation can be asked for in several accounts at once, because the
+// same thread reaches a person at two addresses and the unified lists show it
+// as one row. A single number still works, which is how every caller that
+// only ever knew one account goes on calling these.
+function accountParams(accountIds) {
+  return [].concat(accountIds).filter((id) => id != null)
+    .map((id) => `account_id=${encodeURIComponent(id)}`).join("&");
+}
+
 // --- API client ---
 App.api = {
   async ensureSession() {
@@ -176,8 +196,15 @@ App.api = {
   message(id, images) { return this.get(`/api/messages/${id}?images=${images ? 1 : 0}`); },
   // `search` (optional) carries the query the thread was opened from, so the
   // server can point out which attachments the term was found in.
-  thread(id, accountId, images, search) {
-    const p = new URLSearchParams({ account_id: accountId, images: images ? 1 : 0 });
+  //
+  // `accountIds` is one account or a list of them. The server loads the thread
+  // in every one it is given and folds a mail that arrived in two of them into
+  // one message, so a conversation that the unified inbox lists as one row
+  // also reads as one conversation. See app/routers/messages.py::get_thread.
+  thread(id, accountIds, images, search) {
+    const p = new URLSearchParams();
+    for (const a of [].concat(accountIds)) if (a != null) p.append("account_id", a);
+    p.set("images", images ? 1 : 0);
     if (search && search.q) { p.set("q", search.q); p.set("mode", search.mode); }
     return this.get(`/api/threads/${encodeURIComponent(id)}?${p}`);
   },
@@ -227,30 +254,48 @@ App.api = {
     return this.post(`/api/sync/actions/create-archive?account_id=${accountId}`);
   },
 
-  markSeen(id, seen) { return this.post(`/api/messages/${id}/mark?seen=${seen ? 1 : 0}`); },
-  flagMsg(id, flagged) { return this.post(`/api/messages/${id}/flag?flagged=${flagged ? 1 : 0}`); },
+  // `also` (optional, here and on the verbs below) names the copies of the
+  // same mail in the user's other accounts, which get the same change. The
+  // reader shows such a pair as one message, so marking it read has to reach
+  // both, or the unified inbox goes on calling it unread. See alsoParam.
+  markSeen(id, seen, also) {
+    return this.post(`/api/messages/${id}/mark?seen=${seen ? 1 : 0}${alsoParam(also, "&")}`);
+  },
+  flagMsg(id, flagged, also) {
+    return this.post(`/api/messages/${id}/flag?flagged=${flagged ? 1 : 0}${alsoParam(also, "&")}`);
+  },
   // The source folder is which copy of the message moves, and leaving it out is
   // how a caller says "the message, wherever it is filed". Both are needed: a
   // swipe on a list row means the copy in the folder that row was listed from,
   // while the trash icon on a message card means the mail — and on a label
   // server the same mail is also sitting in \All and under every label it
   // wears. See app/routers/actions.py::_message_move.
-  trashMsg(id, sourceMailboxId) {
-    return this.post(`/api/messages/${id}/trash${sourceParam(sourceMailboxId, "?")}`);
+  //
+  // The source only ever names a folder of the main message. Each copy in
+  // `also` leaves every folder it is in for its own account's Trash or
+  // Archive, because a folder belongs to one account and cannot name a place
+  // in another.
+  trashMsg(id, sourceMailboxId, also) {
+    const src = sourceParam(sourceMailboxId, "?");
+    return this.post(`/api/messages/${id}/trash${src}${alsoParam(also, src ? "&" : "?")}`);
   },
-  archiveMsg(id, sourceMailboxId) {
-    return this.post(`/api/messages/${id}/archive${sourceParam(sourceMailboxId, "?")}`);
+  archiveMsg(id, sourceMailboxId, also) {
+    const src = sourceParam(sourceMailboxId, "?");
+    return this.post(`/api/messages/${id}/archive${src}${alsoParam(also, src ? "&" : "?")}`);
   },
   moveMsg(id, mailboxId, sourceMailboxId) {
     return this.post(`/api/messages/${id}/move?mailbox_id=${mailboxId}${sourceParam(sourceMailboxId, "&")}`);
   },
   // Whole-conversation versions: the server works out which messages and which
   // folders, so nothing ingested since the reader opened is left behind.
-  archiveThread(threadId, accountId) {
-    return this.post(`/api/messages/threads/${encodeURIComponent(threadId)}/archive?account_id=${accountId}`);
+  // `accountIds` is one account or several, like App.api.thread: a
+  // conversation that reached two of your addresses is filed out of both in
+  // one keypress, and undone as one.
+  archiveThread(threadId, accountIds) {
+    return this.post(`/api/messages/threads/${encodeURIComponent(threadId)}/archive?${accountParams(accountIds)}`);
   },
-  trashThread(threadId, accountId) {
-    return this.post(`/api/messages/threads/${encodeURIComponent(threadId)}/trash?account_id=${accountId}`);
+  trashThread(threadId, accountIds) {
+    return this.post(`/api/messages/threads/${encodeURIComponent(threadId)}/trash?${accountParams(accountIds)}`);
   },
   // Bulk: `items` is the explicit selection, `trashAll` takes the list selector
   // itself and deletes a chunk of everything matching it — see app.bulk.js.
@@ -292,20 +337,31 @@ App.api = {
   // Monday, nine o'clock" is a question about this browser's calendar and
   // timezone — the server has neither, and would get it wrong twice a year at
   // the daylight-saving boundary. toISOString() sends it as absolute UTC.
-  remind(id, due) {
-    return this.post(`/api/messages/${id}/remind`, { due_at: due.toISOString() });
+  //
+  // `also` is one message from each other account the conversation reached,
+  // so the copy at your second address goes away and comes back with this one.
+  // It rides in the body here because this route already takes one. Left out
+  // when there is nothing to name, which keeps a one-account reminder the
+  // request it always was.
+  remind(id, due, also) {
+    const body = { due_at: due.toISOString() };
+    if (also && also.length) body.also = also;
+    return this.post(`/api/messages/${id}/remind`, body);
   },
   // restore=1 brings the mail back now, restore=0 leaves it filed and forgets
   // the reminder. Two different intentions, so never inferred from one button.
-  unremind(id, restore) {
-    return this.del(`/api/messages/${id}/remind?restore=${restore ? 1 : 0}`);
+  unremind(id, restore, also) {
+    return this.del(`/api/messages/${id}/remind?restore=${restore ? 1 : 0}${alsoParam(also, "&")}`);
   },
   reminders() { return this.get("/api/reminders"); },
   // Parked. `parked` false is the way back to the inbox. The conversation is
   // resolved by the server from the one message named, as "remind me" is. The
   // bulk pair takes the ticked rows or the list selector, like Delete does.
   // None of these reaches a mail server. See app/mailops.py, "parking".
-  park(id, parked) { return this.post(`/api/messages/${id}/park?parked=${parked ? 1 : 0}`); },
+  // `also` is one message per other account of the conversation, as on remind.
+  park(id, parked, also) {
+    return this.post(`/api/messages/${id}/park?parked=${parked ? 1 : 0}${alsoParam(also, "&")}`);
+  },
   bulkPark(items, parked) {
     return this.request("POST", "/api/messages/bulk/park", { items, parked });
   },
@@ -536,6 +592,72 @@ App.folderChips = function (folders, accountId) {
   return chips + (rest.length
     ? `<span class="folder-chip" title="Also in ${App.esc(rest.map(path).join(", "))}"
         >+${rest.length}</span>` : "");
+};
+
+// --- One row, several accounts ---
+//
+// The same mail often reaches a person at two addresses (a BCC to the second
+// one, a list both are on), and meerail stores it once per account. In the
+// lists that already mix accounts (All Inboxes, Parked, Reminders, Flagged)
+// the server folds those copies into one row and lists them in `members`,
+// one entry per account, the row's own account first. See
+// app/routers/messages.py::list_messages.
+//
+// Search rows carry no `members`, and neither does a payload from a server
+// older than this code. Those are one account's mail and nothing else, so the
+// row stands in for its own single member. Everything that acts on a row goes
+// through here instead of reading `members` itself, which is what makes that
+// fallback hold everywhere.
+App.members = function (r) {
+  if (r && Array.isArray(r.members) && r.members.length) return r.members;
+  return [{
+    account_id: r.account_id, thread_id: r.thread_id == null ? null : r.thread_id,
+    id: r.id, mailbox_id: r.mailbox_id == null ? null : r.mailbox_id,
+    account_color: r.account_color,
+  }];
+};
+
+// The accounts to open the row's conversation in, the row's own first. Only
+// the members filed under the same thread id count: a Flagged row folds two
+// deliveries of one mail even when the two accounts threaded it differently,
+// and asking one account for a thread id it does not have finds nothing.
+App.memberAccounts = function (r) {
+  const out = [r.account_id];
+  if (!r.thread_id) return out;
+  for (const m of App.members(r)) {
+    if (m.thread_id === r.thread_id && !out.includes(m.account_id)) out.push(m.account_id);
+  }
+  return out;
+};
+
+// What to call an account in a menu that offers more than one: the label the
+// user gave it, else its address. The same rule the sidebar and the search
+// scope menu follow.
+App.accountName = function (accountId) {
+  const acc = App.shell && App.shell.accounts().find((a) => a.id === accountId);
+  return acc ? acc.label || acc.email : "";
+};
+
+// The rows of a move-to-folder menu, shared by the reader's menus and the
+// bulk bar's so the same choice never looks like two different controls.
+// `entries` is [{ mb, accountId }]. The path, not the leaf: a menu offering
+// three folders called "2024" is not a choice anybody can make.
+//
+// `multi` is a menu that offers the folders of more than one account, which
+// happens when the mail it moves is in two of them. Every account has an
+// Inbox and an Archive, so each row then leads with the account it belongs
+// to. Each row carries its account either way, because the account of the
+// folder picked is what decides which copy moves.
+App.moveMenuItems = function (entries, multi) {
+  return entries.map(({ mb, accountId }) => {
+    const path = mb.path || mb.display_name;
+    const acct = multi ? App.accountName(accountId) : "";
+    return `<button class="move-item" data-mailbox="${mb.id}" data-account="${accountId}"${
+        acct ? ` title="${App.esc(`${path} in ${acct}`)}"` : ""}>
+      <span class="mm-icon">${App.icon(App.roleIcon(mb.role), 15)}</span>
+      ${acct ? `<span class="mm-acct">${App.esc(acct)}</span>` : ""}
+      <span class="mm-name">${App.esc(path)}</span></button>`;
+  }).join("");
 };
 
 // --- Utilities ---

@@ -93,6 +93,58 @@ def test_quoted_phrase_is_exact(account):
     assert r["total"] == 0
 
 
+def test_a_minus_term_leaves_mail_out(account):
+    """`Eco-CI -NGINX` is everything that says Eco-CI and never mentions NGINX.
+
+    Asked for by someone who typed exactly that and found nothing, because the
+    dash was searched for as part of the word.
+    """
+    email, aid = account["email"], account["id"]
+    tag = uuid.uuid4().hex[:8]
+    _ingest(email, [
+        (1, make_message(f"<both-{tag}@t>", f"proxy {tag}", "x@y.com", email,
+                         "Eco-CI measured the nginx container", T0)),
+        (2, make_message(f"<eco-{tag}@t>", f"plain {tag}", "x@y.com", email,
+                         "Eco-CI measured the build with -O2", T0)),
+        (3, make_message(f"<ngx-{tag}@t>", f"server {tag}", "x@y.com", email,
+                         "the NGINX config, nothing else", T0)),
+        (4, make_message(f"<fail-{tag}@t>", f"broken {tag}", "x@y.com", email,
+                         "Eco-CI says the build failed again", T0)),
+    ])
+
+    def subjects(q, **kw):
+        code, r = _search(aid, q, **kw)
+        assert code == 200, r
+        return sorted(row["subject"].split()[0] for row in r["rows"])
+
+    # The hyphen inside a word is the word, not an exclusion.
+    assert subjects("Eco-CI") == ["broken", "plain", "proxy"]
+    assert subjects("Eco-CI -NGINX") == ["broken", "plain"]
+    assert subjects("eco-ci -nginx") == ["broken", "plain"]
+    # A substring, as a term to find is: `-ngin` leaves the nginx mail out too.
+    assert subjects("Eco-CI -ngin") == ["broken", "plain"]
+    # A phrase spans the separators the index splits on, so it is the rechecked
+    # path that gets negated here, not the index alone.
+    assert subjects('Eco-CI -"build failed"') == ["plain", "proxy"]
+    assert subjects('Eco-CI -nginx -"build failed"') == ["plain"]
+    # Exclusions alone are a query: all of this account's mail without NGINX.
+    assert subjects("-NGINX") == ["broken", "plain"]
+
+    # A dash, or a dash and one letter, is an exclusion still being typed.
+    assert subjects("Eco-CI -") == ["broken", "plain", "proxy"]
+    assert subjects("Eco-CI -N") == ["broken", "plain", "proxy"]
+    # With a filter beside it, a lone dash leaves the filter standing.
+    assert subjects(":unread -") == ["broken", "plain", "proxy", "server"]
+
+    # A word that starts with a dash is found by quoting it, and left out
+    # by putting a dash in front of that.
+    assert subjects('"-O2"') == ["plain"]
+    assert subjects('Eco-CI -"-O2"') == ["broken", "proxy"]
+    # Regex mode keeps its pattern character for character.
+    assert subjects("build with -O2", mode="regex") == ["plain"]
+    assert subjects("Eco-CI -NGINX", mode="regex") == []
+
+
 def test_time_window_excludes_old(account):
     email, aid = account["email"], account["id"]
     old = datetime(2000, 1, 1, tzinfo=timezone.utc)

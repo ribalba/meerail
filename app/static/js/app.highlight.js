@@ -10,16 +10,21 @@ App.highlight = (function () {
   // so `"was sent"` marks the phrase, not the two words wherever they land. An
   // unbalanced quote closes at end-of-query, because search runs on every
   // keystroke and a half-typed phrase must still highlight what it found.
-  const TERMS = /"([^"]*)"|(\S+)/g;
+  // A term led by `-` is one the results leave out. It is not marked, because
+  // where it turns up in the thread is the reason a message did not match, not
+  // a hit. A dash on its own is a `-term` still being typed and marks nothing.
+  const TERMS = /(-?)(?:"([^"]*)"|(\S+))/g;
 
-  function keywordTerms(q) {
+  function keywordTerms(q, negation) {
     if ((q.match(/"/g) || []).length % 2) q += '"';
     const out = [];
     TERMS.lastIndex = 0;
     let m;
     while ((m = TERMS.exec(q)) !== null) {
-      const t = m[1] !== undefined ? m[1] : m[2];
-      if (t && t.trim()) out.push(t);
+      const t = m[2] !== undefined ? m[2] : m[3];
+      if (negation && (m[1] || m[3] === "-")) continue;
+      const term = negation ? t : m[1] + t;
+      if (term && term.trim()) out.push(term);
     }
     return out;
   }
@@ -28,12 +33,15 @@ App.highlight = (function () {
   // substrings, regex = the pattern itself. Postgres POSIX and JS RegExp
   // disagree on the exotic corners; a pattern only one of them accepts costs a
   // missing highlight, never a wrong search result.
+  // "find" is the reader's find box. It splits the way keyword does but has
+  // nothing to leave out, so a leading dash there is a character to look for.
   function patterns(q, mode) {
     q = (q || "").trim();
     if (!q) return [];
     try {
       if (mode === "regex") return [new RegExp(q, "gi")];
-      return keywordTerms(q).map((t) => new RegExp(t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"));
+      return keywordTerms(q, mode !== "find")
+        .map((t) => new RegExp(t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"));
     } catch (_) { return []; }  // half-typed regex — nothing to mark yet
   }
 

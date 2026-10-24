@@ -21,6 +21,7 @@ meerail is an email client, not an email provider. It does not host addresses or
 - **Regex and keyword search over everything:**
   - covers subjects, bodies, participants and extracted attachment text
   - filters: `:unread`, `:read`, `:has-attachment`, `:from`, `:to`
+  - `-word` or `-"a phrase"` leaves out mail that contains it
   - scope by account, folder, or a "last N years" window
   - each result says which folder it was found in, Trash included
 - **Searchable attachments:** Apache Tika extracts text from PDF, DOCX, XLSX, PPTX, ODF and plain text. Photos and scans are OCR'd with Tesseract.

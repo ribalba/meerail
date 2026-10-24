@@ -76,11 +76,11 @@ App.bulk = (function () {
     // three messages from a Trash holding five hundred.
     const verb = !inTrash() ? "Delete" : folderMode ? "Empty Trash" : "Delete forever";
 
-    // Move is offered whenever there is one account to move within — see
-    // moveAccountId. It sits before Delete because it is the ordinary half of
-    // what a selection is for, and because the destructive button should not be
-    // the one under the cursor by default.
-    const canMove = moveAccountId() !== null;
+    // Move is offered whenever there is an account to move within, one that
+    // every ticked row has mail in. See moveAccountIds. It sits before Delete
+    // because it is the ordinary half of what a selection is for, and because
+    // the destructive button should not be the one under the cursor by default.
+    const canMove = moveAccountIds().length > 0;
     const move = canMove
       ? `<button class="bulk-btn" type="button" data-act="move" ${busy ? "disabled" : ""}>
            ${App.icon("folder", 14)} ${busy ? "Moving…" : "Move to…"}</button>`
@@ -124,14 +124,18 @@ App.bulk = (function () {
 
   // Is everything this bar would act on mail that came off disk — an account
   // with no agent and no server (Account.local)? Asked per render rather than
-  // read off the folder, for the same reason moveAccountId() is: one Ctrl-A in
+  // read off the folder, for the same reason moveAccountIds() is: one Ctrl-A in
   // the unified inbox makes a selection spanning every account, and a permanent
   // delete offered on the strength of one of them being imported would be
   // aimed at all of them. Every account has to be one, or the button is simply
   // not there. Empty means false — nothing selected is not "all imported".
+  //
+  // Every account a row stands for counts, not only the one it was built from.
+  // A purge reaches each of them (see selectionItems), so a row folded from an
+  // imported copy and a copy on a mail server is not "all imported".
   function importedOnly() {
     // The escalated action runs off the selector, so the question is about the
-    // one folder it names — see moveAccountId, which resolves it the same way
+    // one folder it names — see moveAccountIds, which resolves it the same way
     // and for the same reason.
     if (folderMode) return importedFolder();
     const accounts = App.shell.accounts();
@@ -139,8 +143,24 @@ App.bulk = (function () {
       const acc = accounts.find((a) => a.id === id);
       return !!(acc && acc.local);
     };
-    const ids = [...new Set(App.list.selection().map((r) => r.account_id))];
+    const ids = [...new Set(App.list.selection()
+      .flatMap((r) => App.members(r).map((m) => m.account_id)))];
     return ids.length > 0 && ids.every(imported);
+  }
+
+  // What the ticked rows mean to a bulk route: one item per account each row
+  // stands for. A row in All Inboxes can be the same conversation in two
+  // accounts (see App.members), and deleting, parking or purging it has to
+  // reach both, or the row comes straight back on the half that was left. A
+  // member with a thread is its whole conversation in that account; one
+  // without is that message alone, as a row of its own always was.
+  function memberItem(m) {
+    return { account_id: m.account_id, thread_id: m.thread_id || null,
+             message_id: m.thread_id ? null : m.id };
+  }
+
+  function selectionItems() {
+    return App.list.selection().flatMap((r) => App.members(r).map(memberItem));
   }
 
   // Is the folder on screen an imported one? Empty Trash acts on the folder
@@ -156,25 +176,39 @@ App.bulk = (function () {
 
   // --- Move ---
 
-  // The one account this selection can be moved within, or null if there isn't
-  // one. A move is an operation inside an account — there is no IMAP command
-  // that carries a message to another server — so a selection spanning two of
-  // them has no single destination to offer, and the button is simply not
-  // there. The unified inbox makes such a selection with one Ctrl-A, which is
-  // why this is asked on every render rather than assumed from the folder.
-  function moveAccountId() {
+  // The accounts this selection can be moved within, in sidebar order, or an
+  // empty list if there is none. A move is an operation inside an account —
+  // there is no IMAP command that carries a message to another server — so a
+  // selection spanning two of them has no single destination to offer, and
+  // the button is simply not there. The unified inbox makes such a selection
+  // with one Ctrl-A, which is why this is asked on every render rather than
+  // assumed from the folder.
+  //
+  // A row that stands for the same conversation in two accounts (see
+  // App.members) can go to a folder in either, so the answer is the accounts
+  // every ticked row has mail in. Ticked rows that are all such pairs leave
+  // two accounts to choose from, and the menu offers the folders of both. Only
+  // the mail in the chosen folder's account moves (see moveSelected).
+  function moveAccountIds() {
     if (folderMode) {
       // The escalated action runs off the selector, and only a selector naming
       // one folder names one account with it. "All flagged" spans every
       // account, and moving that somewhere is not a thing to offer.
       const mailboxId = App.shell.currentMailboxId();
-      if (!mailboxId) return null;
+      if (!mailboxId) return [];
       const acc = App.shell.accounts().find((a) =>
         a.mailboxes.some((mb) => mb.id === mailboxId));
-      return acc ? acc.id : null;
+      return acc ? [acc.id] : [];
     }
-    const ids = new Set(App.list.selection().map((r) => r.account_id));
-    return ids.size === 1 ? [...ids][0] : null;
+    const rows = App.list.selection();
+    if (!rows.length) return [];
+    let common = null;
+    for (const r of rows) {
+      const ids = new Set(App.members(r).map((m) => m.account_id));
+      common = common === null ? ids : new Set([...common].filter((id) => ids.has(id)));
+      if (!common.size) return [];
+    }
+    return App.shell.accounts().map((a) => a.id).filter((id) => common.has(id));
   }
 
   // Where this selection could go: that account's folders, minus the one it is
@@ -209,24 +243,24 @@ App.bulk = (function () {
   // should not look like a different control.
   function openMenu(anchor) {
     closeMenu();
-    const accountId = moveAccountId();
-    if (accountId === null) return;
-    const folders = moveTargets(accountId);
+    const accountIds = moveAccountIds();
+    if (!accountIds.length) return;
+    const folders = accountIds.flatMap((accountId) =>
+      moveTargets(accountId).map((mb) => ({ mb, accountId })));
 
     const el = document.createElement("div");
     el.className = "move-menu";
     el.innerHTML = folders.length
-      ? folders.map((mb) => `<button class="move-item" data-mailbox="${mb.id}">
-          <span class="mm-icon">${App.icon(App.roleIcon(mb.role), 15)}</span>
-          <span class="mm-name">${App.esc(mb.path || mb.display_name)}</span></button>`).join("")
+      ? App.moveMenuItems(folders, accountIds.length > 1)
       : `<div class="move-empty">No other folders</div>`;
     el.addEventListener("click", (e) => {
       const item = e.target.closest("[data-mailbox]");
       if (!item) return;
       const mailboxId = Number(item.dataset.mailbox);
+      const accountId = Number(item.dataset.account);
       const name = item.querySelector(".mm-name").textContent;
       closeMenu();
-      move(mailboxId, name);
+      move(mailboxId, name, accountId);
     });
 
     document.body.appendChild(el);
@@ -245,11 +279,14 @@ App.bulk = (function () {
     window.addEventListener("resize", closeMenu);
   }
 
-  async function moveSelected(mailboxId) {
-    const items = App.list.selection().map((r) => ({
-      account_id: r.account_id, thread_id: r.thread_id || null,
-      message_id: r.thread_id ? null : r.id,
-    }));
+  // Only the members in the folder's own account go: the server refuses a
+  // selection that is not all in the target's account, and there is nothing
+  // it could do with the copy in the other one. That copy stays where it is,
+  // and the row stays listed on it.
+  async function moveSelected(mailboxId, accountId) {
+    const items = App.list.selection()
+      .flatMap((r) => App.members(r).filter((m) => m.account_id === accountId))
+      .map(memberItem);
     if (!items.length) return 0;
     const res = await App.api.bulkMove(items, mailboxId);
     return res.moved || 0;
@@ -272,7 +309,7 @@ App.bulk = (function () {
     return moved;
   }
 
-  async function move(mailboxId, name) {
+  async function move(mailboxId, name, accountId) {
     if (busy) return;
     const n = scope();
     if (!n) return;
@@ -288,7 +325,7 @@ App.bulk = (function () {
     render();
     try {
       if (folderMode) await moveFolder(mailboxId);
-      else await moveSelected(mailboxId);
+      else await moveSelected(mailboxId, accountId);
       folderMode = false;
       App.list.clearSelection();
     } catch (e) {
@@ -302,12 +339,10 @@ App.bulk = (function () {
 
   // --- Park ---
 
-  // The ticked rows, in one request. Conversations, like every bulk verb.
+  // The ticked rows, in one request. Conversations, like every bulk verb, in
+  // every account each row stands for (see selectionItems).
   async function parkSelected(parked) {
-    const items = App.list.selection().map((r) => ({
-      account_id: r.account_id, thread_id: r.thread_id || null,
-      message_id: r.thread_id ? null : r.id,
-    }));
+    const items = selectionItems();
     if (!items.length) return 0;
     const res = await App.api.bulkPark(items, parked);
     return res.moved || 0;
@@ -469,10 +504,7 @@ App.bulk = (function () {
   }
 
   async function trashSelected() {
-    const items = App.list.selection().map((r) => ({
-      account_id: r.account_id, thread_id: r.thread_id || null,
-      message_id: r.thread_id ? null : r.id,
-    }));
+    const items = selectionItems();
     if (!items.length) return;
     await App.api.bulkTrash(items);
   }
@@ -500,12 +532,12 @@ App.bulk = (function () {
   // rows go in one request — every placement of every message in them, so a
   // conversation that was imported into two folders does not leave half of
   // itself behind — and the folder-wide version chunks like every other
-  // whole-folder operation here.
+  // whole-folder operation here. A row that stands for several accounts sends
+  // one item per account, like Delete (see selectionItems), and importedOnly
+  // has already made sure every one of them is imported before the button
+  // that leads here was drawn outside Trash.
   async function purgeSelected() {
-    const items = App.list.selection().map((r) => ({
-      account_id: r.account_id, thread_id: r.thread_id || null,
-      message_id: r.thread_id ? null : r.id,
-    }));
+    const items = selectionItems();
     if (!items.length) return 0;
     const res = await App.api.bulkPurge(items);
     return res.deleted || 0;

@@ -106,7 +106,8 @@ App.list = (function () {
   }
 
   // The row payloads, not the ids: a bulk trash needs thread_id/account_id off
-  // each one to say what it is deleting.
+  // each one to say what it is deleting, and the members of a row that stands
+  // for the same conversation in several accounts (see App.members).
   function selection() {
     return rows.filter((r) => selected.has(r.id)).map((r) => r.data);
   }
@@ -120,7 +121,10 @@ App.list = (function () {
     // a tap, or Enter/j-k on the cursor — so the narrow layout turns the page
     // here rather than at each call site.
     App.mobile.show("reader");
-    App.reader.openThread(r.thread_id, r.account_id, r.id);
+    // Every account the row stands for, so a conversation that reached two of
+    // your addresses opens as one conversation rather than as whichever half
+    // the row happened to be built from.
+    App.reader.openThread(r.thread_id, App.memberAccounts(r), r.id);
     markSeen(r.id);
   }
 
@@ -138,6 +142,28 @@ App.list = (function () {
     if (dot) dot.remove();
   }
 
+  // The coloured edge that says which account a row belongs to, in the lists
+  // that mix accounts. A row that stands for the same conversation in several
+  // accounts (see App.members) splits the edge into one equal band per
+  // account, top to bottom in the order the server lists them, with hard stops
+  // so each band reads as a colour and not as a blend. The title names them,
+  // because two colours say "more than one" but not which ones. One account
+  // keeps the plain stripe it always had.
+  function acctStripe(r) {
+    const members = App.members(r);
+    if (members.length < 2) {
+      return `<span class="acct-stripe" style="background:${App.esc(r.account_color)}"></span>`;
+    }
+    const n = members.length;
+    const bands = members.map((m, i) =>
+      `${m.account_color || "transparent"} ${(i * 100 / n).toFixed(3)}% ${((i + 1) * 100 / n).toFixed(3)}%`)
+      .join(", ");
+    const names = members.map((m) => App.accountName(m.account_id)).filter(Boolean);
+    const title = `In ${n} accounts` + (names.length ? `: ${names.join(", ")}` : "");
+    return `<span class="acct-stripe" title="${App.esc(title)}"` +
+      ` style="background:linear-gradient(to bottom, ${App.esc(bands)})"></span>`;
+  }
+
   function row(r, showAccount) {
     const el = document.createElement("div");
     el.className = "msg-row" + (r.seen ? "" : " unread") + (r.id === activeId ? " active" : "")
@@ -146,8 +172,7 @@ App.list = (function () {
     el.dataset.thread = r.thread_id || "";
     tint(el, r.date);
 
-    const stripe = showAccount
-      ? `<span class="acct-stripe" style="background:${App.esc(r.account_color)}"></span>` : "";
+    const stripe = showAccount ? acctStripe(r) : "";
     const dot = r.seen ? "" : `<span class="unread-dot"></span>`;
     const check = `<input type="checkbox" class="msg-check" tabindex="-1"` +
       `${selected.has(r.id) ? " checked" : ""} aria-label="Select this conversation" />`;

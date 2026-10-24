@@ -1,6 +1,7 @@
 """Filter tokens (`:unread`, `:from <pattern>`, `:similar <fingerprint>`) lifted
 out of a search query,
-and the split of what is left into the terms the search ANDs together.
+and the split of what is left into the terms a message must contain and the
+`-terms` it must not.
 
 The search box is a single line, so filters are typed into the query itself
 rather than added as more controls above the results. Parsing happens here
@@ -44,8 +45,11 @@ _SIMILAR_RE = re.compile(
 # Search runs on every keystroke, so `:from` with the address not yet typed has
 # to mean "no filter yet" rather than "find the literal text :from".
 _PARTIAL_RE = re.compile(r"(?:(?<=\s)|\A):(?:from|to|similar)=?\s*\Z", re.I)
-# A double-quoted run, or a bare run of non-space characters.
-_TERMS_RE = re.compile(r'"([^"]*)"|(\S+)')
+# A double-quoted run, or a bare run of non-space characters, either one
+# optionally led by the `-` that makes it a term to leave out. The dash is only
+# looked for where a term starts, so the hyphen inside `Eco-CI` stays part of
+# the word.
+_TERMS_RE = re.compile(r'(-?)(?:"([^"]*)"|(\S+))')
 
 
 @dataclass
@@ -111,19 +115,54 @@ def parse(q: str) -> Query:
     return parsed
 
 
-def keyword_terms(q: str) -> list[str]:
-    """Split a keyword query into the substrings to AND together.
+def split_terms(q: str) -> tuple[list[str], list[str]]:
+    """Split a keyword query into the substrings a message must contain and the
+    ones it must not.
 
     Quoted runs survive as a single term, so `"how to build"` matches that
     phrase rather than the three words scattered anywhere in the mail. An
     unbalanced trailing quote is treated as an open phrase to end-of-query
     (`"how to bui` while still typing) instead of erroring — search runs on
     every keystroke, so a half-typed quote must not blank the results.
+
+    A term led by `-` is one to leave out, so `Eco-CI -NGINX` is the mail that
+    says Eco-CI and never mentions NGINX, and `-"build failed"` leaves out a
+    phrase. Only a dash at the start of a term counts. A word that really does
+    begin with one (`-v`, `-1`) is searched for by quoting it.
+
+    Two shapes of it are read as a negation still being typed and stand for
+    nothing yet, for the same reason a half-typed `:from ` does. A dash on its
+    own is the first. A dash and a single character is the second. On the way
+    to `-nginx`, `-n` would leave out nearly every mail in the box, and the
+    results being watched would blink empty on that keystroke. Nobody means it
+    as a search either, because one letter is in almost every message.
     """
     if q.count('"') % 2:
         q += '"'
-    terms = [(a or b) for a, b in _TERMS_RE.findall(q)]
-    return [t for t in terms if t.strip()]
+    wanted: list[str] = []
+    unwanted: list[str] = []
+    for neg, quoted, bare in _TERMS_RE.findall(q):
+        if bare == "-" and not neg:
+            continue
+        term = quoted or bare
+        if not term.strip():
+            continue
+        if not neg:
+            wanted.append(term)
+        elif len(term) > 1:
+            unwanted.append(term)
+    return wanted, unwanted
+
+
+def keyword_terms(q: str) -> list[str]:
+    """The terms a message must contain. They are what the search ANDs
+    together and what the reader marks in the thread it opens.
+
+    The `-terms` are not among them. They name what the results do not say, and
+    marking one where it turns up elsewhere in the conversation would dress the
+    reason a message was passed over up as a hit.
+    """
+    return split_terms(q)[0]
 
 
 def like_escape(term: str) -> str:

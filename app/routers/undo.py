@@ -473,15 +473,25 @@ def _cancel_reminder(db: DBSession, actions: list[PendingAction]) -> None:
     Silent when there is no pending reminder left: it may have fired in the
     seconds since, or been cancelled from the reminders view, and in both cases
     the placement half of this undo is still exactly what was asked for.
+
+    One keypress can hold more than one promise. The same conversation in two
+    accounts is one row in the lists, and reminding it sets a reminder in each
+    account under one op_id (app/routers/reminders.py). So every conversation
+    the operation touched is asked once, rather than stopping at the first
+    reminder found, which undid one account's half and left the other to park
+    its mail again when the deadline came.
     """
-    seen: set[int] = set()
+    asked: set[tuple] = set()
     for action in actions:
-        if action.message_pk is None or action.message_pk in seen:
+        if action.message_pk is None:
             continue
-        seen.add(action.message_pk)
         msg = db.get(Message, action.message_pk)
         if msg is None:
             continue
+        conversation = (msg.account_id, msg.thread_id or f"msg:{msg.id}")
+        if conversation in asked:
+            continue
+        asked.add(conversation)
         reminder = reminders.pending_for(db, msg)
         if reminder is not None:
             reminders.cancel(db, reminder)
@@ -492,7 +502,6 @@ def _cancel_reminder(db: DBSession, actions: list[PendingAction]) -> None:
             # distinction matters for what they do with a conversation that has
             # since been filed by hand, and the two are not interchangeable.
             journal.publish_reminder_op(db, reminder, "cancel")
-            return          # one per conversation, and they are all one thread
 
 
 def _cancel(db: DBSession, action: PendingAction, touched: set[int]) -> int:

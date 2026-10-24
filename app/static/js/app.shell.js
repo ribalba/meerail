@@ -563,6 +563,14 @@ App.shell = (function () {
     // without waiting out a poll.
     ["accounts", "messages", "flags", "cursor", "present", "folders", "extract",
      "outbox"].forEach((t) => es.addEventListener(t, scheduleRefresh));
+    // New mail stored. The list above reloads for it, and the conversation
+    // open in the reader has to look too: it may be what the mail belongs to,
+    // most often as the copy of a reply just sent from it (see mailArrived).
+    es.addEventListener("messages", (e) => {
+      let ev = null;
+      try { ev = JSON.parse(e.data); } catch (_) { /* checked anyway, below */ }
+      if (App.reader) App.reader.mailArrived(ev && ev.account);
+    });
     // A draft saved, sent or thrown away in another tab or browser. Not a
     // list refresh: only the composer's bar of parked drafts has to follow.
     es.addEventListener("drafts", (e) => {
@@ -609,6 +617,8 @@ App.shell = (function () {
     App.power.whenResumed(() => {
       connectSSE();
       scheduleRefresh();
+      // No account named: whatever landed while the stream was shut is unknown.
+      if (App.reader) App.reader.mailArrived();
     });
   }
 

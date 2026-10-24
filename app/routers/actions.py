@@ -14,7 +14,7 @@ mail by the same rules without importing a router — see mailops' docstring.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session as DBSession, selectinload
@@ -24,7 +24,7 @@ from .. import events, mailops
 from core import undo
 from core.database import get_db
 from ..deps import require_ui_auth
-from .messages import _resolve_mailbox_ids
+from .messages import _resolve_mailbox_ids, account_ids_param, also_ids
 from core.models import Mailbox, Message, MessageLocation, parked_out
 
 router = APIRouter(prefix="/api/messages", tags=["actions"], dependencies=[Depends(require_ui_auth)])
@@ -35,6 +35,16 @@ def _get_message(db: DBSession, message_id: int) -> Message:
     if msg is None:
         raise HTTPException(status_code=404, detail="Message not found")
     return msg
+
+
+def _copies(db: DBSession, ids: list[int]) -> list[Message]:
+    """The messages behind ``also`` ids, passing over any that have gone.
+
+    A copy deleted in another window, or collected by the agent since the
+    reader was drawn, is not a reason to refuse the keypress on the one in
+    front of the user. It has gone, which is as filed as it gets.
+    """
+    return [m for m in (db.get(Message, i) for i in ids) if m is not None]
 
 
 class BulkItem(BaseModel):
@@ -902,22 +912,54 @@ def _change_flags(db: DBSession, message_id: int, change, value: bool) -> None:
                "changed. Try again in a moment.")
 
 
+def _change_copy_flags(db: DBSession, message_ids: list[int], change, value: bool) -> None:
+    """The same flag change for the other copies of a mail (``also``).
+
+    One at a time and each committed on its own, through the same retry as
+    the message itself, because each copy is its own set of placements in its
+    own account and can be in the middle of its own move. A copy that has gone
+    is passed over. A copy that keeps moving under every attempt is still a
+    409, after the copies before it have landed: the change did not reach all
+    of the mail, and pressing again finishes it without undoing anything.
+    """
+    for message_id in message_ids:
+        try:
+            _change_flags(db, message_id, change, value)
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+
+
 @router.post("/{message_id}/mark")
-def mark(message_id: int, seen: bool = True, db: DBSession = Depends(get_db)):
+def mark(message_id: int, seen: bool = True, also: list[int] = Query([]),
+         db: DBSession = Depends(get_db)):
+    """Mark a message read or unread, and with ``also`` its copies in other accounts."""
+    copies = also_ids(also, message_id)
     _change_flags(db, message_id, mailops.set_seen, seen)
-    events.publish({"type": "flags", "message_id": message_id})
+    try:
+        _change_copy_flags(db, copies, mailops.set_seen, seen)
+    finally:
+        # Told even if a copy refused, because the message itself has changed.
+        events.publish({"type": "flags", "message_id": message_id})
     return {"ok": True, "seen": seen}
 
 
 @router.post("/{message_id}/flag")
-def flag(message_id: int, flagged: bool = True, db: DBSession = Depends(get_db)):
+def flag(message_id: int, flagged: bool = True, also: list[int] = Query([]),
+         db: DBSession = Depends(get_db)):
+    """Flag or unflag a message, and with ``also`` its copies in other accounts."""
+    copies = also_ids(also, message_id)
     _change_flags(db, message_id, mailops.set_flagged, flagged)
-    events.publish({"type": "flags", "message_id": message_id})
+    try:
+        _change_copy_flags(db, copies, mailops.set_flagged, flagged)
+    finally:
+        events.publish({"type": "flags", "message_id": message_id})
     return {"ok": True, "flagged": flagged}
 
 
 def _message_move(db: DBSession, msg: Message, target: Mailbox, op_kind: str,
-                  source_mailbox_id: int | None) -> dict:
+                  source_mailbox_id: int | None,
+                  copies: list[tuple[Message, Mailbox]] | None = None) -> dict:
     """File one message: out of one folder, or out of every folder it is in.
 
     Which of the two is `source_mailbox_id`. Naming a folder moves that
@@ -936,19 +978,34 @@ def _message_move(db: DBSession, msg: Message, target: Mailbox, op_kind: str,
     for a source that is already the target; the all-placements path drops those
     placements from the set it walks and comes back having moved nothing, which
     says the same thing.
+
+    ``copies`` are the other copies of the same mail in other accounts (the
+    route's ``also``), each with its own account's destination, resolved by
+    the caller before anything here moves. A copy is filed the second way, out
+    of every folder it is in: the folder on screen belongs to the message's
+    own account and names nothing in another. All of it is one keypress, so it
+    is one op_id and one Undo, and the refusal above only comes when nothing
+    moved anywhere. A message already in the target still lets its copies go.
     """
     op_id = undo.new_op_id()
     touched: set[int] = set()
     if source_mailbox_id is None:
         moved = mailops.move_messages(db, [msg], target, touched, op_id, op_kind)
+    elif copies and source_mailbox_id == target.id:
+        moved = 0          # this copy is there already; the others may not be
     else:
         moved = mailops.move_to(db, msg, source_mailbox_id, target, touched,
                                 op_id=op_id, op_kind=op_kind)
+    accounts = {msg.account_id}
+    for copy, copy_target in copies or []:
+        moved += mailops.move_messages(db, [copy], copy_target, touched, op_id, op_kind)
+        accounts.add(copy.account_id)
     if not moved:
         raise HTTPException(status_code=409, detail=mailops.already_there(target))
     mailops.recompute(db, touched)
     db.commit()
-    mailops.wake_agent(db, msg.account_id)
+    for account_id in accounts:
+        mailops.wake_agent(db, account_id)
     events.publish({"type": "present", "message_id": msg.id})
     # The operation id goes back to the browser so the Recent actions panel can
     # show the entry the moment the keypress lands, rather than waiting for the
@@ -958,21 +1015,35 @@ def _message_move(db: DBSession, msg: Message, target: Mailbox, op_kind: str,
 
 @router.post("/{message_id}/trash")
 def trash(message_id: int, source_mailbox_id: int | None = None,
-          db: DBSession = Depends(get_db)):
+          also: list[int] = Query([]), db: DBSession = Depends(get_db)):
+    """Trash a message, and with ``also`` its copies in other accounts.
+
+    Every destination is resolved before anything moves, so an account that
+    cannot take the keypress refuses all of it rather than half.
+    """
+    ids = also_ids(also, message_id)
     msg = _get_message(db, message_id)
-    return _message_move(db, msg, mailops.trash_mailbox(db, msg.account_id),
-                         "trash", source_mailbox_id)
+    target = mailops.trash_mailbox(db, msg.account_id)
+    copies = [(c, mailops.trash_mailbox(db, c.account_id)) for c in _copies(db, ids)]
+    return _message_move(db, msg, target, "trash", source_mailbox_id, copies)
 
 
 @router.post("/{message_id}/archive")
 def archive(message_id: int, source_mailbox_id: int | None = None,
-            db: DBSession = Depends(get_db)):
+            also: list[int] = Query([]), db: DBSession = Depends(get_db)):
+    """Archive a message, and with ``also`` its copies in other accounts.
+
+    A copy whose account has no Archive refuses the whole keypress before
+    anything moves, for the reason trash gives.
+    """
+    ids = also_ids(also, message_id)
     msg = _get_message(db, message_id)
-    return _message_move(db, msg, mailops.require_archive_mailbox(db, msg.account_id),
-                         "archive", source_mailbox_id)
+    target = mailops.require_archive_mailbox(db, msg.account_id)
+    copies = [(c, mailops.require_archive_mailbox(db, c.account_id)) for c in _copies(db, ids)]
+    return _message_move(db, msg, target, "archive", source_mailbox_id, copies)
 
 
-def _thread_move(db: DBSession, thread_id: str, account_id: int, target: Mailbox | None,
+def _thread_move(db: DBSession, thread_id: str, account_ids: list[int], target_of,
                  op_kind: str = "move", spare_own_mail: bool = False) -> tuple[int, str]:
     """File an entire conversation, every message and every placement.
 
@@ -984,28 +1055,50 @@ def _thread_move(db: DBSession, thread_id: str, account_id: int, target: Mailbox
     well as the inbox); clearing only the placement the reader happened to pick
     leaves the other one, which is enough for the row to stay exactly where it
     was. Both are why "archive" could look like it did nothing.
+
+    In every account of ``account_ids``, because a list that spans accounts
+    shows the same conversation in two of them as one row (app/spanning.py),
+    and archiving that row has to archive both halves. Each account's messages
+    go to that account's own folder, ``target_of(db, account_id)``: no move
+    crosses from one account to another. Every destination is resolved before
+    anything moves, so an account with no Archive refuses the whole keypress
+    instead of archiving one half and leaving the other in the inbox. Accounts
+    that hold none of the thread are passed over, and only a thread that none
+    of them holds is a 404.
     """
-    msgs = db.execute(
-        select(Message).where(Message.account_id == account_id, Message.thread_id == thread_id)
-    ).scalars().all()
-    if not msgs:
+    by_account: dict[int, list[Message]] = {}
+    for msg in db.execute(
+        select(Message).where(Message.account_id.in_(account_ids),
+                              Message.thread_id == thread_id)
+    ).scalars().all():
+        by_account.setdefault(msg.account_id, []).append(msg)
+    present = [a for a in account_ids if a in by_account]
+    if not present:
         raise HTTPException(status_code=404, detail="Thread not found")
+    targets = {account_id: target_of(db, account_id) for account_id in present}
     touched: set[int] = set()
     # One id for the conversation: archiving a thread is one keypress, and Undo
     # puts the whole conversation back rather than the message the reader
-    # happened to have open.
+    # happened to have open. Across accounts as well, as bulk_trash does.
     op_id = undo.new_op_id()
-    moved = mailops.move_messages(db, msgs, target, touched, op_id, op_kind,
-                                  spare_own_mail=spare_own_mail)
-    if not moved and target is not None:
+    moved = 0
+    for account_id in present:
+        moved += mailops.move_messages(db, by_account[account_id], targets[account_id],
+                                       touched, op_id, op_kind,
+                                       spare_own_mail=spare_own_mail)
+    first = targets[present[0]]
+    if not moved and first is not None:
         # Every placement was already in the target folder, so the conversation
         # is where it was being asked to go. Said rather than reported as a
         # success that moves nothing — see move_to, which answers the
-        # single-message version of the same keypress.
-        raise HTTPException(status_code=409, detail=mailops.already_there(target))
+        # single-message version of the same keypress. Only when that is true
+        # in every account: one half already archived is no reason to refuse
+        # the other.
+        raise HTTPException(status_code=409, detail=mailops.already_there(first))
     mailops.recompute(db, touched)
     db.commit()
-    mailops.wake_agent(db, msgs[0].account_id)
+    for account_id in present:
+        mailops.wake_agent(db, account_id)
     # One event for the conversation, not one per message: each publish() is a
     # pg_notify round trip of its own (see mailops.announce), and nothing reads
     # the message_id off these — to the UI they are just "something changed".
@@ -1014,7 +1107,8 @@ def _thread_move(db: DBSession, thread_id: str, account_id: int, target: Mailbox
 
 
 @router.post("/threads/{thread_id:path}/archive")
-def archive_thread(thread_id: str, account_id: int, db: DBSession = Depends(get_db)):
+def archive_thread(thread_id: str, account_id: list[int] = Query(...),
+                   db: DBSession = Depends(get_db)):
     """File the conversation, and leave the half of it you wrote where it is.
 
     The one conversation verb that spares \\Sent and \\Drafts. Archiving is
@@ -1029,17 +1123,22 @@ def archive_thread(thread_id: str, account_id: int, db: DBSession = Depends(get_
     Trash does not do this, deliberately. "Delete this conversation" means the
     whole of it, the copies you wrote included — the same reading every mail
     client has of it, and the one that leaves nothing behind to explain.
+
+    ``account_id`` repeats, one per account the conversation is in (see
+    _thread_move).
     """
-    target = mailops.require_archive_mailbox(db, account_id)
-    moved, op_id = _thread_move(db, thread_id, account_id, target, "archive",
+    moved, op_id = _thread_move(db, thread_id, account_ids_param(account_id),
+                                mailops.require_archive_mailbox, "archive",
                                 spare_own_mail=True)
     return {"ok": True, "moved": moved, "op_id": op_id}
 
 
 @router.post("/threads/{thread_id:path}/trash")
-def trash_thread(thread_id: str, account_id: int, db: DBSession = Depends(get_db)):
-    target = mailops.trash_mailbox(db, account_id)
-    moved, op_id = _thread_move(db, thread_id, account_id, target, "trash")
+def trash_thread(thread_id: str, account_id: list[int] = Query(...),
+                 db: DBSession = Depends(get_db)):
+    """Trash the whole conversation, in every account named (see _thread_move)."""
+    moved, op_id = _thread_move(db, thread_id, account_ids_param(account_id),
+                                mailops.trash_mailbox, "trash")
     return {"ok": True, "moved": moved, "op_id": op_id}
 
 
@@ -1055,7 +1154,8 @@ def move(message_id: int, mailbox_id: int, source_mailbox_id: int | None = None,
 
 
 @router.post("/{message_id}/park")
-def park(message_id: int, parked: bool = True, db: DBSession = Depends(get_db)):
+def park(message_id: int, parked: bool = True, also: list[int] = Query([]),
+         db: DBSession = Depends(get_db)):
     """Take this message's conversation off the inbox into Parked, or back again.
 
     Named by a message rather than by a thread, like "remind me". The server
@@ -1063,13 +1163,28 @@ def park(message_id: int, parked: bool = True, db: DBSession = Depends(get_db)):
     threaded conversation and a message that never got threaded alike, and a
     reply that landed after the reader was drawn goes with the rest.
 
+    ``also`` names one message of the same conversation in each other account
+    it is in (the reader's ``members``), and each of those conversations is
+    parked with this one, under the same op_id. Parked lists a conversation
+    across accounts as one row, so parking half of it would leave the other
+    half in All Inboxes as if the key had not been pressed.
+
     A request that changes nothing is refused with the reason rather than
     answered "ok". A move into the folder a message is already in follows the
     same rule (mailops.already_there), for the same reason. A keypress that
-    silently did nothing reads as a keypress that is broken.
+    silently did nothing reads as a keypress that is broken. Asked of every
+    account's part together, so one half already parked does not refuse the
+    other.
     """
+    ids = also_ids(also, message_id)
     msg = _get_message(db, message_id)
     msgs = mailops.conversation_of(db, msg)
+    have = {m.id for m in msgs}
+    for copy in _copies(db, ids):
+        for m in mailops.conversation_of(db, copy):
+            if m.id not in have:
+                have.add(m.id)
+                msgs.append(m)
     op_id = undo.new_op_id()
     changed = mailops.set_parked(db, msgs, parked, op_id)
     if not changed:

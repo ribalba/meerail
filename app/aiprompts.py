@@ -51,7 +51,10 @@ sender and recipient. Matching is case-insensitive everywhere.
 There are two modes, and you choose one:
 
   keyword — each bare word is a substring that must appear somewhere in the \
-message. A "quoted phrase" is one term, matched literally, spaces and all.
+message. A "quoted phrase" is one term, matched literally, spaces and all. A \
+term led by a dash (-word, -"a phrase") is one the message must NOT contain. \
+Only a dash at the start of a term counts, so the hyphen in Eco-CI is part of \
+the word. A word that itself starts with a dash is searched for in quotes ("-v").
   regex  — the text part becomes a single POSIX regular expression (Postgres \
 `~*`) matched against the message. Use this when the description needs \
 alternation, optional parts, or a pattern rather than words.
@@ -76,8 +79,9 @@ pattern when the description is specific about who.
 
 # What does not exist
 
-There is no date, size, folder, subject-only or label syntax, and no OR, NOT or \
-parentheses between terms. Do not invent tokens like :before, :after, :subject, \
+There is no date, size, folder, subject-only or label syntax, and no OR or \
+parentheses between terms. The leading dash of keyword mode is the only NOT. In \
+regex mode a dash is an ordinary character, so nothing can be left out there. Do not invent tokens like :before, :after, :subject, \
 :larger or :in — they would be searched for as literal text and the query would \
 find nothing. Time window and folder are controls beside the search box, not \
 query syntax, so if the description asks for one, leave it out of the query and \
@@ -111,10 +115,14 @@ Description: the message where Ada sent me the board meeting agenda
 {"mode": "keyword", "query": "\\"board meeting\\" agenda :from ada", "note": \
 "Mail from Ada containing the exact phrase \\"board meeting\\" and the word agenda."}
 
+Description: mail about Eco-CI that has nothing to do with NGINX
+{"mode": "keyword", "query": "Eco-CI -NGINX", "note": "Mail that mentions \
+Eco-CI and never mentions NGINX."}
+
 Description: anything about invoices or receipts, but not the newsletters
 {"mode": "regex", "query": "(invoice|receipt)", "note": "Regex mode, because \
-either-or needs it. There is no NOT, so newsletters are not excluded — add a \
-word they all share if too many turn up."}
+either-or needs it. Leaving words out only works in keyword mode, so the \
+newsletters are not excluded. Add a word they all share if too many turn up."}
 
 Description: emails from last week about the server outage
 {"mode": "keyword", "query": "server outage", "note": "There is no date syntax — \

@@ -392,6 +392,11 @@ body.resizing { cursor: col-resize; user-select: none; }
 /* The icon must not be squeezed to buy the name another character. */
 .folder-chip svg { flex: 0 0 auto; }
 .folder-chip .fc-name { overflow: hidden; text-overflow: ellipsis; }
+/* A reader card that is the same mail in two accounts draws each copy's chips
+   behind a dot in that account's colour (folderChipsOf in app.reader.js). Both
+   copies are usually in an Inbox, and the dot is what says which inbox. */
+.fc-copy { display: inline-flex; align-items: center; gap: .3rem; min-width: 0; }
+.fc-acct { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
 .flag-dot { color: var(--flag); display: flex; }
 .attach-glyph { color: var(--text-faint); display: flex; }
 /* "Coming back Monday 09:00", on a conversation that was put off. Keyed to
@@ -402,6 +407,9 @@ body.resizing { cursor: col-resize; user-select: none; }
   display: inline-flex; align-items: center; gap: .22rem; white-space: nowrap;
   color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent);
   border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent); }
+/* One colour per account. A row that stands for the same conversation in
+   several accounts gets an inline gradient with hard stops instead, one equal
+   band per account down its length (acctStripe in app.list.js). */
 .acct-stripe { position: absolute; left: 0; top: 0; bottom: 0; width: 3px; }
 
 /* --- Swipe actions ---
@@ -921,6 +929,12 @@ mark.hit.hit-on { background: #ff8a3d; box-shadow: 0 0 0 2px #ff8a3d; }
 .move-item.on .mm-icon { color: var(--accent); }
 .mm-icon { display: flex; color: var(--text-muted); }
 .mm-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The account a folder belongs to, ahead of its name, in a menu that offers
+   the folders of more than one account (App.moveMenuItems). Muted and capped,
+   because the folder is what is being chosen and the account only says which
+   Inbox is which. The row's title spells both out when this is cut short. */
+.mm-acct { flex: 0 1 auto; max-width: 45%; font-size: .75rem; color: var(--text-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .move-empty { padding: .5rem .6rem; font-size: .82rem; color: var(--text-muted); }
 
 /* --- "Remind me" ---

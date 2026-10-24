@@ -294,5 +294,6 @@ App.reminders = (function () {
     return el;
   }
 
-  return { presets, stamp, open, close, strip };
+  // isOpen: the reader asks before it redraws the toolbar the menu hangs off.
+  return { presets, stamp, open, close, isOpen: () => !!openMenu, strip };
 })();

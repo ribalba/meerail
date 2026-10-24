@@ -5,7 +5,8 @@ extracted attachment text).
   search_text. The date-window filter bounds patterns that can't use that index
   (no literal >=3 chars).
 - mode=keyword -> AND of substrings; "quoted runs" stay one term so spaces
-  inside them are matched literally. Answered from the GIN index on search_tsv,
+  inside them are matched literally, and a `-term` is one the message must not
+  contain. Answered from the GIN index on search_tsv,
   which holds every suffix of every word in the message: a substring of a word
   is a prefix of one of its suffixes, so this is the same answer ILIKE gave
   without reading the text to get it. A term that spans the separators the
@@ -30,7 +31,7 @@ import re
 from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import and_, cast, exists, func, literal, or_, select, text, tuple_
+from sqlalchemy import and_, cast, exists, false, func, literal, or_, select, text, tuple_
 from sqlalchemy.dialects.postgresql import TSQUERY
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session as DBSession
@@ -120,6 +121,33 @@ def _similar_clause(db: DBSession, value: str):
     return bodysig.shares_band(Message.body_sig, sig)
 
 
+def _term_clause(term: str, indexed: bool):
+    """WHERE for "this message contains `term`", case-insensitively.
+
+    A `-term` is the negation of exactly this clause, so `-x` leaves out the
+    very mail that `x` would find. Building the two separately is how they would
+    drift apart, and a term that excludes a little more than it finds is mail
+    that quietly stops turning up.
+    """
+    tsq, exact = searchquery.tsquery(term)
+    hit = None
+    if indexed and tsq:
+        # Cast, not to_tsquery: searchquery.tsquery already hands back tsquery
+        # syntax, and running the text-search parser over it is what used to
+        # lose hex ids and order numbers.
+        hit = Message.search_tsv.op("@@")(cast(literal(tsq), TSQUERY))
+        if exact:
+            # The index answers this term outright; going to the text as well
+            # would undo the point of having it.
+            return hit
+    # Either there is no index to ask yet, or the term spans the separators it
+    # splits on and the tsquery above is only a prefilter. A term is a literal,
+    # so % and _ in it are characters the user typed ("50% off"), not LIKE
+    # wildcards.
+    text_hit = Message.search_text.ilike(f"%{searchquery.like_escape(term)}%", escape="\\")
+    return text_hit if hit is None else and_(hit, text_hit)
+
+
 def _bound_runtime(db: DBSession) -> None:
     if db.get_bind().dialect.name == "postgresql":
         # LOCAL, so it lasts exactly as long as this request's transaction and
@@ -190,30 +218,23 @@ def search(
             _check_regex(parsed.text, "the query")
             clauses.append(Message.search_text.op("~*")(parsed.text))
         else:
-            terms = searchquery.keyword_terms(parsed.text)
-            if not terms:
+            wanted, unwanted = searchquery.split_terms(parsed.text)
+            if not wanted and not unwanted and not parsed.filtered:
+                # Nothing searchable is left in the text (a lone `-` or `"`
+                # while typing), and no filter either. With a filter the query
+                # still stands on that, so `:unread -` keeps showing unread
+                # mail while the word after the dash is typed.
                 return empty
             indexed = _index_built(db)
-            for t in terms:
-                tsq, exact = searchquery.tsquery(t)
-                if indexed and tsq:
-                    # Cast, not to_tsquery: searchquery.tsquery already hands
-                    # back tsquery syntax, and running the text-search parser
-                    # over it is what used to lose hex ids and order numbers.
-                    clauses.append(
-                        Message.search_tsv.op("@@")(cast(literal(tsq), TSQUERY))
-                    )
-                    if exact:
-                        # The index answers this term outright; going to the
-                        # text as well would undo the point of having it.
-                        continue
-                # Either there is no index to ask yet, or the term spans the
-                # separators it splits on and the tsquery above is only a
-                # prefilter. A term is a literal, so % and _ in it are
-                # characters the user typed ("50% off"), not LIKE wildcards.
-                clauses.append(
-                    Message.search_text.ilike(f"%{searchquery.like_escape(t)}%", escape="\\")
-                )
+            clauses.extend(_term_clause(t, indexed) for t in wanted)
+            # A `-term` is checked per message, like every other term, so a
+            # conversation still turns up through any message of it that does
+            # not say the word. COALESCE because NOT of a NULL is NULL, and that
+            # would drop the row. Neither column can be NULL here today, since
+            # search_text is NOT NULL and the index is only asked once every
+            # row has a search_tsv. Should that change, a message that cannot
+            # be shown to contain the term is one that does not.
+            clauses.extend(~func.coalesce(_term_clause(t, indexed), false()) for t in unwanted)
     elif not parsed.filtered:
         # The whole query was a filter still being typed (`:from `).
         return empty

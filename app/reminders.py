@@ -217,7 +217,8 @@ def _conversation(db: DBSession, msg: Message) -> list[Message]:
     ).scalars().all())
 
 
-def set_reminder(db: DBSession, msg: Message, due_at: datetime) -> tuple[Reminder, str | None]:
+def set_reminder(db: DBSession, msg: Message, due_at: datetime,
+                 op_id: str | None = None) -> tuple[Reminder, str | None]:
     """Park this conversation and write down when to bring it back.
 
     A second reminder on a conversation that already has one only moves the
@@ -225,6 +226,12 @@ def set_reminder(db: DBSession, msg: Message, due_at: datetime) -> tuple[Reminde
     Archive, so there is nothing to move, and the folders it originally came out
     of — the only record of where it goes back to — would be overwritten with
     "Archive", which is where it is precisely because of the first reminder.
+
+    ``op_id`` is for a keypress that parks more than one conversation: the
+    same mail in two accounts is one row in the lists, and reminding it sets
+    one reminder per account under one shared id, so that one Undo takes all
+    of them back (app/routers/reminders.py). Left out, the parking is an
+    operation of its own, which is what the journal's apply path wants.
     """
     existing = pending_for(db, msg)
     if existing is not None:
@@ -265,7 +272,7 @@ def set_reminder(db: DBSession, msg: Message, due_at: datetime) -> tuple[Reminde
     # a conversation out of the inbox, which is exactly what that list is for —
     # leaving it out made "remind me" the one action that happened invisibly.
     # Undoing it takes the promise back too; see app/routers/undo.py.
-    op_id = undo.new_op_id()
+    op_id = op_id or undo.new_op_id()
     move_messages(db, msgs, park, touched, op_id, "remind")
     recompute(db, touched)
 

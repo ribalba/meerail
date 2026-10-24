@@ -8,6 +8,10 @@ App.reader = (function () {
   let imagesFor = new Set();    // message ids with remote images loaded
   let plainFor = new Set();     // message ids switched to their plain-text part
   let allTo = new Set();        // message ids showing their full recipient list
+  let dropped = new Set();      // message ids this pane took off itself — see mailArrived()
+  let threadSearch = null;      // the search the open thread was fetched with
+  let arrivalTimer = null;      // mail landed, the open thread is due a look
+  let fetchingNew = false;      // ...and that look is on its way
   let keyFocus = false;         // are the arrow keys scrolling this pane?
   // The search that led here, captured when the thread opened. Held rather than
   // read live off the search box so a rerender mid-typing keeps marking the
@@ -53,6 +57,30 @@ App.reader = (function () {
     return msgs.length ? msgs[msgs.length - 1] : null;
   }
 
+  // The accounts the open conversation is being read in. Usually one. The
+  // unified lists fold the same thread at two of your addresses into one row,
+  // and opening that row asks for it in both (see App.memberAccounts), so
+  // everything that names the conversation (filing it, dropping its row,
+  // fetching it again) has to name all of them. Set once in openThread from
+  // the server's answer, so it does not shift as cards are taken off the pane.
+  function threadAccounts() {
+    return currentThread && currentThread.account_ids ? currentThread.account_ids : [];
+  }
+
+  // The other copies of a message the server folded into one card: the same
+  // mail delivered to a second account. Read, flagged or filed, they go with
+  // the card, or the copy nobody can see goes on saying unread in All Inboxes.
+  function twinIds(m) { return (m.twins || []).map((t) => t.id); }
+
+  // One message from each of the conversation's other accounts, for the verbs
+  // the server resolves into a whole conversation from a single message (park,
+  // remind, taking a reminder back). The target names its own account's half,
+  // and these name the rest. Empty for a conversation in one account.
+  function alsoMembers(target) {
+    return ((currentThread && currentThread.members) || [])
+      .filter((x) => x.account_id !== target.account_id).map((x) => x.id);
+  }
+
   function frameDoc(html) {
     // Emails are rendered on white (most assume it), inside a script-less iframe.
     // The base href makes relative cid: image URLs resolve against the server
@@ -96,12 +124,16 @@ App.reader = (function () {
 
   // A conversation is its server thread id where it has one; a message that
   // belongs to no thread stands in with its own. Both are scoped by account,
-  // which is what the ids themselves are unique within.
+  // which is what the ids themselves are unique within. A thread read in two
+  // accounts at once is filed under the lower account id. A thread read in one
+  // account keeps the key it always had, so the history saved before threads
+  // could span accounts is still found.
   function viewedKey() {
     const msgs = currentThread ? currentThread.messages : [];
     if (!msgs.length) return null;
+    const accounts = threadAccounts();
     return currentThread.thread_id
-      ? `t${msgs[0].account_id}:${currentThread.thread_id}`
+      ? `t${accounts.length ? Math.min(...accounts) : msgs[0].account_id}:${currentThread.thread_id}`
       : `m${msgs[0].account_id}:${msgs[0].id}`;
   }
 
@@ -299,7 +331,11 @@ App.reader = (function () {
         // visible anywhere else in the frame.
         if (App.linkpeek) App.linkpeek.watch(doc);
       } catch (_) { frame.style.height = "400px"; }
-      if (p === pin) landOn();
+      // Only a draw that asked to land (see rerender) has a pin to compare.
+      // Without the first test, null matched null, and every redraw that keeps
+      // the view where it was (a flag, a fold, mail arriving) threw the pane
+      // down to the newest message as each frame loaded.
+      if (p && p === pin) landOn();
       if (r === renderId && --frames <= 0) settle();
     });
     container.appendChild(frame);
@@ -671,10 +707,12 @@ App.reader = (function () {
 
   // The one way the query changes. Keyword rules whatever the search box is set
   // to: a regex typed into a box this small, against a thread you can see all
-  // of, is not what anyone means by "find this word".
+  // of, is not what anyone means by "find this word". The search box's
+  // `-terms` do not apply either. A find box has nothing to leave out, so `-1`
+  // typed here looks for the dash.
   function setFind(q) {
     findQ = (q || "").trim();
-    findMarks = findQ ? App.highlight.patterns(findQ, "keyword") : [];
+    findMarks = findQ ? App.highlight.patterns(findQ, "find") : [];
     remark();
     collectHits();
     // Straight to the first match, the way every find box does — typing is the
@@ -1023,52 +1061,91 @@ App.reader = (function () {
     mountMenu(el, anchor);
   }
 
+  // The copy of a card's mail that is filed in `accountId`: the card's own
+  // message, or a twin the server folded into it. Null when the mail never
+  // reached that account. Twins carry their own `locations`, so sourceOf()
+  // reads them the same way it reads a message.
+  function copyIn(m, accountId) {
+    if (m.account_id === accountId) return m;
+    return (m.twins || []).find((t) => t.account_id === accountId) || null;
+  }
+
   function openMoveMenu(m, anchor, one) {
     closeMoveMenu();
-    const source = sourceOf(m);
-    // The folder it already sits in is not a destination; neither is a folder
-    // it is already filed under, which IMAP would take but which reads as a
-    // move that did nothing.
-    const here = new Set(m.locations.map((loc) => loc.mailbox_id));
-    const folders = (App.shell ? App.shell.mailboxesFor(m.account_id) : [])
-      .filter((mb) => mb.id !== source && !here.has(mb.id));
+    // Whose folders are offered. A message by itself can go to a folder of any
+    // account it reached, a conversation to a folder of any account it is
+    // being read in. Nearly always that is one account, and the menu is the
+    // one it always was.
+    let accounts = one
+      ? [m.account_id, ...(m.twins || []).map((t) => t.account_id)]
+      : threadAccounts();
+    accounts = accounts.filter((id, i) => accounts.indexOf(id) === i);
+    if (!accounts.length) accounts = [m.account_id];
+    const folders = accounts.flatMap((accountId) => {
+      // The folder it already sits in is not a destination; neither is a folder
+      // it is already filed under, which IMAP would take but which reads as a
+      // move that did nothing. Asked of the copy in that account, since that is
+      // the copy a folder there would move.
+      const copy = copyIn(m, accountId);
+      const source = copy ? sourceOf(copy) : null;
+      const here = new Set(copy ? copy.locations.map((loc) => loc.mailbox_id) : []);
+      return (App.shell ? App.shell.mailboxesFor(accountId) : [])
+        .filter((mb) => mb.id !== source && !here.has(mb.id))
+        .map((mb) => ({ mb, accountId }));
+    });
 
     const el = document.createElement("div");
     el.className = "move-menu";
     el.innerHTML = folders.length
-      // The path, not the leaf: a menu offering three folders called "2024" is
-      // not a choice anybody can make.
-      ? folders.map((mb) => `<button class="move-item" data-mailbox="${mb.id}">
-          <span class="mm-icon">${App.icon(App.roleIcon(mb.role), 15)}</span>
-          <span class="mm-name">${App.esc(mb.path || mb.display_name)}</span></button>`).join("")
+      ? App.moveMenuItems(folders, accounts.length > 1)
       : `<div class="move-empty">No other folders</div>`;
 
     el.addEventListener("click", (e) => {
       const item = e.target.closest("[data-mailbox]");
       if (!item) return;
       const mailboxId = Number(item.dataset.mailbox);
+      const accountId = Number(item.dataset.account);
       closeMoveMenu();
-      if (one) moveMessageTo(m, mailboxId); else moveThreadTo(mailboxId);
+      if (one) moveMessageTo(m, mailboxId, accountId); else moveThreadTo(mailboxId, accountId);
     });
     mountMenu(el, anchor);
   }
 
   // Like archive and trash, a move takes the whole conversation with it — each
   // message leaves its own folder, so no reply is stranded behind.
-  function moveThreadTo(mailboxId) {
+  //
+  // A folder belongs to one account, so in a conversation read in two of them
+  // the folder picked decides which half moves: every message filed in that
+  // account, whether it is a card's own copy or a twin folded into one. The
+  // other account's copies stay where they are. That is deliberate, since no
+  // IMAP command carries mail from one account to another. Cards with no copy
+  // in the chosen account stay on the pane, and the list row is left to the
+  // reload to settle, because the other half may well still be listed.
+  function moveThreadTo(mailboxId, accountId) {
     try {
-      const targets = moveTargets();
+      const going = [];
+      const targets = [];
+      for (const m of currentThread.messages) {
+        const copy = copyIn(m, accountId);
+        const source = copy && sourceOf(copy);
+        if (!source) continue;
+        going.push(m);
+        targets.push({ id: copy.id, source });
+      }
       if (!targets.length) throw new Error("No source mailbox for this message");
-      finishRemove(targets.map((t) => t.m), (async () => {
-        for (const t of targets) await App.api.moveMsg(t.m.id, mailboxId, t.source);
-      })());
+      finishRemove(going, (async () => {
+        for (const t of targets) await App.api.moveMsg(t.id, mailboxId, t.source);
+      })(), threadAccounts().length > 1);
     } catch (e) { alert(e.message || "Move failed"); }
   }
 
   // The same verb from a message's own toolbar: this one message, and no source
-  // folder — see removeMessage.
-  function moveMessageTo(m, mailboxId) {
-    finishRemove([m], App.api.moveMsg(m.id, mailboxId), true);
+  // folder — see removeMessage. On a card that is the same mail in two
+  // accounts only the copy in the chosen folder's account moves, and the other
+  // copy stays where it is, for the reason moveThreadTo gives.
+  function moveMessageTo(m, mailboxId, accountId) {
+    const copy = copyIn(m, accountId) || m;
+    finishRemove([m], App.api.moveMsg(copy.id, mailboxId), true);
   }
 
   // Archive/trash the whole conversation. Split out of handleAction so the
@@ -1079,24 +1156,29 @@ App.reader = (function () {
   // server resolves the thread fresh and empties every folder it is filed
   // under, so a message that arrived after this pane was drawn — or a second
   // placement under a label — can't hold the row in the list.
+  //
+  // In every account the conversation is being read in, in that one call, so
+  // the keypress is one operation to undo, and a missing Archive or Trash in
+  // either account refuses it before anything has moved.
   function removeThread(act) {
     const msgs = currentThread ? currentThread.messages : [];
     if (!msgs.length) return;
-    const accountId = msgs[0].account_id;
+    const accounts = threadAccounts();
     // Only a threaded conversation has an id to act on. A message that never
-    // got threaded stands alone, so its single placement is the whole job.
+    // got threaded stands alone, so its single placement is the whole job,
+    // along with the copies of it in other accounts.
     if (currentThread.thread_id) {
       const threadId = currentThread.thread_id;
       return finishRemove(msgs.slice(),
-        act === "archive" ? App.api.archiveThread(threadId, accountId)
-                          : App.api.trashThread(threadId, accountId));
+        act === "archive" ? App.api.archiveThread(threadId, accounts)
+                          : App.api.trashThread(threadId, accounts));
     }
     const targets = moveTargets();
     if (!targets.length) throw new Error("No source mailbox for this message");
     finishRemove(targets.map((t) => t.m), (async () => {
       for (const t of targets) {
-        if (act === "archive") await App.api.archiveMsg(t.m.id, t.source);
-        else await App.api.trashMsg(t.m.id, t.source);
+        if (act === "archive") await App.api.archiveMsg(t.m.id, t.source, twinIds(t.m));
+        else await App.api.trashMsg(t.m.id, t.source, twinIds(t.m));
       }
     })());
   }
@@ -1113,9 +1195,15 @@ App.reader = (function () {
   // label server that same mail is also in \All and under every label it wears
   // — leaving those behind is the delete not having happened. The server clears
   // every placement it has; see app/routers/actions.py::_message_move.
+  //
+  // A card that is the same mail in two accounts is filed in both, each copy
+  // to its own account's Archive or Trash, for the same reason. The copy left
+  // behind would be the delete not having happened in the other inbox.
   function removeMessage(act, m) {
+    const also = twinIds(m);
     finishRemove([m],
-      act === "archive" ? App.api.archiveMsg(m.id) : App.api.trashMsg(m.id), true);
+      act === "archive" ? App.api.archiveMsg(m.id, null, also)
+                        : App.api.trashMsg(m.id, null, also), true);
   }
 
   // Is the folder on screen the one Delete would otherwise file this into? The
@@ -1141,24 +1229,36 @@ App.reader = (function () {
   // says which of the two is about to happen. Everything else about it — what
   // "delete" costs on this kind of account, that there is no undo — is the same
   // either way. See removeMessage for why the toolbars mean different things.
+  //
+  // A message by itself is that one copy and not its twins. Delete forever is
+  // only offered standing in a Trash, which is one account's folder, so the
+  // thread on screen was opened in that account alone and has no twins to
+  // fold. Reaching past it would also be the one way a purge could land on an
+  // imported copy filed somewhere other than Trash, which it destroys whole.
   function deleteForever(one) {
     const msgs = currentThread ? currentThread.messages : [];
     if (!msgs.length) return;
     const going = one ? [one] : msgs.slice();
-    const accountId = going[0].account_id;
-    const acc = App.shell.accounts().find((a) => a.id === accountId);
-    const what = acc && acc.local
+    const accounts = one ? [one.account_id]
+      : (threadAccounts().length ? threadAccounts() : [going[0].account_id]);
+    // The imported wording only when every account involved is imported. A
+    // mail server behind any of them makes the other sentence the true one.
+    const local = (id) => {
+      const acc = App.shell.accounts().find((a) => a.id === id);
+      return !!(acc && acc.local);
+    };
+    const what = accounts.every(local)
       ? "This mail was imported, so meerail holds the only copy of it."
       : "This deletes it from the mail server.";
     const subject = one ? "this message" : "this conversation";
     if (!confirm(`Permanently delete ${subject}?\n\n${what} It cannot be undone.`)) return;
     // One item for the conversation where there is one, so a reply that landed
     // after this pane was drawn goes with it — the same rule removeThread
-    // follows, and for the same reason.
+    // follows, and for the same reason. One per account it is being read in.
     let items;
     if (one) items = [{ account_id: one.account_id, message_id: one.id }];
     else if (currentThread.thread_id) {
-      items = [{ account_id: accountId, thread_id: currentThread.thread_id }];
+      items = accounts.map((id) => ({ account_id: id, thread_id: currentThread.thread_id }));
     } else items = msgs.map((m) => ({ account_id: m.account_id, message_id: m.id }));
     finishRemove(going, App.api.bulkPurge(items), !!one);
   }
@@ -1170,15 +1270,21 @@ App.reader = (function () {
   // to park. Read off the same marks the server lists by. One unparked inbox
   // copy (a reply that has just arrived) is the conversation back in the inbox
   // as a whole. See parked_out in core/models.py.
+  //
+  // The copies folded into a card count too. The same mail at your second
+  // address sits in that account's inbox, parked or not, and Park reaches it
+  // through `also` (see parkThread), so it has a say in which way Park goes.
   function parkWay() {
     const msgs = currentThread ? currentThread.messages : [];
     let inbox = false;
     let waiting = false;
     for (const m of msgs) {
-      for (const l of m.locations || []) {
-        if (l.role !== "inbox") continue;
-        inbox = true;
-        if (!l.parked) waiting = true;
+      for (const copy of [m, ...(m.twins || [])]) {
+        for (const l of copy.locations || []) {
+          if (l.role !== "inbox") continue;
+          inbox = true;
+          if (!l.parked) waiting = true;
+        }
       }
     }
     return !inbox ? "" : waiting ? "park" : "unpark";
@@ -1194,24 +1300,29 @@ App.reader = (function () {
   // Anywhere else (Flagged, a search, the other way round in an inbox) the
   // row stays where it is, so the pane is redrawn from the server's answer
   // instead, the way taking a reminder back is.
+  //
+  // A conversation read in two accounts names one message from each of the
+  // others as `also`, so both halves are parked in one operation.
   async function parkThread() {
     const way = parkWay();
     if (!way) return;
     const msgs = currentThread.messages;
     const target = msgs[msgs.length - 1];
-    const call = App.api.park(target.id, way === "park");
+    const call = App.api.park(target.id, way === "park", alsoMembers(target));
     if (App.shell && App.shell.parkWay() === way) return finishRemove(msgs.slice(), call);
     const threadId = currentThread.thread_id;
-    const accountId = msgs[0].account_id;
+    const accounts = threadAccounts();
     try {
       await call;
     } catch (e) {
       return alert(e.message || "Could not park this conversation");
     }
-    if (threadId) await openThread(threadId, accountId, target.id);
+    if (threadId) await openThread(threadId, accounts, target.id);
     else {
       for (const m of msgs) {
-        for (const l of m.locations || []) if (l.role === "inbox") l.parked = way === "park";
+        for (const copy of [m, ...(m.twins || [])]) {
+          for (const l of copy.locations || []) if (l.role === "inbox") l.parked = way === "park";
+        }
       }
       rerender();
     }
@@ -1228,9 +1339,11 @@ App.reader = (function () {
     const msgs = currentThread ? currentThread.messages : [];
     if (!msgs.length) return;
     // The newest message: any one of the thread would do (the server resolves
-    // the conversation from it), and this is the one the toolbar acts on.
+    // the conversation from it), and this is the one the toolbar acts on. One
+    // message from each other account it is being read in goes along, so the
+    // copy at your second address is put off until the same moment.
     const target = msgs[msgs.length - 1];
-    finishRemove(msgs.slice(), App.api.remind(target.id, when));
+    finishRemove(msgs.slice(), App.api.remind(target.id, when, alsoMembers(target)));
   }
 
   // Taking a reminder back, from the strip over a parked conversation.
@@ -1243,16 +1356,16 @@ App.reader = (function () {
     if (!msgs.length) return;
     const target = msgs[msgs.length - 1];
     const threadId = currentThread.thread_id;
-    const accountId = msgs[0].account_id;
+    const accounts = threadAccounts();
     try {
-      await App.api.unremind(target.id, restore);
+      await App.api.unremind(target.id, restore, alsoMembers(target));
     } catch (e) {
       return alert(e.message || "Could not change the reminder");
     }
     // Re-read rather than patched in place: bringing a conversation back moves
     // it and marks it unread, and the strip is not the only thing on screen
     // that changes.
-    if (threadId) await openThread(threadId, accountId, target.id);
+    if (threadId) await openThread(threadId, accounts, target.id);
     else { currentThread.reminder = null; rerender(); }
     if (App.shell) App.shell.reloadList();
   }
@@ -1272,26 +1385,47 @@ App.reader = (function () {
     // sitting in a folder you put it in — the button offers a move that either
     // does nothing or undoes that filing. No ticket is how it stops being
     // offered: compose hides the button, and Ctrl+Enter goes back to meaning
-    // plain Send. See app.compose's updateSendButtons.
-    if (!msgs.some((m) => (m.locations || []).some((l) => l.role === "inbox")))
+    // plain Send. See app.compose's updateSendButtons. The copy of a mail in
+    // another account counts, since it can still be sitting in that inbox.
+    if (!msgs.some((m) => [m, ...(m.twins || [])]
+      .some((c) => (c.locations || []).some((l) => l.role === "inbox"))))
       return null;
+    // `account_ids` is every account the conversation is being read in, which
+    // is what archiving it has to reach. `account_id` stays for a draft saved
+    // before tickets carried the list (see ticketAccounts).
+    const accounts = threadAccounts();
     return {
       thread_id: currentThread.thread_id || null,
-      account_id: msgs[0].account_id,
+      account_id: accounts.length ? accounts[0] : msgs[0].account_id,
+      account_ids: accounts.length ? accounts.slice() : [msgs[0].account_id],
       ids: msgs.map((m) => m.id),
       // Only for a conversation that was never threaded, which has no id to act
-      // on: each message leaves the folder it was in when the ticket was taken.
+      // on: each message leaves the folder it was in when the ticket was taken,
+      // and its copies in other accounts go with it.
       targets: currentThread.thread_id ? [] :
-        moveTargets().map((t) => ({ id: t.m.id, source: t.source })),
+        moveTargets().map((t) => ({ id: t.m.id, source: t.source, also: twinIds(t.m) })),
     };
   }
 
+  // A ticket from a draft written before tickets named every account carries
+  // only the one it was taken in.
+  function ticketAccounts(ticket) {
+    return Array.isArray(ticket.account_ids) && ticket.account_ids.length
+      ? ticket.account_ids : [ticket.account_id];
+  }
+
+  // The same thread, read in at least every account the ticket names. Read in
+  // fewer (the pair from All Inboxes, answered and then opened again inside
+  // one account's inbox), archiving what is on screen would leave the other
+  // half filed where it was, so that case goes the out-of-sight way, which
+  // archives exactly what the ticket names.
   function stillShowing(ticket) {
     const msgs = currentThread ? currentThread.messages : [];
     if (!msgs.length) return false;
     if (ticket.thread_id) {
+      const accounts = threadAccounts();
       return currentThread.thread_id === ticket.thread_id
-        && msgs[0].account_id === ticket.account_id;
+        && ticketAccounts(ticket).every((id) => accounts.includes(id));
     }
     return msgs.some((m) => ticket.ids.includes(m.id));
   }
@@ -1302,13 +1436,15 @@ App.reader = (function () {
   function archiveTicketed(ticket) {
     if (!ticket) return;
     if (stillShowing(ticket)) return removeThread("archive");
+    const accounts = ticketAccounts(ticket);
     const call = ticket.thread_id
-      ? App.api.archiveThread(ticket.thread_id, ticket.account_id)
+      ? App.api.archiveThread(ticket.thread_id, accounts)
       : (async () => {
-        for (const t of ticket.targets) await App.api.archiveMsg(t.id, t.source);
+        for (const t of ticket.targets) await App.api.archiveMsg(t.id, t.source, t.also);
       })();
     App.list.drop((r) => (ticket.thread_id
-      ? r.thread_id === ticket.thread_id && r.account_id === ticket.account_id
+      ? r.thread_id === ticket.thread_id
+        && App.members(r).some((m) => accounts.includes(m.account_id))
       : ticket.ids.includes(r.id)));
     call.then(() => App.shell && App.shell.reloadList())
       .catch((e) => {
@@ -1347,8 +1483,13 @@ App.reader = (function () {
         if (plainFor.has(m.id)) plainFor.delete(m.id); else plainFor.add(m.id);
         return rerender();
       }
-      if (act === "flag") { m.flagged = !m.flagged; rerender(); await App.api.flagMsg(m.id, m.flagged); return; }
-      if (act === "unread") { m.seen = false; await App.api.markSeen(m.id, false); return; }
+      // Both reach the copies of the same mail in other accounts (twinIds), so
+      // the card and every inbox it sits in agree on what it says.
+      if (act === "flag") {
+        m.flagged = !m.flagged; rerender();
+        await App.api.flagMsg(m.id, m.flagged, twinIds(m)); return;
+      }
+      if (act === "unread") { m.seen = false; await App.api.markSeen(m.id, false, twinIds(m)); return; }
       if (act === "trash" && inTrash()) return deleteForever(one ? m : null);
       if (act === "archive" || act === "trash") {
         return one ? removeMessage(act, m) : removeThread(act);
@@ -1370,17 +1511,27 @@ App.reader = (function () {
   // goes with it.
   function finishRemove(removed, call, keptRow) {
     const threadId = currentThread.thread_id;
-    const accountId = removed[0].account_id;
+    // Read before clear() below takes the conversation, and its accounts, away.
+    const accounts = threadAccounts().length ? threadAccounts() : [removed[0].account_id];
     const gone = new Set(removed.map((x) => x.id));
+    // The copies folded into each card count as gone too. The server may
+    // answer a later fetch with the other copy as the card's message, and that
+    // must not bring back a card this pane just took off (see addMessages).
+    const copies = new Set(gone);
+    for (const x of removed) for (const id of twinIds(x)) copies.add(id);
+    for (const id of copies) dropped.add(id);
     currentThread.messages = currentThread.messages.filter((x) => !gone.has(x.id));
     const emptied = !currentThread.messages.length;
     if (emptied) clear(); else rerender();
     // A list row is a conversation, so it goes by thread — its id is whichever
-    // message the row was built from, not necessarily one the reader held.
+    // message the row was built from, not necessarily one the reader held. It
+    // is the row's conversation when it has a member in any account this one
+    // is being read in, since All Inboxes folds the same thread at two
+    // addresses into one row (see App.members).
     if (emptied || !keptRow) {
       App.list.drop((r) => (threadId
-        ? r.thread_id === threadId && r.account_id === accountId
-        : gone.has(r.id)));
+        ? r.thread_id === threadId && App.members(r).some((m) => accounts.includes(m.account_id))
+        : App.members(r).some((m) => copies.has(m.id))));
     }
     // Clearing the conversation you were reading would leave the pane blank and
     // the keyboard flow stranded. The list kept the cursor on the slot the row
@@ -1424,6 +1575,26 @@ App.reader = (function () {
       </div>`;
   }
 
+  // The folder chips for a card. A card that is the same mail in two accounts
+  // says where each copy is filed, each copy's chips led by a dot in its
+  // account's colour. Both copies are usually in an Inbox, and two chips
+  // saying Inbox side by side would not say which inbox is which. A card with
+  // no twins draws exactly the chips it always did.
+  function folderChipsOf(m) {
+    const copies = [m, ...(m.twins || [])];
+    if (copies.length < 2) return App.folderChips(m.locations, m.account_id);
+    const accounts = App.shell ? App.shell.accounts() : [];
+    return copies.map((c) => {
+      const chips = App.folderChips(c.locations, c.account_id);
+      if (!chips) return "";
+      const acc = accounts.find((a) => a.id === c.account_id);
+      const name = App.accountName(c.account_id);
+      return `<span class="fc-copy"><span class="fc-acct"` +
+        `${name ? ` title="${App.esc(`In ${name}`)}"` : ""}` +
+        ` style="background:${App.esc(acc ? acc.color : "")}"></span>${chips}</span>`;
+    }).join("");
+  }
+
   function renderMsg(m) {
     const shut = collapsed.has(m.id);
     const wrap = document.createElement("div");
@@ -1465,7 +1636,7 @@ App.reader = (function () {
     // cannot answer for you: whether the mail you are looking at is the copy in
     // Trash, and whether the rest of the thread went with it. Drawn on folded
     // cards too, which is what makes it readable as a column down a long thread.
-    const where = App.folderChips(m.locations, m.account_id);
+    const where = folderChipsOf(m);
 
     wrap.innerHTML = `
       <div class="msg-head" role="button" tabindex="0"
@@ -1786,7 +1957,11 @@ App.reader = (function () {
     if (frames === 0) settle();
   }
 
-  async function openThread(threadId, accountId, focusId) {
+  // `accountIds` is one account or several: the row in All Inboxes that stands
+  // for the same thread at two of your addresses opens it in both (see
+  // App.memberAccounts), and the server folds a mail that reached both into
+  // one card.
+  async function openThread(threadId, accountIds, focusId) {
     const request = ++openRequest;
     // Asked for with the search still in hand: the server has to find the hits
     // in extracted attachment text, which the client never sees.
@@ -1797,17 +1972,26 @@ App.reader = (function () {
     // asked for has not landed yet" — see isBusy().
     loading += 1;
     try {
-      data = await App.api.thread(threadId, accountId, false, search);
+      data = await App.api.thread(threadId, accountIds, false, search);
     } finally {
       loading -= 1;
     }
     if (request !== openRequest) return;
+    // The accounts that really hold the thread, as the server counted them. An
+    // answer without the list (a server older than this page) is one account's
+    // thread, the account of its messages. See threadAccounts().
+    if (!Array.isArray(data.account_ids) || !data.account_ids.length) {
+      data.account_ids = data.messages && data.messages.length
+        ? [data.messages[0].account_id] : [].concat(accountIds);
+    }
     marks = search ? App.highlight.patterns(search.q, search.mode) : [];
     resetFind();
     currentThread = data;
+    threadSearch = search;
     imagesFor = new Set();
     plainFor = new Set();
     allTo = new Set();
+    dropped = new Set();
     // Whole conversation open, oldest to newest — folding is something you ask
     // for per message, not a state a thread arrives in.
     collapsed = new Set();
@@ -1822,15 +2006,140 @@ App.reader = (function () {
     // where it actually is rather than leaving the bar saying otherwise.
     if (App.keys && App.keys.pane() === "reader") setKeyFocus(true);
     // Opening a conversation marks its messages read (write-back via the agent).
+    // A card folded from two copies is unread while either copy is, and the
+    // copies go with it, so the other inbox stops calling it unread too.
     for (const m of data.messages) {
-      if (!m.seen) { m.seen = true; App.api.markSeen(m.id, true).catch(() => {}); }
+      if (!m.seen) { m.seen = true; App.api.markSeen(m.id, true, twinIds(m)).catch(() => {}); }
     }
+  }
+
+  // Mail that lands in the conversation on screen. The pane used to be drawn
+  // once, when the thread opened, and nothing redrew it after that. So a reply
+  // sent from here did not show up in its thread until the conversation was
+  // clicked again. The copy the mail server files in Sent reaches the database
+  // ten to fifty seconds after the send (measured on 2026-10-24), long after the
+  // composer has closed. The list refreshed for it, and the thread it belongs to
+  // sat beside the list without it. An incoming reply had the same gap.
+  //
+  // So the agent's "messages" event (app.shell.js) brings the open thread in
+  // again, and only the cards that are new get put in place. The ones already
+  // drawn are left alone. A full rerender remounts every body frame, and while
+  // they reload at the wrong height the pane jumps under whoever is reading. That
+  // is a fair price for a fold or a flag they pressed, not for mail they did not
+  // ask for.
+  //
+  // Additions only. A message gone from the server's answer stays on screen
+  // until the conversation is opened again. One this pane took off itself
+  // (finishRemove) stays off. A message moved to Trash is still in the thread,
+  // filed in Trash, and bringing it back would read as the delete not working.
+  //
+  // New mail is not marked read here, unlike on opening. It turns up below
+  // where you are reading, and nothing says you have seen it yet. The copy of
+  // your own reply is read already.
+  //
+  // `account` is the address the event names. Mail for another account cannot
+  // belong to this conversation, so it costs no fetch. Without one (coming back
+  // from power save, where every event in between went unheard) the thread is
+  // checked anyway. A conversation read in two accounts (threadAccounts) is
+  // looked at again for mail in either of them, and skipped only when every
+  // one of them is known and none has that address.
+  function mailArrived(account) {
+    if (!currentThread) return;
+    if (account && App.shell) {
+      const known = App.shell.accounts();
+      const accs = threadAccounts().map((id) => known.find((a) => a.id === id));
+      if (accs.length && accs.every((a) => a && a.email !== account)) return;
+    }
+    // A batch per folder, and Proton files the copy in Sent and All Mail. One
+    // look after they have all landed is enough.
+    clearTimeout(arrivalTimer);
+    arrivalTimer = setTimeout(fetchNew, 700);
+  }
+
+  async function fetchNew() {
+    if (!currentThread) return;
+    // A thread on its way may have been read before this mail was stored, so it
+    // is asked again once that one is on screen. A look already on its way
+    // likewise, since it may have left before the latest batch committed. One
+    // look at a time keeps a full recheck, which stores a batch every second or
+    // so, from stacking up fetches of a long thread.
+    if (loading > 0 || fetchingNew) {
+      clearTimeout(arrivalTimer);
+      arrivalTimer = setTimeout(fetchNew, 700);
+      return;
+    }
+    const thread = currentThread;
+    const request = openRequest;
+    fetchingNew = true;
+    let data;
+    try {
+      data = await App.api.thread(thread.thread_id, threadAccounts(), false, threadSearch);
+    } catch (_) {
+      return;   // offline, or the conversation is gone. The next mail asks again.
+    } finally {
+      fetchingNew = false;
+    }
+    // Another conversation opened, or this one closed, while the answer was out.
+    if (request !== openRequest || thread !== currentThread) return;
+    addMessages(data.messages);
+  }
+
+  function addMessages(list) {
+    const msgs = currentThread.messages;
+    // The same mail in two accounts arrives as one entry with the other copy
+    // in `twins`, and which copy leads the entry can change when the second
+    // one lands. A card that already stands for one of its copies is told
+    // about the rest, so read, flag and file reach the copy that just arrived.
+    // Data only, with no redraw, for the reason given above.
+    for (const m of list) {
+      const copies = [{ id: m.id, account_id: m.account_id, locations: m.locations },
+                      ...(m.twins || [])];
+      const card = msgs.find((x) => copies.some((c) => c.id === x.id));
+      if (card) card.twins = copies.filter((c) => c.id !== card.id);
+    }
+    // Every copy a card stands for, so an entry led by the other copy of a
+    // card on screen is that card and not new mail. The same goes for copies
+    // of a card this pane took off itself (finishRemove).
+    const have = new Set();
+    for (const x of msgs) for (const id of [x.id, ...twinIds(x)]) have.add(id);
+    const known = (id) => have.has(id) || dropped.has(id);
+    const fresh = list.filter((m) => !known(m.id) && !twinIds(m).some(known));
+    if (!fresh.length) return;
+    const host = document.getElementById("reader-content");
+    // The server's order, oldest first, decides where each one goes. A message
+    // that turns up late (older mail synced from a folder the agent reached
+    // last) lands between the ones it was written between, not at the bottom.
+    // That is above the view now and then, and then only scroll anchoring
+    // (Chromium, Firefox) keeps what you are reading where it was.
+    const rank = new Map(list.map((m, i) => [m.id, i]));
+    // A frame mounted now would otherwise land the pane on the newest message
+    // when it loads, which is right while the thread is still opening and wrong
+    // once someone is reading it. See mountFrame().
+    if (settled) pin = null;
+    for (const m of fresh) {
+      const at = msgs.findIndex((x) => rank.has(x.id) && rank.get(x.id) > rank.get(m.id));
+      const next = at < 0 ? null
+        : host.querySelector(`.thread-msg[data-mid="${msgs[at].id}"]`);
+      const card = renderMsg(m);
+      host.insertBefore(card, next);
+      msgs.splice(at < 0 ? msgs.length : at, 0, m);
+      card.querySelectorAll(".msg-toolbar").forEach(fitToolbar);
+    }
+    // The same accounting rerender() does. The chip and the find box wait for
+    // new frames to be measured, and text-only mail is measured already.
+    if (frames === 0) settle(); else settled = false;
+    // The bar means the newest message, and that may be one of these. It is
+    // left alone while a menu hangs off one of its buttons, because redrawing
+    // would pull the button out from under the menu. The next redraw catches up.
+    if (!openMenu && !(App.reminders && App.reminders.isOpen())) renderBar();
   }
 
   // No thread means nothing to scroll, so the arrow marker goes with it.
   function clear() {
     openRequest += 1;
     currentThread = null;
+    threadSearch = null;
+    dropped = new Set();
     marks = [];
     resetFind();
     viewed = new Set();
@@ -1992,7 +2301,8 @@ App.reader = (function () {
   // them down) the moment the Meerato URL changes, rather than at the next
   // thread open — both the bar and the per-message toolbars carry one.
   // App.calendar uses it the same way for the meercal strips.
-  return { openThread, clear, action, scrollBy, scrollEnd, scrollMsg, setKeyFocus, renderEmpty,
+  return { openThread, clear, mailArrived, action, scrollBy, scrollEnd, scrollMsg, setKeyFocus,
+    renderEmpty,
     redraw: () => rerender(), isOpen: () => !!currentThread,
     // The composer previews a forwarded original in the same document the
     // reader draws it in, so it looks there the way it looked here.

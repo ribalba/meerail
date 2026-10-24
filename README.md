@@ -15,7 +15,8 @@ for analytics. Runs on Linux, macOS and Windows.
 
 **Features:** three-pane Apple-Mail-style UI · unified inbox across accounts · conversation
 threading · POSIX-regex & keyword search (scope + "last N years" window, `:unread` / `:read` /
-`:has-attachment` / `:from` / `:to` filters, searches PDF/Office attachment text via Tika) · every
+`:has-attachment` / `:from` / `:to` filters, `-word` to leave a word out, searches PDF/Office
+attachment text via Tika) · every
 result says **which folder it was found in**, and each message in a thread says where it is filed
 — Trash included · sandboxed HTML rendering that blocks every remote fetch a message can ask for —
 the images, and the CSS that would otherwise fetch them for it · **hover a link and the address it

@@ -8,14 +8,14 @@ import zipfile
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from sqlalchemy import case, func, or_, select, tuple_
+from sqlalchemy import Integer, String, and_, case, column, func, or_, select, tuple_, values
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session as DBSession
 
 from core import ingest
 from core.database import get_db
 from core.mail.parse import html_to_text, is_calendar_part
-from .. import reminders as reminders_core, searchquery
+from .. import reminders as reminders_core, searchquery, spanning
 from ..deps import require_ui_auth
 from ..mail.render import sanitize_html
 from .mailboxes import ROLE_ORDER
@@ -91,16 +91,94 @@ def folders_of(placements) -> list[dict]:
                   key=lambda f: (ROLE_ORDER.get(f["role"], 8), f["name"].lower()))
 
 
-def _thread_counts(db: DBSession, keys: set[tuple[int, str]]) -> dict[tuple[int, str], int]:
-    """How many messages each (account, thread) holds across all folders."""
-    if not keys:
+def account_ids_param(given: list[int]) -> list[int]:
+    """The ``account_id`` list a conversation route was given, each id once.
+
+    A conversation can be in several accounts (app/spanning.py), so the routes
+    that name one by its thread id take the accounts as a repeated query
+    parameter. One value is still the common case, and the shape every older
+    client sends. The order is kept, because the first account named is the one
+    the list row stood for.
+
+    Counted before the duplicates go, so the bound is on what was sent. An
+    unbounded list would be an unbounded IN clause, which is not a request
+    anyone makes by hand.
+    """
+    if len(given) > spanning.MAX_ACCOUNTS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"A conversation can be asked for in at most {spanning.MAX_ACCOUNTS} "
+                   f"accounts at once.")
+    accounts = spanning.distinct_ids(given)
+    if not accounts:
+        raise HTTPException(status_code=422, detail="Say which account the conversation is in.")
+    return accounts
+
+
+def also_ids(given: list[int], message_id: int) -> list[int]:
+    """The ``also`` list of a message verb, each id once and never the message itself.
+
+    ``also`` names the other copies of the same mail in other accounts (see
+    app/spanning.py), and always means "the same change for these too". The
+    reader sends it because it shows those copies as one card, and a keypress
+    on the card that reached only one copy would leave the other unread, or in
+    the inbox, with nothing on screen to say so. Here beside account_ids_param
+    because the reminder routes take it as well as the action routes.
+
+    Bounded so a request is. Nobody has a mail in fifty accounts.
+    """
+    if len(given) > spanning.MAX_ALSO:
+        raise HTTPException(
+            status_code=422,
+            detail=f"At most {spanning.MAX_ALSO} other copies can be changed along with "
+                   f"one message.")
+    return [i for i in spanning.distinct_ids(given) if i != message_id]
+
+
+def _thread_counts(db: DBSession, groups: dict) -> dict:
+    """How many mails each conversation holds across all folders.
+
+    ``groups`` maps a caller's key to the ``(account, thread)`` pairs that make
+    up one conversation: a single pair in a folder list, one per account where a
+    list merges a conversation across accounts. The answer counts a twin once
+    (app/spanning.py), because the reader shows it once, and a count that said
+    "2" over a conversation that opens as one message would be a count of
+    something nobody can see.
+
+    Per twin key, the largest number of copies any one of the accounts holds.
+    For a single account that is simply every message, the same number as
+    before conversations spanned accounts. Two copies of one mail inside one
+    account are two messages there and count twice, as the reader shows them.
+
+    One statement for the whole page. The groups travel as a VALUES list, so
+    two conversations sharing a thread id in different accounts on the same
+    page (two flagged rows, say) are still counted apart.
+    """
+    groups = {key: pairs for key, pairs in groups.items() if pairs}
+    if not groups:
         return {}
+    keys = list(groups)
+    g = values(column("gid", Integer), column("account_id", Integer),
+               column("thread_id", String), name="g").data(
+        [(gid, account_id, thread_id)
+         for gid, key in enumerate(keys) for account_id, thread_id in groups[key]])
+    twin = spanning.twin_key()
+    per_account = (
+        select(g.c.gid, Message.account_id, twin.label("twin"), func.count().label("n"))
+        .select_from(g)
+        .join(Message, and_(Message.account_id == g.c.account_id,
+                            Message.thread_id == g.c.thread_id))
+        .where(_not_deleted())
+        .group_by(g.c.gid, Message.account_id, twin)
+    ).subquery()
+    per_mail = (
+        select(per_account.c.gid, func.max(per_account.c.n).label("n"))
+        .group_by(per_account.c.gid, per_account.c.twin)
+    ).subquery()
     rows = db.execute(
-        select(Message.account_id, Message.thread_id, func.count())
-        .where(tuple_(Message.account_id, Message.thread_id).in_(keys), _not_deleted())
-        .group_by(Message.account_id, Message.thread_id)
+        select(per_mail.c.gid, func.sum(per_mail.c.n)).group_by(per_mail.c.gid)
     ).all()
-    return {(account_id, thread_id): n for account_id, thread_id, n in rows}
+    return {keys[gid]: int(n) for gid, n in rows}
 
 
 @router.get("/messages")
@@ -129,6 +207,20 @@ def list_messages(
 
     Flagged is the one scope that is not a list of conversations — see
     ``by_message`` below.
+
+    The lists that already mix accounts (spanning.SPANNING_SCOPES: All Inboxes,
+    Parked, Reminders) merge a conversation across them. The same mail
+    delivered to two accounts is one conversation to the person who got it,
+    and two rows side by side for it read as a duplicate. There a conversation
+    is its thread key whatever the account, the rollups run over every account's
+    part of it, and the row speaks for the newest message of all of them. Folder
+    lists do not merge: a folder belongs to one account.
+
+    Every row carries ``members``, one entry per account it stands for, with
+    that account's own message and folder, so the browser can act on every
+    account at once and draw each account's colour. A row that merged nothing
+    has exactly one member, equal to its own fields. Everything else on the row
+    is the representative's.
     """
     # Flagged is a list of *messages*. A folder holds conversations, so its list
     # collapses to one row each; a flag is put on a single mail, by hand, and
@@ -138,9 +230,11 @@ def list_messages(
     # already there, standing for a different mail — and the message just
     # flagged could not be found anywhere (issue #21).
     by_message = scope == "flagged"
+    across = scope in spanning.SPANNING_SCOPES
 
     # Messages that never got threaded stand alone rather than collapsing into
-    # one "no thread" pile.
+    # one "no thread" pile. That is also what keeps them from merging across
+    # accounts: their key is their own row id, which no other message shares.
     thread_key = func.coalesce(Message.thread_id, func.concat("msg:", Message.id)).label("thread_key")
 
     j = select(
@@ -165,9 +259,17 @@ def list_messages(
         # By conversation where there is one, because that is what a reminder
         # acts on: matching only the message it was set on would show an older
         # reply as the row for a thread whose newest mail is parked beside it.
+        #
+        # The conversation in the reminder's own account. A thread id is the
+        # root Message-ID, so the same conversation has the same id in every
+        # account that got it, and matching on the id alone listed the other
+        # account's copy here too, sitting in its inbox with nothing put off.
+        # Now that this list merges a conversation across accounts, that copy
+        # would also join the row as a member and be carried along by the next
+        # keypress on it.
         j = j.where(or_(
-            Message.thread_id.in_(
-                select(Reminder.thread_id)
+            tuple_(Message.account_id, Message.thread_id).in_(
+                select(Reminder.account_id, Reminder.thread_id)
                 .where(Reminder.state == "pending", Reminder.thread_id.is_not(None))),
             Message.id.in_(
                 select(Reminder.message_pk)
@@ -192,9 +294,15 @@ def list_messages(
     if unread_only:
         j = j.where(MessageLocation.seen.is_(False))
 
-    # DISTINCT ON keeps the first row per (account, thread) under this ORDER BY,
-    # i.e. the newest message of each conversation. The outer query then sorts
-    # those representatives by date, since DISTINCT ON dictates the inner order.
+    # DISTINCT ON keeps the first row per conversation under this ORDER BY,
+    # i.e. the newest message of each. The outer query then sorts those
+    # representatives by date, since DISTINCT ON dictates the inner order.
+    #
+    # A conversation is (account, thread) in a folder list, and the thread
+    # alone in a list that spans accounts. There the account breaks a tie on
+    # the date before the id does, so that twins, which share their date,
+    # always elect the copy in the same account. For a single account that tie
+    # break changes nothing.
     #
     # By message where the list is of messages, and still DISTINCT: the rows are
     # placements, and a label server files one mail in several folders at once —
@@ -202,14 +310,42 @@ def list_messages(
     # in \All from arriving here twice. Which placement speaks for it decides
     # only the folder the row names, so the real folder wins over the \All
     # bucket every message on such a server is also in.
+    #
+    # And on the mail rather than the row, because a flagged mail delivered to
+    # two accounts is still one mail: twins (app/spanning.py) share a row. The
+    # copy number is what keeps two copies inside one account apart. They are
+    # two messages there, so the first copy in each account pairs with the
+    # first in the others, the second with the second, and none of an account's
+    # copies is hidden behind another. The lowest account speaks for the row,
+    # for the same stability as above.
+    copies = real_first = None
     if by_message:
-        reps = j.distinct(Message.id).order_by(
-            Message.id, case((Mailbox.role == "all", 1), else_=0), MessageLocation.mailbox_id
+        twin = spanning.twin_key()
+        copies = j.add_columns(
+            twin.label("twin_key"),
+            func.dense_rank().over(partition_by=(Message.account_id, twin),
+                                   order_by=Message.id).label("copy_no"),
+        ).subquery()
+        real_first = case((copies.c.role == "all", 1), else_=0)
+        reps = select(copies).distinct(copies.c.twin_key, copies.c.copy_no).order_by(
+            copies.c.twin_key, copies.c.copy_no, copies.c.account_id, real_first,
+            copies.c.mailbox_id,
+        ).subquery()
+    elif across:
+        reps = j.distinct(thread_key).order_by(
+            thread_key, Message.date_sent.desc().nulls_last(), Message.account_id,
+            Message.id.desc()
         ).subquery()
     else:
         reps = j.distinct(Message.account_id, thread_key).order_by(
             Message.account_id, thread_key, Message.date_sent.desc().nulls_last(), Message.id.desc()
         ).subquery()
+
+    def group_of(r):
+        """The key a row's conversation (or, in Flagged, its mail) is grouped by."""
+        if by_message:
+            return (r.twin_key, r.copy_no)
+        return r.thread_key if across else (r.account_id, r.thread_key)
 
     total = db.scalar(select(func.count()).select_from(reps))
     rows = db.execute(
@@ -223,12 +359,32 @@ def list_messages(
 
     # Unread/flagged roll up over the *folder-filtered* set: a conversation
     # reads as unread while any part of it here is, which is what the sidebar
-    # badge counts too. Not for a list of messages, though — there the row is
-    # one mail and says how that mail is flagged and whether it has been read,
-    # which is what an empty rollup leaves the row dict below reading off it.
-    keys = {(r.account_id, r.thread_key) for r in rows}
-    rollup: dict[tuple[int, str], tuple[bool, bool]] = {}
-    if keys and not by_message:
+    # badge counts too. Across accounts that is every account's part of it.
+    #
+    # A list of messages rolls up too, but only over the copies of one mail.
+    # The row is that mail and says how it is flagged and whether it has been
+    # read, and a mail delivered twice has been read once every copy of it
+    # has, which is also how the reader decides it (get_thread). With no
+    # twins that is the one mail's own placements in this list.
+    keys = {group_of(r) for r in rows}
+    rollup: dict = {}
+    if keys and by_message:
+        grouped = select(
+            copies.c.twin_key, copies.c.copy_no,
+            func.bool_or(copies.c.seen.is_(False)), func.bool_or(copies.c.flagged),
+        ).where(tuple_(copies.c.twin_key, copies.c.copy_no).in_(keys)).group_by(
+            copies.c.twin_key, copies.c.copy_no)
+        for twin_key, copy_no, any_unread, any_flagged in db.execute(grouped).all():
+            rollup[(twin_key, copy_no)] = (bool(any_unread), bool(any_flagged))
+    elif keys and across:
+        grouped = j.with_only_columns(
+            thread_key,
+            func.bool_or(MessageLocation.seen.is_(False)),
+            func.bool_or(MessageLocation.flagged),
+        ).where(thread_key.in_(keys)).group_by(thread_key)
+        for key, any_unread, any_flagged in db.execute(grouped).all():
+            rollup[key] = (bool(any_unread), bool(any_flagged))
+    elif keys:
         grouped = j.with_only_columns(
             Message.account_id, thread_key,
             func.bool_or(MessageLocation.seen.is_(False)),
@@ -237,12 +393,59 @@ def list_messages(
         for account_id, key, any_unread, any_flagged in db.execute(grouped).all():
             rollup[(account_id, key)] = (bool(any_unread), bool(any_flagged))
 
+    # Which accounts each row stands for, and that account's own message in
+    # each. The browser needs one per account to act on a merged row (archive
+    # it in both, park both, mark both read) and to say which accounts it is
+    # in. The newest message of each account here, picked by the same order
+    # that elected the representative. A Flagged row lists each copy of its
+    # mail, in the folder that speaks for it.
+    #
+    # The representative's own entry is built from the row itself rather than
+    # read back, so a row that merged nothing has a member exactly equal to it.
+    # Read back, a message filed in two folders of the list could name the
+    # other one.
+    found: dict = {}
+    if keys and by_message:
+        merged = (
+            select(copies.c.twin_key, copies.c.copy_no, copies.c.account_id,
+                   copies.c.thread_id, copies.c.id, copies.c.mailbox_id, copies.c.color)
+            .where(tuple_(copies.c.twin_key, copies.c.copy_no).in_(keys))
+            .distinct(copies.c.id)
+            .order_by(copies.c.id, real_first, copies.c.mailbox_id)
+        )
+        for m in db.execute(merged).all():
+            found.setdefault((m.twin_key, m.copy_no), []).append(m)
+    elif keys and across:
+        merged = (
+            j.with_only_columns(thread_key, Message.account_id, Message.thread_id, Message.id,
+                                MessageLocation.mailbox_id, Account.color)
+            .where(thread_key.in_(keys))
+            .distinct(thread_key, Message.account_id)
+            .order_by(thread_key, Message.account_id,
+                      Message.date_sent.desc().nulls_last(), Message.id.desc())
+        )
+        for m in db.execute(merged).all():
+            found.setdefault(m.thread_key, []).append(m)
+    members = [
+        [_member(r), *sorted((_member(m) for m in found.get(group_of(r), [])
+                              if m.account_id != r.account_id),
+                             key=lambda m: m["account_id"])]
+        for r in rows
+    ]
+
     # The count, though, spans folders, because that is what opening the row
     # shows: the reader loads the whole conversation regardless of where its
     # messages live. Counting only this folder made the badge say "2" and the
     # reader then render every message of a 900-strong thread.
-    counts = _thread_counts(db, {(a, k) for a, k in keys if not k.startswith("msg:")})
-    remind = _remind_times(db, rows)
+    #
+    # Over the members whose thread the reader will open with the row, which is
+    # every account of a merged conversation and, in Flagged, the copies that
+    # share the row's thread id (the client opens a row in exactly those).
+    counts = _thread_counts(db, {
+        i: {(m["account_id"], m["thread_id"]) for m in ms if m["thread_id"] == r.thread_id}
+        for i, (r, ms) in enumerate(zip(rows, members)) if r.thread_id
+    })
+    remind = _remind_times(db, members)
 
     return {
         "total": int(total or 0),
@@ -255,40 +458,51 @@ def list_messages(
                 # A row with no snippet because there is no body to take one
                 # from; the list says so rather than showing a blank line.
                 "content_status": r.content_status,
-                "seen": not rollup.get((r.account_id, r.thread_key), (not r.seen, r.flagged))[0],
-                "flagged": rollup.get((r.account_id, r.thread_key), (not r.seen, r.flagged))[1],
+                "seen": not rollup.get(group_of(r), (not r.seen, r.flagged))[0],
+                "flagged": rollup.get(group_of(r), (not r.seen, r.flagged))[1],
                 "answered": r.answered,
                 "account_id": r.account_id, "account_color": r.color,
                 "mailbox_id": r.mailbox_id, "mailbox_role": r.role,
-                "thread_count": counts.get((r.account_id, r.thread_key), 1),
+                "thread_count": counts.get(i, 1),
                 # When this conversation is due back, for the one that is waiting
                 # on a reminder. Null for everything else, which is nearly every
                 # row — the list draws a small clock on the ones that have it.
-                "remind_at": remind.get((r.account_id, r.thread_key)),
+                "remind_at": remind[i],
+                "members": members[i],
             }
-            for r in rows
+            for i, r in enumerate(rows)
         ],
     }
 
 
-def _remind_times(db: DBSession, rows) -> dict[tuple[int, str], str]:
+def _member(row) -> dict:
+    """One account's share of a list row: its message, and the folder it is in."""
+    return {"account_id": row.account_id, "thread_id": row.thread_id, "id": row.id,
+            "mailbox_id": row.mailbox_id, "account_color": row.color}
+
+
+def _remind_times(db: DBSession, members: list[list[dict]]) -> list[str | None]:
     """When each conversation on this page comes back, for the ones put off.
 
     Two queries for the whole page rather than one per row, and skipped entirely
     when nothing is waiting on a reminder — which is the ordinary state of a
     mailbox, and this must not cost it anything.
+
+    Asked of every member of a row, and the earliest answer wins. A row that
+    stands for one conversation in two accounts comes back as soon as either
+    account's part of it does, and that is the time the clock beside it has to
+    show.
     """
-    threaded = {(r.account_id, r.thread_key) for r in rows if not r.thread_key.startswith("msg:")}
-    loose = {r.id for r in rows if r.thread_key.startswith("msg:")}
-    out: dict[tuple[int, str], str] = {}
-    for key, when in reminders_core.pending_by_thread(db, threaded).items():
-        out[key] = when.isoformat()
-    if loose:
-        by_message = reminders_core.pending_by_message(db, loose)
-        for r in rows:
-            when = by_message.get(r.id)
-            if when is not None:
-                out[(r.account_id, r.thread_key)] = when.isoformat()
+    threaded = {(m["account_id"], m["thread_id"]) for ms in members for m in ms if m["thread_id"]}
+    loose = {m["id"] for ms in members for m in ms if not m["thread_id"]}
+    by_thread = reminders_core.pending_by_thread(db, threaded)
+    by_message = reminders_core.pending_by_message(db, loose)
+    out: list[str | None] = []
+    for ms in members:
+        whens = [by_thread.get((m["account_id"], m["thread_id"])) if m["thread_id"]
+                 else by_message.get(m["id"]) for m in ms]
+        whens = [w for w in whens if w is not None]
+        out.append(min(whens).isoformat() if whens else None)
     return out
 
 
@@ -318,6 +532,39 @@ def content_window_months(db: DBSession) -> int:
         return 0
 
 
+def _placement_state(db: DBSession, msg: Message) -> dict:
+    """Where a message is filed and the flags it carries there.
+
+    Split out of _message_detail because the reader asks the same of every
+    copy of a mail delivered to several accounts (get_thread's ``twins``), and
+    a copy needs its folders and flags without the body and attachments that
+    the card already shows once.
+    """
+    # Any *live* location's flags (a message may be in several folders; report
+    # the union). Deleted placements are excluded for the same reason the list
+    # excludes them: they keep the flags they had when the user deleted them, so
+    # a mail read in Trash and emptied out of it would otherwise go on marking
+    # the copy still sitting in the inbox as read — and one flagged there would
+    # keep a star on a conversation nothing is flagging any more. The row
+    # outlives the keypress by an agent pass (see _not_deleted).
+    locs = db.execute(
+        select(MessageLocation).where(MessageLocation.message_pk == msg.id,
+                                      MessageLocation.deleted.is_(False))
+    ).scalars().all()
+    return {
+        "seen": any(l.seen for l in locs), "flagged": any(l.flagged for l in locs),
+        "answered": any(l.answered for l in locs),
+        # Named as well as identified: the reader draws the folder beside the
+        # date, and the browser's copy of the folder tree can be a sync pass
+        # behind — a message filed into a folder made a minute ago must still
+        # say where it is.
+        "locations": folders_of(
+            (mb.id, mb.role, mb.display_name, l.parked)
+            for l, mb in ((l, db.get(Mailbox, l.mailbox_id)) for l in locs)
+        ),
+    }
+
+
 def _message_detail(db: DBSession, msg: Message, load_remote: bool,
                     window_months: int | None = None) -> dict:
     safe_html, blocked = sanitize_html(msg.body_html, msg.id, load_remote) if msg.body_html else ("", 0)
@@ -344,17 +591,6 @@ def _message_detail(db: DBSession, msg: Message, load_remote: bool,
         .where(Attachment.message_pk == msg.id, Attachment.is_inline.is_(False))
         .order_by(Attachment.id)
     ).all()
-    # Any *live* location's flags (a message may be in several folders; report
-    # the union). Deleted placements are excluded for the same reason the list
-    # excludes them: they keep the flags they had when the user deleted them, so
-    # a mail read in Trash and emptied out of it would otherwise go on marking
-    # the copy still sitting in the inbox as read — and one flagged there would
-    # keep a star on a conversation nothing is flagging any more. The row
-    # outlives the keypress by an agent pass (see _not_deleted).
-    locs = db.execute(
-        select(MessageLocation).where(MessageLocation.message_pk == msg.id,
-                                      MessageLocation.deleted.is_(False))
-    ).scalars().all()
     # Whether "view source" has anything to show. Asked as a predicate rather
     # than by touching msg.raw_mime, which is deferred precisely so a thread
     # view never drags every message's original bytes across the wire — the
@@ -388,16 +624,8 @@ def _message_detail(db: DBSession, msg: Message, load_remote: bool,
             if msg.content_status != "full" else 0
         ),
         "has_source": has_source,
-        "seen": any(l.seen for l in locs), "flagged": any(l.flagged for l in locs),
-        "answered": any(l.answered for l in locs),
-        # Named as well as identified: the reader draws the folder beside the
-        # date, and the browser's copy of the folder tree can be a sync pass
-        # behind — a message filed into a folder made a minute ago must still
-        # say where it is.
-        "locations": folders_of(
-            (mb.id, mb.role, mb.display_name, l.parked)
-            for l, mb in ((l, db.get(Mailbox, l.mailbox_id)) for l in locs)
-        ),
+        # seen, flagged, answered and locations.
+        **_placement_state(db, msg),
         "attachments": [
             {"id": a.id, "filename": a.filename, "content_type": a.content_type,
              "size": a.size_bytes, "is_inline": a.is_inline, "stored": a.stored,
@@ -557,35 +785,80 @@ def _annotate_attachment_hits(db: DBSession, msgs, details: list[dict], q: str,
 @router.get("/threads/{thread_id:path}")
 def get_thread(
     thread_id: str,
-    account_id: int,
+    # Repeated, one per account the conversation is to be read in: a merged
+    # list row stands for the same thread in several (app/spanning.py). One
+    # value is what every older caller sends, and still works.
+    account_id: list[int] = Query(...),
     images: bool = False,
     q: str = "",
     mode: str = Query("keyword", pattern="^(keyword|regex)$"),
     db: DBSession = Depends(get_db),
 ):
+    """One conversation, in every account named, as the reader shows it.
+
+    The messages of the thread in all of ``account_id``, oldest first, with a
+    mail delivered to two of those accounts shown once. That card is the copy
+    in the account named first (the one the list row stood for) and lists the
+    other copies under ``twins``, with their own folders, so the reader can
+    pass every keypress on to them and draw where each one is filed. It reads
+    as unread until every copy is read, so that marking it read on open reaches
+    the copy that is not, and as flagged or answered when any copy is.
+
+    ``account_ids`` says which of the accounts named actually hold some of the
+    thread, in the order named, and ``members`` names the newest message of
+    each. The reader sends those along when it parks or reminds the
+    conversation, so the keypress reaches every account's part of it.
+    """
+    accounts = account_ids_param(account_id)
     msgs = db.execute(
         select(Message)
-        .where(Message.account_id == account_id, Message.thread_id == thread_id, _not_deleted())
-        .order_by(Message.date_sent.asc().nulls_first())
+        .where(Message.account_id.in_(accounts), Message.thread_id == thread_id, _not_deleted())
+        # The id after the date only so that the order is total. Twins share
+        # their date, and the card a reader draws must not depend on which of
+        # them the planner happened to return first.
+        .order_by(Message.date_sent.asc().nulls_first(), Message.id)
     ).scalars().all()
     if not msgs:
         raise HTTPException(status_code=404, detail="Thread not found")
+    present = [a for a in accounts if any(m.account_id == a for m in msgs)]
+    newest: dict[int, Message] = {}
+    for m in msgs:
+        newest[m.account_id] = m           # oldest first, so the last one stays
+    entries = spanning.collapse_twins(msgs, present)
+    shown = [rep for rep, _ in entries]
+
     # One settings read for the whole thread, not one per message in it.
-    window = content_window_months(db) if any(m.content_status != "full" for m in msgs) else 0
-    details = [_message_detail(db, m, load_remote=images, window_months=window) for m in msgs]
+    window = content_window_months(db) if any(m.content_status != "full" for m in shown) else 0
+    details = []
+    for rep, twins in entries:
+        d = _message_detail(db, rep, load_remote=images, window_months=window)
+        states = [(t, _placement_state(db, t)) for t in twins]
+        d["twins"] = [{"id": t.id, "account_id": t.account_id, "locations": s["locations"]}
+                      for t, s in states]
+        if states:
+            d["seen"] = d["seen"] and all(s["seen"] for _, s in states)
+            d["flagged"] = d["flagged"] or any(s["flagged"] for _, s in states)
+            d["answered"] = d["answered"] or any(s["answered"] for _, s in states)
+        details.append(d)
     pats = match_patterns(q, mode)
     if pats:
         try:
-            _annotate_attachment_hits(db, msgs, details, searchquery.parse(q).text, mode, pats)
+            _annotate_attachment_hits(db, shown, details, searchquery.parse(q).text, mode, pats)
         except DBAPIError:
             # A pattern Postgres rejects costs the attachment highlights, not
             # the thread — the reader still opens.
             db.rollback()
-    reminder = reminders_core.pending_for(db, msgs[-1])
+    # The first account whose part of the conversation is waiting on one, in
+    # the order the accounts were named. Asked lazily, so the ordinary case of
+    # one account costs the one lookup it always did.
+    reminder = next((r for r in (reminders_core.pending_for(db, newest[a]) for a in present)
+                     if r is not None), None)
     return {
         "thread_id": thread_id,
         "subject": msgs[-1].subject or "(no subject)",
         "messages": details,
+        "account_ids": present,
+        "members": [{"account_id": a, "id": newest[a].id} for a in present],
         # Set when this conversation is waiting on a reminder, so the reader can
         # say when it is coming back and offer to take that back — the button
         # that put it there is not on screen any more, because the conversation

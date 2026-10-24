@@ -90,14 +90,22 @@ App.swipe = (function () {
   // A threaded conversation is filed whole — the same call the reader makes, so
   // the row can't leave a stray reply behind in the folder. A message that never
   // got threaded stands alone, and its one placement is the whole job.
+  //
+  // Both in every account the row stands for. All Inboxes folds a mail that
+  // reached two of your addresses into one row (see App.members), and a swipe
+  // that filed only one of them would leave the row standing on the other.
+  // An unthreaded row folds only twin copies of one mail, which go with it
+  // through `also`, each to its own account's Trash or Archive.
   async function apply(r, act) {
     if (r.thread_id) {
-      return act === "trash" ? App.api.trashThread(r.thread_id, r.account_id)
-                             : App.api.archiveThread(r.thread_id, r.account_id);
+      const accounts = App.memberAccounts(r);
+      return act === "trash" ? App.api.trashThread(r.thread_id, accounts)
+                             : App.api.archiveThread(r.thread_id, accounts);
     }
     const source = await sourceMailbox(r);
-    return act === "trash" ? App.api.trashMsg(r.id, source)
-                           : App.api.archiveMsg(r.id, source);
+    const also = App.members(r).filter((m) => m.id !== r.id).map((m) => m.id);
+    return act === "trash" ? App.api.trashMsg(r.id, source, also)
+                           : App.api.archiveMsg(r.id, source, also);
   }
 
   async function commit(el, r, act) {

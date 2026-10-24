@@ -6,10 +6,11 @@ from sqlalchemy.orm import Session as DBSession
 from core import ingest, outbox as outbox_core
 from core.database import get_db
 from core.ingest import FOLDER_SEP
-from .. import events, mailops
+from .. import events, mailops, spanning
 from ..deps import require_ui_auth
 from core.models import (
-    Account, Mailbox, MessageLocation, Outbound, PendingAction, Reminder, parked_out, utcnow,
+    Account, Mailbox, Message, MessageLocation, Outbound, PendingAction, Reminder, parked_out,
+    utcnow,
 )
 
 router = APIRouter(prefix="/api/mailboxes", tags=["mailboxes"], dependencies=[Depends(require_ui_auth)])
@@ -171,6 +172,32 @@ def list_mailboxes(db: DBSession = Depends(get_db)):
             "nesting": acc.local or acc.folder_nesting,
             "mailboxes": mb_out,
         })
+
+    # All Inboxes counts a mail delivered to two accounts once, because its list
+    # shows it once (app/spanning.py). Summing the inboxes counted both copies,
+    # and the badge then said 10 over a list with 6 unread rows in it. Each
+    # account's own Inbox badge still counts its own copy.
+    #
+    # Mails rather than placements here, and two copies inside one account stay
+    # two, by the same copy number the Flagged list pairs them with. Asked only
+    # when there are two accounts, which is the only time the row is drawn, and
+    # over unread inbox mail alone, which is a small set on any mailbox.
+    if len(accounts) > 1:
+        twin = spanning.twin_key()
+        unread = (
+            select(twin.label("twin"),
+                   func.dense_rank().over(partition_by=(Message.account_id, twin),
+                                          order_by=Message.id).label("copy_no"))
+            .select_from(MessageLocation)
+            .join(Message, Message.id == MessageLocation.message_pk)
+            .join(Mailbox, Mailbox.id == MessageLocation.mailbox_id)
+            .where(Mailbox.role == "inbox", MessageLocation.deleted.is_(False),
+                   MessageLocation.seen.is_(False), ~parked_out())
+        ).subquery()
+        unified_unread = db.scalar(
+            select(func.count()).select_from(
+                select(unread.c.twin, unread.c.copy_no).distinct().subquery())
+        ) or 0
 
     return {
         "accounts": out_accounts,
