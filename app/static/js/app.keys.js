@@ -139,6 +139,10 @@ App.keys = (function () {
         { show: "Alt PgDn/PgUp", label: "Jump one message" },
         { keys: [" "], show: "Space", label: "Scroll message",
           run: (e) => App.reader.scrollBy(e.shiftKey ? -1 : 1) },
+        // The ••• a reply's quoted history is folded behind (app.quotes.js),
+        // on the message you are on. h for history.
+        { keys: ["h"], show: "h", label: "Show / hide quoted text",
+          run: () => App.reader.toggleHistory() },
         { chord: ["g", "i"], show: "g i", label: "Go to Inbox",
           run: () => App.shell.goto("inbox") },
         { chord: ["g", "a"], show: "g a", label: "Go to All Inboxes",

@@ -8,6 +8,11 @@ App.reader = (function () {
   let imagesFor = new Set();    // message ids with remote images loaded
   let plainFor = new Set();     // message ids switched to their plain-text part
   let allTo = new Set();        // message ids showing their full recipient list
+  let historyFor = new Set();   // message ids with their quoted history unfolded
+  // What each message of the open thread says, by id, as App.quotes.print()
+  // reads it: what the messages below it are checked against before their
+  // history is folded. Worked out once a message is needed as one, not per draw.
+  let prints = new Map();
   let dropped = new Set();      // message ids this pane took off itself — see mailArrived()
   let threadSearch = null;      // the search the open thread was fetched with
   let arrivalTimer = null;      // mail landed, the open thread is due a look
@@ -106,6 +111,7 @@ App.reader = (function () {
         pre{white-space:pre-wrap;overflow-wrap:break-word}
         blockquote{margin:0 0 0 .8em;padding-left:.8em;border-left:3px solid #d2d2d7;color:#555}
         ${App.highlight.FRAME_CSS}
+        ${App.quotes.FRAME_CSS}
       </style></head><body>${html || ""}</body></html>`;
   }
 
@@ -298,7 +304,30 @@ App.reader = (function () {
     frame.style.marginBottom = scale < 1 ? -h * (1 - scale) + "px" : "";
   }
 
-  function mountFrame(container, html, onHit) {
+  // Measures a frame again from the start, width and all. Unfolding a quoted
+  // history can bring in mail laid out wider than the reply above it, and that
+  // wants scaling down as much as it would have on the first fit. The width
+  // fitFrame() overwrote has to go first, or it would measure the mail
+  // against itself.
+  function refitWide(frame, doc) {
+    frame.style.width = "";
+    frame.style.transform = "";
+    frame.style.marginBottom = "";
+    fitFrame(frame, doc);
+  }
+
+  // How many of the marks in `root` are on screen. One inside a folded
+  // history is a match nobody can see, and the same words are on screen in
+  // the message it was quoted from, which is where a search should land.
+  function shown(root) {
+    let n = 0;
+    for (const el of root.querySelectorAll("mark.hit")) if (!App.quotes.hidden(el)) n += 1;
+    return n;
+  }
+
+  // `fold` puts the quoted history away (see foldHistory), and is handed a
+  // way to measure the frame again for when it comes back out.
+  function mountFrame(container, html, onHit, fold) {
     const p = pin;
     // Frames from an earlier draw go on loading into a document that no longer
     // holds them, so the tally they report back to is stamped with their draw.
@@ -312,9 +341,12 @@ App.reader = (function () {
     frame.addEventListener("load", () => {
       try {
         const doc = frame.contentDocument;
+        // Folded before anything is measured, so the frame is fitted to the
+        // height it is drawn at.
+        if (fold) fold(doc.body, () => refitWide(frame, doc));
         // Marked before the height is measured, so a term that wraps a line
         // does not leave the frame short by one.
-        if (App.highlight.mark(doc.body, marksNow()) && onHit) onHit();
+        if (App.highlight.mark(doc.body, marksNow()) && shown(doc.body) && onHit) onHit();
         fitFrame(frame, doc);
         // Once you click inside a message body the iframe owns the keyboard and
         // shortcuts would silently stop working. Forward them back out — this
@@ -610,7 +642,7 @@ App.reader = (function () {
       let n = 0;
       for (const { root, frame } of markRoots(wrap)) {
         App.highlight.unmark(root);
-        n += App.highlight.mark(root, pats);
+        if (App.highlight.mark(root, pats)) n += shown(root);
         // A marked term can wrap a line that used to fit, which makes the
         // document taller than the frame was measured for — so measure again.
         if (frame) refitFrame(frame, root.ownerDocument);
@@ -657,6 +689,10 @@ App.reader = (function () {
     hitAt = (i % hits.length + hits.length) % hits.length;
     const h = hits[hitAt];
     h.el.classList.add("hit-on");
+    // Every match is counted, folded history included, so a find never
+    // reports fewer than are there. Stepping onto one in a fold opens it, and
+    // the frame is measured again (foldHistory) before the scroll is worked out.
+    App.quotes.reveal(h.el);
     const p = pane();
     if (p) {
       // A little further down than scrollToMsg puts a message: a match landing
@@ -944,8 +980,13 @@ App.reader = (function () {
     let text = "";
     const wrap = document.querySelector(`#reader-content .thread-msg[data-mid="${m.id}"]`);
     const frame = wrap && wrap.querySelector(".msg-body-frame");
+    // Folded history is part of the mail all the same, for the same reason, so
+    // it is shown for the moment the text is read.
     if (frame) {
-      try { text = frame.contentDocument.body.innerText; } catch (_) { /* fall through */ }
+      try {
+        const body = frame.contentDocument.body;
+        text = App.quotes.withHistory(body, () => body.innerText);
+      } catch (_) { /* fall through */ }
     }
     if (!text.trim()) text = m.body_plain || "";
     return text.trim() || "[no text content]";
@@ -1548,7 +1589,8 @@ App.reader = (function () {
   // Every message in the thread is drawn in full — no "N earlier messages" to
   // unfold. (The chip of that name points up at them; it scrolls, it does not
   // unfold — see updateEarlier.) The head stays a toggle so a long quoted chain
-  // can still be folded away one card at a time.
+  // can still be folded away one card at a time. The history a reply quotes is
+  // a fold of its own, inside the body, and it starts shut (see foldHistory).
   // What the reader shows instead of a body for mail outside the content
   // window. The two states differ in one clause — whether the body was ever
   // here — because that is the only thing the reader can act on differently:
@@ -1593,6 +1635,41 @@ App.reader = (function () {
         `${name ? ` title="${App.esc(`In ${name}`)}"` : ""}` +
         ` style="background:${App.esc(acc ? acc.color : "")}"></span>${chips}</span>`;
     }).join("");
+  }
+
+  // The messages above `m` in the open thread, as App.quotes reads them.
+  // Above means earlier in the thread's own order, so the oldest copy of any
+  // stretch of history is the one left open, and each reply below it folds
+  // its copy away.
+  function historyOf(m) {
+    const out = [];
+    for (const x of currentThread ? currentThread.messages : []) {
+      if (x.id === m.id) break;
+      if (!prints.has(x.id)) prints.set(x.id, App.quotes.print(x));
+      out.push(prints.get(x.id));
+    }
+    return out;
+  }
+
+  // Folds the quoted history in a body of `m` behind its ••• button, when the
+  // messages above already say it (app.quotes.js decides). Opened stays
+  // opened across redraws, the way a body switched to plain text stays plain.
+  // `refit` measures a frame again, since the body has changed height. The
+  // chip counting earlier messages works from heights too.
+  //
+  // Folding is a convenience, so mail it trips over is drawn whole rather than
+  // not at all. Uncaught, an exception here would take the message down with
+  // it, and on the plain-text path the rest of the thread too.
+  function foldHistory(m, root, refit) {
+    try {
+      App.quotes.fold(root, historyOf(m), historyFor.has(m.id), (open) => {
+        if (open) historyFor.add(m.id); else historyFor.delete(m.id);
+        if (refit) refit();
+        updateEarlier();
+      });
+    } catch (e) {
+      console.error("quote fold failed", e);
+    }
   }
 
   function renderMsg(m) {
@@ -1771,7 +1848,8 @@ App.reader = (function () {
       body.className = "msg-body-omitted";
       body.innerHTML = contentNotice(m);
     } else if (m.body_html && !plainFor.has(m.id)) {
-      mountFrame(body, m.body_html, () => wrap.classList.add("has-hit"));
+      mountFrame(body, m.body_html, () => wrap.classList.add("has-hit"),
+        (root, refit) => foldHistory(m, root, refit));
     } else if (m.body_plain) {
       // Text-only mail and the plain-text toggle both land here — for text mail
       // body_plain *is* the text part, so this is the path it always took.
@@ -1782,7 +1860,10 @@ App.reader = (function () {
       // the sender's to sanitize.
       body.className = "msg-body-md";
       body.innerHTML = App.markdown.toHtml(m.body_plain);
-      if (App.highlight.mark(body, marksNow())) wrap.classList.add("has-hit");
+      // The `>` lines come out of the parser as <blockquote>, so plain-text
+      // history folds the same way a frame's does.
+      foldHistory(m, body, null);
+      if (App.highlight.mark(body, marksNow()) && shown(body)) wrap.classList.add("has-hit");
     } else {
       body.className = "msg-body-text";
       // Switched to plain on a message that is all pictures and layout: there
@@ -1991,6 +2072,8 @@ App.reader = (function () {
     imagesFor = new Set();
     plainFor = new Set();
     allTo = new Set();
+    historyFor = new Set();
+    prints = new Map();
     dropped = new Set();
     // Whole conversation open, oldest to newest — folding is something you ask
     // for per message, not a state a thread arrives in.
@@ -2120,9 +2203,11 @@ App.reader = (function () {
       const at = msgs.findIndex((x) => rank.has(x.id) && rank.get(x.id) > rank.get(m.id));
       const next = at < 0 ? null
         : host.querySelector(`.thread-msg[data-mid="${msgs[at].id}"]`);
+      // In its place before it is drawn, because the drawing asks which
+      // messages are above it (historyOf) to decide what of its quote to fold.
+      msgs.splice(at < 0 ? msgs.length : at, 0, m);
       const card = renderMsg(m);
       host.insertBefore(card, next);
-      msgs.splice(at < 0 ? msgs.length : at, 0, m);
       card.querySelectorAll(".msg-toolbar").forEach(fitToolbar);
     }
     // The same accounting rerender() does. The chip and the find box wait for
@@ -2205,6 +2290,39 @@ App.reader = (function () {
     // and above the first one the top of the thread, so the key never dies in
     // the reader — it runs out of messages into the ends of the conversation.
     if (to) scrollToMsg(to, !held); else scrollEnd(dir);
+    return true;
+  }
+
+  // h, from app.keys.js: the quoted history of the message you are on (msgAt),
+  // out and back in. n and N are how a thread is read from the keyboard, and
+  // the ••• button is otherwise the one thing in it that wants the mouse.
+  // Answers false when that message has no history folded, so the key does
+  // nothing rather than reaching for some other message.
+  function toggleHistory() {
+    const wrap = currentThread && msgAt();
+    if (!wrap) return false;
+    const md = wrap.querySelector(".msg-body-md");
+    const frame = md ? null : wrap.querySelector(".msg-body-frame");
+    let root = md;
+    if (frame) {
+      try { root = frame.contentDocument && frame.contentDocument.body; } catch (_) { /* mid-load */ }
+    }
+    const button = App.quotes.toggle(root);
+    if (!button) return false;
+    // Pressed on, the way a click would be. Opening the newest message's
+    // history takes the pane off the end of the thread, and msgAt() would
+    // otherwise answer the next h with the message above it.
+    pressedMid = wrap.dataset.mid;
+    // The button is where the history starts. Shut, the history you may have
+    // been reading in is gone from under you, and open, it runs on below the
+    // button, so either way the button is the place to look. Scrolled to only
+    // when it is off screen, so a press on one in view moves nothing.
+    const p = pane();
+    const top = hitTop({ el: button, frame });
+    const box = p.getBoundingClientRect();
+    if (top < box.top + stuckTop() || top > box.bottom - 40) {
+      p.scrollTo({ top: Math.max(0, p.scrollTop + top - box.top - stuckTop() - 60), behavior: "smooth" });
+    }
     return true;
   }
 
@@ -2302,7 +2420,7 @@ App.reader = (function () {
   // thread open — both the bar and the per-message toolbars carry one.
   // App.calendar uses it the same way for the meercal strips.
   return { openThread, clear, mailArrived, action, scrollBy, scrollEnd, scrollMsg, setKeyFocus,
-    renderEmpty,
+    renderEmpty, toggleHistory,
     redraw: () => rerender(), isOpen: () => !!currentThread,
     // The composer previews a forwarded original in the same document the
     // reader draws it in, so it looks there the way it looked here.

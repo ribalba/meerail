@@ -826,6 +826,26 @@ mark.hit.hit-on { background: #ff8a3d; box-shadow: 0 0 0 2px #ff8a3d; }
 .msg-body-md li { margin: .15em 0; }
 .msg-body-md blockquote { margin: 0 0 .8em; padding-left: .8em;
   border-left: 3px solid var(--border-strong); color: var(--text-muted); }
+/* The ••• a reply's quoted history folds behind (app.quotes.js). HTML bodies
+   are frames and carry their own copy of these rules, App.quotes.FRAME_CSS,
+   always light like the mail around them. This one follows the theme. The
+   label is drawn here rather than written into the button, so a copy or a
+   find never picks it up. */
+.msg-body-md .mr-q-hide { display: none !important; }
+.msg-body-md .mr-q-row { margin: 0 0 .8em; }
+.msg-body-md .mr-q-row[hidden] { display: none; }
+.msg-body-md .mr-q-toggle { display: inline-block; margin: 0; padding: 0 7px; height: 14px;
+  border: 1px solid var(--border-strong); border-radius: 7px; background: var(--bg-elev);
+  color: var(--text-muted); cursor: pointer; vertical-align: middle;
+  font: 700 11px/12px var(--font); letter-spacing: 1px; }
+.msg-body-md .mr-q-toggle::before { content: "•••"; }
+.msg-body-md .mr-q-toggle:hover,
+.msg-body-md .mr-q-toggle:focus-visible { background: var(--hover-tint-strong); color: var(--text); }
+.msg-body-md .mr-q-toggle[aria-expanded="true"] { background: var(--accent-weak);
+  border-color: var(--accent-soft); color: var(--accent); }
+@media (pointer: coarse) {
+  .msg-body-md .mr-q-toggle { height: 22px; padding: 0 14px; border-radius: 11px; line-height: 20px; }
+}
 .msg-body-md hr { border: none; border-top: 1px solid var(--border); margin: 1.1em 0; }
 .msg-body-md a { color: var(--accent); }
 .msg-body-md code, .md-code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;

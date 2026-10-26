@@ -14,7 +14,8 @@ with **regex search over your whole mailbox** (attachment text included), conver
 for analytics. Runs on Linux, macOS and Windows.
 
 **Features:** three-pane Apple-Mail-style UI · unified inbox across accounts · conversation
-threading · POSIX-regex & keyword search (scope + "last N years" window, `:unread` / `:read` /
+threading, with the history each reply quotes **folded behind •••** once the messages above
+already show it (`h` opens it) · POSIX-regex & keyword search (scope + "last N years" window, `:unread` / `:read` /
 `:has-attachment` / `:from` / `:to` filters, `-word` to leave a word out, searches PDF/Office
 attachment text via Tika) · every
 result says **which folder it was found in**, and each message in a thread says where it is filed
