@@ -317,6 +317,54 @@ update_check = true
 # pick a fixed language in Settings when you use it.
 
 
+# --- dictation ----------------------------------------------------------------
+# Dictation in the composer. You press the microphone and talk, and the text is
+# written into the draft a sentence at a time while you keep talking. The
+# speech recognition is done by Whisper running on your own machine, as one
+# more container in the stack. Leave the section out, the default, and there
+# is no microphone and no recording is sent anywhere at all.
+#
+# What is sent, once it is on, is the recording of what you say, cut into
+# pieces at your pauses, and with each piece the text just before the cursor
+# (so that Whisper keeps names and punctuation consistent). It goes from the
+# meerail server to the container and nowhere else, nothing of it is stored,
+# and none of it is logged.
+#
+# Turning it on takes three steps. The container is the heaviest thing in the
+# stack (a speech model of 1.5 GB or more, and as much memory again), so
+# nothing starts it unless you ask, and the microphone stays hidden until each
+# user switches it on.
+#
+#   1. Start the container. Put COMPOSE_PROFILES=dictation in .env (or add it
+#      to the list already there, COMPOSE_PROFILES=proton,grammar,dictation),
+#      or pass `--profile dictation` to docker compose. Its first start
+#      downloads the model, which takes a few minutes.
+#   2. Tell the server where it is, here.
+#   3. Switch it on under Settings, Composing.
+#
+# [dictation]
+# url = "http://whisper:9000"
+#
+# That is the container's name on the compose network, which is where the
+# server runs. A server started outside compose (`make dev`) cannot resolve it
+# and needs an address it can reach instead.
+#
+# The browser only lets a page use the microphone over https://, or over
+# http:// on localhost. A meerail you reach at http://192.168.x.y cannot
+# dictate until it is behind TLS.
+#
+# How long to wait for one piece, in seconds. The service transcribes one piece
+# at a time, so a piece can wait behind the one before it, and this is
+# generous. Failing to connect at all still gives up after three.
+# timeout_seconds = 60
+#
+# The privacy guard, the same as for [grammar]. Before anything is sent, the
+# host in `url` is resolved, and if any address it has is public the recording
+# is refused, with a message saying so. Set this to true only if sending
+# recordings of your voice to that public address is what you intend.
+# allow_public_hosts = false
+
+
 # --- agent --------------------------------------------------------------------
 # The agent runs on the machine where Proton Bridge is installed. It reads your
 # Bridge IMAP/SMTP credentials (shown in the Bridge app — NOT your Proton

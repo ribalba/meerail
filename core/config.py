@@ -294,6 +294,11 @@ _SECTION_KEYS: dict[str, dict[str, str]] = {
         "timeout_seconds": "grammar_timeout_seconds",
         "allow_public_hosts": "grammar_allow_public_hosts",
     },
+    "dictation": {
+        "url": "dictation_url",
+        "timeout_seconds": "dictation_timeout_seconds",
+        "allow_public_hosts": "dictation_allow_public_hosts",
+    },
     "agent": {
         "tika_url": "tika_url",
         "poll_interval": "poll_interval",
@@ -671,6 +676,46 @@ class Settings(BaseSettings):
     # sending drafts to that machine is what you intend, for instance a checker
     # on your own server that happens to have a public address.
     grammar_allow_public_hosts: bool = False
+
+    # --- [dictation] ----------------------------------------------------------
+    # Speech to text in the composer, done by a Whisper server
+    # (onerahmet/openai-whisper-asr-webservice with the faster-whisper engine)
+    # that this install runs itself. While the microphone is on, the composer
+    # posts a short recording on every pause in speech, together with the end of
+    # the draft so far, so what is configured here decides where somebody's voice
+    # goes. The whole design is that it goes nowhere off this machine. Users turn
+    # dictation on for themselves in Settings, and it is off until they do. See
+    # app/dictation.py.
+
+    # The service's base URL, e.g. http://whisper:9000 for the container the
+    # compose files start under the `dictation` profile. Empty, the default,
+    # means the feature is off. The composer draws no microphone, and no
+    # recording is sent anywhere at all.
+    #
+    # Operator configuration rather than a field in Settings, and so it does not
+    # go through app/nethost.py, for the same reason as grammar_url above. The
+    # check here is the inverse (see dictation_allow_public_hosts below).
+    dictation_url: str = ""
+
+    # How long to wait for an answer, in seconds. Only the read side, because
+    # failing to connect gives up after three. Sixty rather than a few because
+    # the service transcribes one recording at a time, so a piece can wait
+    # behind the one before it, and a larger model on a slower CPU takes longer
+    # over each piece. The service also loads its model again on the next
+    # request after unloading it for being idle (its MODEL_IDLE_TIMEOUT, off
+    # unless set).
+    dictation_timeout_seconds: int = 60
+
+    # Let dictation_url point at a public address. Off by default, and this is
+    # the privacy half of the feature. A recording of somebody's voice, sent
+    # with the unsent draft it belongs to, is as private as anything a mail
+    # client handles, and a URL naming a hosted service would send every
+    # sentence there as it is spoken. With this off, a URL whose host resolves
+    # to any public address is refused before a request is made, with a message
+    # saying so. Turn it on only if sending recordings to that machine is what
+    # you intend, for instance a recogniser on your own server that happens to
+    # have a public address.
+    dictation_allow_public_hosts: bool = False
 
     # --- [agent] --------------------------------------------------------------
     # Apache Tika endpoint for attachment text extraction.

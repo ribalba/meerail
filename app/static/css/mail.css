@@ -1296,6 +1296,33 @@ mark.hit.hit-on { background: #ff8a3d; box-shadow: 0 0 0 2px #ff8a3d; }
 }
 .compose-grammar-lang:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
 
+/* Dictation. The microphone, and one line saying what it is doing. The line
+   can be a whole sentence after a failure, so it may wrap rather than push
+   the send buttons off the row. */
+.compose-dictation { display: inline-flex; align-items: center; gap: .3rem; flex: 0 1 auto; min-width: 0; }
+.compose-dictation[hidden] { display: none; }
+/* Red while it listens, with a ring that follows the microphone's level
+   (--mic-level, 0 to 1, set by app.dictation.js), so the writer can see that
+   it hears them. Blue and pulsing while the last pieces are still being
+   written after the microphone closed. */
+#compose-dictate { --mic-level: 0; transition: box-shadow .08s linear; }
+#compose-dictate.recording, #compose-dictate.recording:hover {
+  color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, transparent);
+  box-shadow: 0 0 0 calc(1px + var(--mic-level) * 4px) color-mix(in srgb, var(--danger) 35%, transparent); }
+#compose-dictate.starting, #compose-dictate.writing { color: var(--accent); }
+#compose-dictate.writing svg { animation: dictation-pulse 1.2s ease-in-out infinite; }
+#compose-dictate.failed { color: var(--warning); }
+@keyframes dictation-pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) {
+  #compose-dictate { transition: none; }
+  #compose-dictate.recording, #compose-dictate.recording:hover {
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--danger) 35%, transparent); }
+  #compose-dictate.writing svg { animation: none; opacity: .6; }
+}
+.compose-dictation-status { color: var(--text-muted); font-size: .8rem; }
+.compose-dictation-status:empty { display: none; }
+.compose-dictation-status.error { color: var(--danger); }
+
 /* The suggestions for one underline. Fixed to the viewport and placed by
    app.grammar.js under the word (above it near the bottom of the screen);
    fixed is also what lets it spill past the composer window, whose

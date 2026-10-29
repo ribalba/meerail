@@ -28,7 +28,10 @@
     "mac": {
       "category": "public.app-category.productivity",
       "target": ["dmg", "zip"],
-      "icon": "build/icon.png"
+      "icon": "build/icon.png",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "meerail records from the microphone only while you dictate into a draft."
+      }
     },
     "linux": {
       "target": ["AppImage", "deb"],

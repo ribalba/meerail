@@ -54,6 +54,8 @@ App.compose = (function () {
     // Hidden by app.grammar.js on an install with no checker configured, and
     // dimmed while the draft has nothing flagged, the way the two above are.
     { show: "⌥/Alt ⇧ G", label: "Next spelling issue", ck: "grammar" },
+    // Hidden by app.dictation.js unless dictation is set up and switched on.
+    { show: "⌥/Alt ⇧ D", label: "Dictate", ck: "dictation" },
     { show: "⌘/Ctrl ↵", label: "Send" },
     // The plain-Send key: ⌘↵ presses whichever button is the primary one, and
     // behind a thread that is Send & Archive. This one only ever sends.
@@ -568,8 +570,9 @@ App.compose = (function () {
     refit();
     // Every way a draft reaches the window comes through here, with its text
     // already in the editor: a fresh one, one back off the bar, one restored
-    // after a reload. The checker starts over for it.
+    // after a reload. The checker starts over for it, and so does dictation.
     if (App.grammar) App.grammar.onOpen();
+    if (App.dictation) App.dictation.onOpen();
   }
 
   // Hiding the window does not move the caret out of it: the field keeps the
@@ -594,6 +597,7 @@ App.compose = (function () {
     parked = false;
     $("#compose-modal").hidden = true;
     if (App.grammar) App.grammar.onHide();
+    if (App.dictation) App.dictation.onHide();
   }
 
   // --- Minimize ---------------------------------------------------------
@@ -712,6 +716,7 @@ App.compose = (function () {
     dropFocus();
     $("#compose-modal").hidden = true;
     if (App.grammar) App.grammar.onHide();
+    if (App.dictation) App.dictation.onHide();
     renderBar();
     // Saved now rather than after the usual pause: nothing more is going to be
     // typed into it to set that timer off again.

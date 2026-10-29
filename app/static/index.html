@@ -359,6 +359,51 @@
           </p>
         </div>
 
+        <!-- Filled by app.dictation.js from /api/dictation/config. Like the
+             grammar form above, it is only drawn when this server has a
+             speech service to send recordings to. Off until switched on here,
+             because it puts a microphone into the composer. -->
+        <div class="settings-section" id="dictation-settings">
+          <div id="dictation-settings-form" hidden>
+            <label class="settings-check" for="dictation-enabled">
+              <input type="checkbox" id="dictation-enabled" />
+              <span>Show a microphone in the composer for dictation</span>
+            </label>
+
+            <label for="dictation-language">Language I speak</label>
+            <select id="dictation-language">
+              <option value="auto">Detect from the speech</option>
+            </select>
+
+            <label for="dictation-words">Names and terms to spell right (one per line)</label>
+            <textarea id="dictation-words" class="grammar-list" rows="3" spellcheck="false"></textarea>
+
+            <div class="sa-footer-actions">
+              <button type="button" id="dictation-save">Save</button>
+              <span class="sa-footer-status" id="dictation-save-status"></span>
+            </div>
+            <p class="muted small">
+              Press the microphone, or <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>D</kbd>,
+              and talk. The recording is cut at your pauses, and each piece is
+              written into the draft by the Whisper service this install runs
+              on its own network while you keep talking. The text just before
+              the cursor goes along with each piece, so that names and
+              punctuation stay consistent. Nothing is stored, and nothing is
+              sent anywhere else. Picking the language you speak helps with
+              short sentences, and the first sentence turns up sooner, because
+              detecting the language costs Whisper a second pass. Stored on the
+              server, so every browser gets the same.
+            </p>
+          </div>
+          <p class="muted small" id="dictation-settings-off">
+            <strong>Dictation</strong> is not set up on this server. It needs a
+            Whisper service running next to meerail. Start the
+            <code>dictation</code> compose profile and set <code>url</code>
+            under <code>[dictation]</code> in <code>meerail.toml</code>, as
+            <code>meerail.example.toml</code> describes.
+          </p>
+        </div>
+
         <h3 class="settings-heading" id="settings-ai-heading">AI</h3>
         <div class="settings-section">
           <label for="ai-provider">Provider</label>
@@ -882,6 +927,16 @@
         <div class="compose-actions">
           <button id="compose-attach" class="icon-btn" title="Attach file"></button>
           <input type="file" id="compose-file" multiple hidden />
+          <!-- Dictation. The microphone, and what it is doing. Hidden unless
+               this server has a speech service configured ([dictation] in
+               meerail.toml) and dictation is switched on in Settings. Shown
+               and driven by app.dictation.js. -->
+          <span class="compose-dictation" id="compose-dictation" hidden>
+            <button type="button" class="icon-btn" id="compose-dictate"
+                    aria-pressed="false" aria-keyshortcuts="Alt+Shift+D"
+                    aria-label="Dictate" title="Dictate (Alt+Shift+D)"></button>
+            <span class="compose-dictation-status" id="compose-dictation-status" aria-live="polite"></span>
+          </span>
           <!-- Renders the markdown and sends the message as HTML rather than as
                plain text; see app.compose.js. Its title is written by
                setHtmlMode(), which is also what knows which way it is. -->
@@ -1014,6 +1069,7 @@
   <script src="/static/js/app.search.js"></script>
   <script src="/static/js/app.compose.js"></script>
   <script src="/static/js/app.grammar.js"></script>
+  <script src="/static/js/app.dictation.js"></script>
   <script src="/static/js/app.outbox.js"></script>
   <script src="/static/js/app.tasks.js"></script>
   <script src="/static/js/app.calendar.js"></script>

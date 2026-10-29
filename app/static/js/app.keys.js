@@ -371,6 +371,16 @@ App.keys = (function () {
       App.grammar.next();
       return;
     }
+    // Alt+Shift+D starts dictating into the draft, and stops it again. Same
+    // family and same rule as the ones above. Without a composer it does
+    // nothing and is swallowed all the same. Matched on the physical key,
+    // since Option+Shift+D on a Mac types "Î".
+    if (e.altKey && !mod && e.shiftKey && e.code === "KeyD") {
+      if (!App.compose.isOpen()) return;
+      e.preventDefault();
+      App.dictation.toggle();
+      return;
+    }
     // Alt+C brings the next minimized draft up, parking whatever is in the
     // composer to make room, so repeated presses walk all of them. Up here
     // rather than in the table because it has to work with the caret in a
@@ -379,6 +389,14 @@ App.keys = (function () {
     if (e.altKey && !mod && e.code === "KeyC") {
       e.preventDefault();
       App.compose.cycle();
+      return;
+    }
+    // Escape while dictating stops the microphone and nothing else. What was
+    // said up to the key is still written. Minimizing the draft on the same
+    // press would throw that away, because a hidden draft takes no more text.
+    if (e.key === "Escape" && App.dictation && App.dictation.isRecording()) {
+      e.preventDefault();
+      App.dictation.stop();
       return;
     }
     if (e.key === "Escape") { e.preventDefault(); onEscape(); return; }

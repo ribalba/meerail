@@ -71,6 +71,14 @@ left out of it when it is not.
 source). Code signing/notarization is not configured — add your certs for
 distributable macOS builds.
 
+The microphone for dictation needs nothing extra on Linux and Windows. The
+window grants the page's own permission requests, as Electron does by default.
+macOS also asks the user, and it only does that for an app whose `Info.plist`
+says why it wants the microphone. That sentence is
+`NSMicrophoneUsageDescription` under `build.mac.extendInfo` in `package.json`.
+A signed build with the hardened runtime will additionally need the
+`com.apple.security.device.audio-input` entitlement.
+
 ## Warnings during `npm install`
 
 The install prints deprecation warnings for `inflight`, `glob@7`, `rimraf@2`

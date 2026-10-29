@@ -27,6 +27,11 @@
 # `grammar` profile, which nothing sets for you: add it to COMPOSE_PROFILES
 # (comma-separated, e.g. COMPOSE_PROFILES=proton,grammar) and set
 # `[grammar] url = "http://languagetool:8010"` in meerail.toml. See the service.
+#
+# Whisper, the speech recogniser behind the composer's microphone, only starts
+# under the `dictation` profile, which nothing sets for you either. It also
+# needs `[dictation] url = "http://whisper:9000"` in meerail.toml, and each
+# user switches dictation on in Settings. See the service.
 name: meerail
 
 services:
@@ -302,6 +307,64 @@ services:
       retries: 3
       start_period: 60s
 
+  whisper:
+    # Dictation in the composer, done on this machine by Whisper behind
+    # whisper-asr-webservice, with the faster-whisper engine on the CPU, pinned.
+    # Only starts under the `dictation` profile, because it is the heaviest
+    # thing here by far. It is 5.2 GB to pull, downloads a 1.6 GB model on its
+    # first start, and uses about 2.2 GB of memory (2.7 GB at the peak of a
+    # transcription). Three steps turn it on:
+    #
+    #   1. COMPOSE_PROFILES=dictation in .env, or add it to the list already
+    #      there (COMPOSE_PROFILES=proton,dictation).
+    #   2. [dictation] url = "http://whisper:9000" in meerail.toml.
+    #   3. The switch under Settings, Composing, which each user ticks for
+    #      themselves.
+    #
+    # The second decides whether a recording is sent anywhere, so it is not set
+    # in the server's environment for you, and the server does not depend on
+    # this service. A stack with the profile off comes up exactly as before.
+    image: ${WHISPER_IMAGE:-onerahmet/openai-whisper-asr-webservice:v1.10.0}
+    profiles: ["dictation"]
+    networks: [meerail]
+    # Deliberately NOT published. The service has no authentication, and the
+    # end of your draft travels to it as Whisper's prompt. The server is its
+    # only client, over this network.
+    environment:
+      ASR_ENGINE: faster_whisper
+      # large-v3-turbo stays clearly faster than you speak on an ordinary
+      # laptop CPU (a 10 s piece in about 5 s at 4 threads), with a word error
+      # rate of about 2.5% on clean German and English. large-v3 is a little
+      # more accurate and takes about half as long again for each piece. Pick
+      # it only with cores to spare, and give it WHISPER_MEM_LIMIT=6g.
+      ASR_MODEL: ${WHISPER_MODEL:-large-v3-turbo}
+      ASR_QUANTIZATION: int8
+      # Downloaded into the volume below, so only the first start downloads it.
+      ASR_MODEL_PATH: /models
+      # The threads for one transcription. More than 4 did not make a piece
+      # faster when measured, and cost up to twice the CPU.
+      OMP_NUM_THREADS: ${WHISPER_THREADS:-4}
+    # uvicorn started directly instead of through the image's own launcher,
+    # with its access log off. Otherwise `docker logs` would show the prompt,
+    # the text you had written just before the cursor, for every piece.
+    entrypoint: ["uvicorn", "app.webservice:app", "--host", "0.0.0.0", "--port", "9000", "--no-access-log"]
+    volumes:
+      - whisper-models:/models
+    deploy:
+      resources:
+        limits:
+          memory: ${WHISPER_MEM_LIMIT:-4g}
+    restart: unless-stopped
+    healthcheck:
+      # It only listens once the model is downloaded and loaded. The start
+      # period covers that download, and the timeout covers a slow piece, since
+      # /docs waits until the piece in progress is done.
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://localhost:9000/docs || exit 1"]
+      interval: 30s
+      timeout: 60s
+      retries: 3
+      start_period: 900s
+
 networks:
   meerail:
     driver: bridge
@@ -310,3 +373,6 @@ volumes:
   pg-data:
   mail-data:
   bridge-data:
+  # The downloaded Whisper model, used only under the `dictation` profile.
+  # Losing it costs a download, nothing else.
+  whisper-models:

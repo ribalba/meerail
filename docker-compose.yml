@@ -196,6 +196,79 @@ services:
       retries: 3
       start_period: 60s
 
+  whisper:
+    # Dictation in the composer (app/dictation.py), done by Whisper behind
+    # whisper-asr-webservice, with the faster-whisper engine on the CPU. Opt-in,
+    # because it is the heaviest thing here by far. The image is 5.2 GB (it also
+    # carries torch and whisperx, which this engine does not use), the model is
+    # a 1.6 GB download on the first start, and it measured 2.2 GB resident and
+    # 2.7 GB at the peak of a transcription. So it only starts under the
+    # `dictation` profile, and turning the feature on takes three steps:
+    #
+    #   1. COMPOSE_PROFILES=dictation in .env (or `--profile dictation` on the
+    #      command line), so that compose starts this service.
+    #   2. [dictation] url = "http://whisper:9000" in meerail.toml, so that the
+    #      server knows where it is.
+    #   3. Each user ticks the switch under Settings, Composing, which is off
+    #      until they do and is what puts a microphone into the composer.
+    #
+    # The second is the one that decides whether a recording is sent anywhere,
+    # so like [grammar] url it is not in the server's environment below, and
+    # the server does not depend on this service. A stack with the profile off
+    # comes up exactly as before, and its composer has no microphone.
+    image: onerahmet/openai-whisper-asr-webservice:v1.10.0
+    profiles: ["dictation"]
+    networks: [meerail]
+    # Deliberately NOT published. The service has no authentication, and the
+    # end of the draft travels to it in the query string as Whisper's prompt.
+    # The server is the only client, and it reaches the service as
+    # whisper:9000 over the compose network.
+    environment:
+      ASR_ENGINE: faster_whisper
+      # large-v3-turbo is large-v3 with a decoder cut from 32 layers to 4. It
+      # was measured against large-v3 on an i7-1280P, at 4 threads, on German
+      # and English. The word error rate on clean German speech was 2.4%
+      # against 1.8%, and a 10 s piece took 5.3 s against 7.8 s. Only turbo stays
+      # clearly faster than the speaker, which is what dictation needs.
+      # large-v3 is the choice for a machine with cores to spare. It needs
+      # WHISPER_MEM_LIMIT=6g, and its first start downloads 2.9 GB.
+      ASR_MODEL: ${WHISPER_MODEL:-large-v3-turbo}
+      # int8 weights, the fastest way to run either model on a CPU, and what
+      # the figures above were measured with.
+      ASR_QUANTIZATION: int8
+      # Where the model is downloaded to, which is the volume below, so that
+      # only the first start downloads it.
+      ASR_MODEL_PATH: /models
+      # The threads for one transcription. The service passes no thread count
+      # to faster-whisper, so this is what it uses. More than 4 never made a
+      # piece faster on the machine above (6 gave the same time for 1.5 times
+      # the CPU, 8 were slower), so raise it only after measuring on yours.
+      OMP_NUM_THREADS: ${WHISPER_THREADS:-4}
+    # uvicorn started directly instead of through the image's own launcher, so
+    # that its access log can be turned off. With the log on, `docker logs`
+    # shows the request line of every transcription, prompt and all, which is
+    # the text the user had written just before the cursor.
+    entrypoint: ["uvicorn", "app.webservice:app", "--host", "0.0.0.0", "--port", "9000", "--no-access-log"]
+    volumes:
+      - whisper-models:/models
+    deploy:
+      resources:
+        limits:
+          memory: ${WHISPER_MEM_LIMIT:-4g}
+    restart: unless-stopped
+    healthcheck:
+      # The service only listens once the model is downloaded and loaded, so
+      # an answer from /docs means it is ready. The start period covers the
+      # download on a first start, which took three minutes on a fast line.
+      # The timeout is long because the service runs a transcription on its
+      # event loop, and /docs waits until that piece is done. The slowest
+      # piece measured took 45 s.
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://localhost:9000/docs || exit 1"]
+      interval: 30s
+      timeout: 60s
+      retries: 3
+      start_period: 900s
+
   server:
     build: .
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
@@ -261,7 +334,7 @@ services:
 
 # One network for the whole stack. Compose would create a default one anyway;
 # naming it makes the boundary explicit — services address each other by service
-# name (`db`, `tika`, `languagetool`, `server`) over it, and only `server`
+# name (`db`, `tika`, `languagetool`, `whisper`, `server`) over it, and only `server`
 # crosses it outwards.
 networks:
   meerail:
@@ -270,3 +343,6 @@ networks:
 volumes:
   pg-data:
   mail-data:
+  # The downloaded Whisper model. Only the `dictation` profile uses it, and
+  # losing it costs a download, nothing else.
+  whisper-models:

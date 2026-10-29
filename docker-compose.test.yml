@@ -125,6 +125,40 @@ services:
       retries: 30
       start_period: 60s
 
+  whisper:
+    # The speech recogniser for dictation, under the same `dictation` profile as
+    # production, so a plain `make test` neither pulls nor starts it. The live
+    # half of tests/test_dictation.py skips without it. Run it with
+    # `COMPOSE_PROFILES=dictation make test`. No host port, because only the
+    # server talks to it, over this project's network.
+    image: onerahmet/openai-whisper-asr-webservice:v1.10.0
+    profiles: ["dictation"]
+    environment:
+      ASR_ENGINE: faster_whisper
+      # The smallest model, about 75 MB, so the suite stays quick to start. The
+      # live tests check the plumbing and the silence filter, not how well it
+      # understands speech.
+      ASR_MODEL: tiny
+      ASR_QUANTIZATION: int8
+      # Where the model is downloaded to on first start. There is no volume
+      # behind it, so each fresh test stack downloads it again.
+      ASR_MODEL_PATH: /models
+    # uvicorn started directly instead of through the image's own launcher, so
+    # its access log can be turned off. The service reads the prompt, which is
+    # the end of the user's draft, from the query string, and an access log
+    # would write every one of them out.
+    entrypoint: ["uvicorn", "app.webservice:app", "--host", "0.0.0.0", "--port", "9000", "--no-access-log"]
+    healthcheck:
+      # The service only starts listening once the model is downloaded and
+      # loaded, so an answer from /docs means it is ready to transcribe. The
+      # short interval lets `up --wait` return as soon as that happens, and the
+      # long start period covers the download on a first start.
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://localhost:9000/docs || exit 1"]
+      interval: 3s
+      timeout: 10s
+      retries: 20
+      start_period: 300s
+
   server:
     build: .
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
@@ -160,6 +194,11 @@ services:
       # does not resolve, and every real check answers 503, which is what the
       # live tests skip on.
       GRAMMAR_URL: http://languagetool:8010
+      # The profiled whisper service above, set for the same reason. GET
+      # /api/dictation/config reports dictation as available either way, and
+      # with the profile off every transcription answers 503, which is what the
+      # live tests in tests/test_dictation.py skip on.
+      DICTATION_URL: http://whisper:9000
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)"]
       interval: 2s

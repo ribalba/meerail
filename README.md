@@ -568,6 +568,16 @@ Grammar and spelling checks in the composer, done by a LanguageTool server on yo
 | `timeout_seconds` | `GRAMMAR_TIMEOUT_SECONDS` | `20` | How long to wait for an answer. Generous because LanguageTool loads each language the first time it is asked for one, which takes about six seconds. Only the read side; failing to connect at all gives up after three. |
 | `allow_public_hosts` | `GRAMMAR_ALLOW_PUBLIC_HOSTS` | `false` | The privacy guard. With it off, a `url` whose host resolves to any public address is refused before anything is sent, with a message saying so, so that a URL copied from a tutorial cannot quietly start sending every paragraph you type to somebody else's server. Loopback and private addresses are always allowed. Turn it on only if sending drafts to that public address is what you intend. |
 
+### `[dictation]`
+
+Dictation in the composer, transcribed by a Whisper service on your own machine. The whole section is optional. See [Dictation](#dictation).
+
+| Key | Env | Default | What it does |
+| --- | --- | --- | --- |
+| `url` | `DICTATION_URL` | *(empty)* | Base URL of the speech service, normally `http://whisper:9000` for the container the compose files start under the `dictation` profile. It speaks the API of [whisper-asr-webservice](https://github.com/ahmetoner/whisper-asr-webservice). Empty means the feature is off. The composer has no microphone and **no recording is sent anywhere**. |
+| `timeout_seconds` | `DICTATION_TIMEOUT_SECONDS` | `60` | How long to wait for one recorded piece. Generous because the service transcribes one piece at a time, so a piece can wait behind the one before it. Only the read side. Failing to connect at all gives up after three seconds. |
+| `allow_public_hosts` | `DICTATION_ALLOW_PUBLIC_HOSTS` | `false` | The same privacy guard as for `[grammar]`. A `url` whose host resolves to any public address is refused before anything is sent. Turn it on only if sending recordings of your voice to that public address is what you intend. |
+
 ### `[agent]`
 
 | Key | Env | Default | What it does |
@@ -872,6 +882,87 @@ dictionary and the rules you turned off, one per line, to edit by hand. These ar
 server, so every browser gets the same. While the checker is on, the browser's own spell check
 is switched off in the composer, so words are not underlined twice. With no checker configured,
 or with it turned off, the browser's spell check comes back.
+
+### Dictation
+
+Optional, and off until you set it up and switch it on. The composer gets a microphone. Press
+it, or **Alt+Shift+D**, and talk, and what you say is written into the draft at the cursor. The
+speech recognition is done by [Whisper](https://github.com/openai/whisper) running **on your own
+machine**, in the [whisper-asr-webservice](https://github.com/ahmetoner/whisper-asr-webservice)
+container with the faster-whisper engine. The meerail server is its only client, over the
+compose network. Nothing goes to OpenAI or to anyone else.
+
+Whisper is not a streaming model. It transcribes a finished stretch of audio, and on a CPU the
+large models need a few seconds for each one. So the browser cuts the recording at your own
+pauses and sends each piece as soon as it is cut, while you keep talking. The text turns up a
+sentence at a time, shortly after each pause, and when you press stop only your last sentence
+is left to wait for. With each piece goes the text just before the cursor, which Whisper reads as
+what came before. That keeps casing, punctuation and the spelling of names consistent from one
+sentence to the next. Pieces are written in the order you spoke them, and each one is a normal
+edit, so Ctrl+Z takes a sentence back.
+
+How fast it is depends on the machine. On a laptop with an Intel i7-1280P that was busy with
+other work, the default model, `large-v3-turbo` at 4 threads, took about 5 seconds for a piece,
+whether the piece lasted 3 seconds or 10. Whisper always works on a thirty-second window, so a
+short piece costs nearly as much as a long one. Your first sentence turns up about 5 seconds
+after you pause. While a piece is being written, the browser lets the next one grow until the
+container is free again, so the text keeps up however long you talk. About one piece in twenty
+took three to four times as long on that busy laptop. The word error rate was 2.4% on German
+and 2.5% on English test recordings, with punctuation, casing, times ("10.30 Uhr") and
+percentages written the way you would type them.
+
+If the language is left on *Detect from the speech*, the first piece takes about twice as long,
+because detecting the language is a second pass. After that the draft's language is known and
+the rest go at full speed.
+
+The container is big. The image is 5.2 GB, the model is a 1.6 GB download on the first start,
+and it uses about 2.2 GB of memory while it runs (the compose files cap it at 4 GB). The other
+choice is `large-v3`. It made fewer errors in the same test (1.8% on German, 0.8% on
+English), but took 7 to 8 seconds for a 10 second piece on that laptop and needs about 4 GB of
+memory. It is the better pick for a machine with cores to spare.
+
+Three steps turn it on. The container is the heaviest thing in the stack, so nothing starts it
+unless you ask, and the microphone stays hidden until it is switched on in Settings.
+
+1. Start the container. Put `COMPOSE_PROFILES=dictation` in `.env` (or add it to the list
+   already there, `COMPOSE_PROFILES=proton,grammar,dictation`), or pass `--profile dictation` on
+   the `docker compose` command line. Its first start downloads the speech model, which takes a
+   few minutes. The model is kept in a volume, so this happens once.
+2. Tell the server where it is, in `meerail.toml`.
+
+   ```toml
+   [dictation]
+   url = "http://whisper:9000"
+   ```
+
+3. Bring the stack up again (`make up`, or `meerail.sh restart` for an install), then tick
+   **Settings → Composing → Show a microphone in the composer for dictation**.
+
+The browser only lets a page use the microphone over `https://`, or over `http://` on
+`localhost`. A meerail you open at `http://192.168.x.y` cannot dictate until it is behind TLS.
+The desktop app asks the system for the microphone the first time you press it.
+
+The container is not published on any host port, and its access log is switched off, because the
+text before the cursor travels to it in the query string of each request. Before anything is
+sent, the server resolves the host in `dictation.url` and refuses if any address it has is
+public, exactly as it does for the grammar checker. `dictation.allow_public_hosts = true` is the
+override. Nothing is stored. A piece lives in the browser's memory until its text is in the
+draft, and closing or minimizing the draft drops pieces that are not written yet.
+
+**Settings → Composing** sets the language you speak (*Detect from the speech* by default, but a
+fixed language helps with short sentences) and a list of names and terms Whisper should spell
+right, one per line. These are stored on the server, so every browser gets the same.
+
+While it listens the microphone is red, with a ring that follows your voice. Esc or a second
+press stops it. It also stops by itself after 30 seconds of silence. If a piece cannot be
+written (the container is down, say), recording stops and the pieces are kept. The next press
+sends them and listens again.
+
+The model, its threads and its memory limit are `WHISPER_MODEL`, `WHISPER_THREADS` and
+`WHISPER_MEM_LIMIT` in `.env`, read by both compose files. For `large-v3`, set
+`WHISPER_MODEL=large-v3` and `WHISPER_MEM_LIMIT=6g`. More than 4 threads did not make a piece
+faster on the laptop above, so measure before you raise it. Whisper also translates, but meerail
+only ever asks it to transcribe.
 
 ### Calendar invitations and meercal
 

@@ -98,6 +98,7 @@ Any plain IMAP/SMTP account (Gmail, Fastmail, Dovecot) works the same way.
 | `app/llm.py`, `aiprompts.py`, `threadtext.py` | AI providers, prompts, and conversation flattening. |
 | `app/meercal.py` | The meercal client for "Add to meercal": calendar list, preview and import of an `.ics` attachment, all through the `nethost` guard. meercal does the iCalendar parsing. |
 | `app/grammar.py` | Grammar and spelling checks: the settings row, UTF-16 segment offsets, the LanguageTool client, and the privacy guard that refuses a public `grammar.url`. |
+| `app/dictation.py` | Dictation: the settings row, the client for the Whisper service (whisper-asr-webservice), the prompt built from the vocabulary and the draft before the cursor, the filter for text Whisper invents on silence, and the same privacy guard for `dictation.url`. The browser half is `app.dictation.js`, which cuts the recording at pauses, plus `app.dictation.worklet.js`, the microphone tap that is loaded as an AudioWorklet module and not as a `<script>` tag. |
 | `app/static/` | The SPA: `index.html`, `css/mail.css`, `js/app.*.js`. |
 | `tests/` | The pytest suite: `conftest.py` (safety guard), `dbfixture.py` (seeding), `helpers.py` (HTTP). |
 | `tools/` | `import_mbox.py` (+ `import-mbox.sh`), plus five maintenance scripts that are dry-run unless given `--apply`: `file_sent.py`, `migrate_blobs.py`, `repair_placements.py`, `reparse_forwards.py`, `restore_pending.py`. |
@@ -365,6 +366,7 @@ these rules exists because something went wrong without it. The README section
 | `actions` | `/api/messages` | mark, flag, move, trash, archive, bulk, empty trash, purge |
 | `compose` | `/api/compose` | staging attachments, send, drafts |
 | `grammar` | `/api/grammar` | config, languages, check, ignore |
+| `dictation` | `/api/dictation` | config, transcribe (one recorded piece at a time) |
 | `outbox` | `/api/outbox` | unsent mail, send delay, retry/cancel/discard |
 | `reminders` | (none) | `/api/messages/{id}/remind`, `/api/reminders` |
 | `search` | `/api` | `/api/search` |

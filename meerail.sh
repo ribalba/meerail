@@ -1029,14 +1029,14 @@ cmd_uninstall() {
     warn "That cannot be undone. Your mail is still on the mail server; what is"
     warn "deleted is meerail's copy, its search index and its sync state."
     if ask_yn "Delete it?" n; then
-      compose --profile proton --profile grammar down -v
+      compose --profile proton --profile grammar --profile dictation down -v
       ok "Containers and volumes removed."
     else
-      compose --profile proton --profile grammar down
+      compose --profile proton --profile grammar --profile dictation down
       ok "Containers removed; volumes kept."
     fi
   else
-    compose --profile proton --profile grammar down
+    compose --profile proton --profile grammar --profile dictation down
     ok "Containers removed; volumes kept. \`start\` brings it all back."
   fi
   say ""

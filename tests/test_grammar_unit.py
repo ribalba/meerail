@@ -120,7 +120,10 @@ def test_the_example_grammar_section_is_valid_once_uncommented(tmp_path, monkeyp
     from core.config import EXAMPLE_CONFIG_PATH
 
     text = EXAMPLE_CONFIG_PATH.read_text()
-    block = text[text.index("# --- grammar"):text.index("# --- agent")]
+    # Up to the next section's heading, whichever section follows. The
+    # [dictation] block below has the same three keys.
+    start = text.index("# --- grammar")
+    block = text[start:text.index("\n# --- ", start + 1)]
     lines = [line[2:] for line in block.splitlines()
              if line.startswith(("# [grammar]", "# url =", "# timeout_seconds =",
                                  "# allow_public_hosts ="))]

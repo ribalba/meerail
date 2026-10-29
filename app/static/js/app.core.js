@@ -450,6 +450,14 @@ App.api = {
   // Aborted by the caller when a newer check replaces it mid-flight.
   grammarCheck(payload, signal) { return this.post("/api/grammar/check", payload, signal); },
   grammarIgnore(payload) { return this.post("/api/grammar/ignore", payload); },
+  // Dictation (app/routers/dictation.py). A recorded piece goes to this server,
+  // which hands it to the Whisper service it was configured with and to
+  // nothing else. Multipart, through request() like an attachment upload, so
+  // a session that expired mid-dictation raises the password prompt and the
+  // piece is sent again after it. Aborted when the draft goes away.
+  dictationConfig() { return this.get("/api/dictation/config"); },
+  saveDictationConfig(cfg) { return this.put("/api/dictation/config", cfg); },
+  dictationTranscribe(form, signal) { return this.request("POST", "/api/dictation/transcribe", form, signal); },
   deleteAttachment(id) { return this.del(`/api/compose/attachments/${encodeURIComponent(id)}`); },
   // Multipart, so it cannot go through request() — that one JSON-encodes the
   // body and sets a Content-Type, and a FormData upload needs the browser to
@@ -535,6 +543,8 @@ const ICON_PATHS = {
   cleanup: '<line x1="20" y1="4" x2="13" y2="11"/><path d="M10 8 L16 14 L12.5 19.5 L4.5 11.5 Z"/><line x1="13" y1="11" x2="8.5" y2="15.5"/>',
   // Two sheets — copy the answer out.
   copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+  // A microphone on its stand. Dictation in the composer.
+  mic: '<path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>',
 };
 
 App.icon = function (name, size = 18, fill = false) {

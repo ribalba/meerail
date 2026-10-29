@@ -893,6 +893,7 @@ App.shell = (function () {
     App.ai.onSettingsOpen();
     // Same arrangement: app.grammar.js holds the state the form edits.
     App.grammar.onSettingsOpen();
+    App.dictation.onSettingsOpen();
     loadSendDelay();
     $("#theme-mode").value = App.theme.mode();
     $("#age-days").value = App.list.ageDays();
@@ -1057,6 +1058,8 @@ App.shell = (function () {
       // After the composer, whose editor it draws on. It asks the server once
       // whether a checker is configured and stays out of the way if not.
       App.grammar.init();
+      // Also after the composer, and also one question to the server.
+      App.dictation.init();
       App.keys.init();
       App.bulk.init();
       App.tasks.init();
