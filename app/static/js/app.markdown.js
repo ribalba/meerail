@@ -27,10 +27,43 @@ App.markdown = (function () {
     return keep ? `<span class="md-mark">${esc(s)}</span>` : "";
   }
 
-  // javascript: and data: URLs must never survive into an href.
-  function safeUrl(u) {
-    return /^(https?:|mailto:)/i.test(u) ? u : "#";
+  // Where a link written as [text](target) points, or null when it points
+  // nowhere a mail can send someone.
+  //
+  // javascript: and data: URLs must never survive into an href, so only http,
+  // https and mailto get through. A target turned down here used to become
+  // href="#". That is a link that goes nowhere for the recipient, and a
+  // browser resolves it against the page it sits in, which inside meerail is
+  // meerail itself, so the link opened http://localhost:8000/ in a new window.
+  // A footer link of that kind went out dead in every mail one user sent for
+  // a week before anyone noticed (2026-10). Two things follow from it.
+  //
+  //   * Targets are read the way people actually write them. CommonMark's
+  //     bracketed form <https://…> drops its brackets. A host written without
+  //     its scheme gets https://, since address bars hide the scheme and people
+  //     type the address the way they see it. A bare address gets mailto:.
+  //     Zero-width characters, which come along when text is copied out of a
+  //     web page, are dropped.
+  //   * What still is not a web or mail address gets no link at all. The link
+  //     rule then leaves the source as it was typed, and the editor marks it
+  //     while it is being written.
+  const INVISIBLE = /[\u200b-\u200d\u2060\ufeff]/g;
+  const SCHEMELESS_HOST = /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}(?::\d+)?(?:[/?#]|$)/i;
+  const MAIL_ADDRESS = /^[^\s@/:<>]+@(?:[a-z0-9-]+\.)+[a-z]{2,}$/i;
+
+  function linkTarget(u) {
+    let t = String(u).replace(INVISIBLE, "");
+    const bracketed = /^<(.+)>$/.exec(t);
+    if (bracketed) t = bracketed[1];
+    if (/^(https?:|mailto:)/i.test(t)) return t;
+    if (MAIL_ADDRESS.test(t)) return "mailto:" + t;
+    if (SCHEMELESS_HOST.test(t)) return "https://" + t;
+    return null;
   }
+
+  // The editor's tooltip on a link that will not become one.
+  const LINK_BAD = "Not a web or mail address, so this is sent as typed and not as a link. " +
+    "Start the address with https://";
 
   // A link's address, written out after its text.
   //
@@ -46,7 +79,7 @@ App.markdown = (function () {
   // renderer drops this whole element (see toMail), and a space left outside it
   // would strand itself in front of whatever punctuation followed the link.
   function hrefTag(text, url) {
-    if (safeUrl(url) === "#" || bareUrl(text.trim()) === bareUrl(url)) return "";
+    if (bareUrl(text.trim()) === bareUrl(url)) return "";
     return `<span class="md-href"> &lt;${esc(url)}&gt;</span>`;
   }
 
@@ -66,17 +99,27 @@ App.markdown = (function () {
     // snake_case identifier and *.txt glob in a mail turns italic.
     { re: /(?<![\w*])\*(\S(?:[^\n*]*?\S)?)\*(?![\w*])/, build: (m, k) => wrap("em", "*", m[1], k) },
     { re: /(?<![\w_])_(\S(?:[^\n_]*?\S)?)_(?![\w_])/,   build: (m, k) => wrap("em", "_", m[1], k) },
+    // A target linkTarget turns down is not a link. The editor says so on the
+    // text, and everywhere else the source stays exactly as it was typed, so a
+    // recipient reads what was written rather than clicking into nowhere.
     { re: /\[([^\]\n]*)\]\(([^)\s]+)\)/,
-      build: (m, k) => k
-        ? mark("[", k) + `<span class="md-link">${inlineHtml(m[1], k)}</span>` + mark(`](${m[2]})`, k)
-        : `<a href="${esc(safeUrl(m[2]))}" target="_blank" rel="noopener noreferrer">${inlineHtml(m[1], k)}</a>`
-          + hrefTag(m[1], m[2]) },
+      build: (m, k) => {
+        const url = linkTarget(m[2]);
+        if (k) {
+          const attrs = url ? `class="md-link"` : `class="md-link md-link-bad" title="${esc(LINK_BAD)}"`;
+          return mark("[", k) + `<span ${attrs}>${inlineHtml(m[1], k)}</span>` + mark(`](${m[2]})`, k);
+        }
+        if (!url) return esc(m[0]);
+        return `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${inlineHtml(m[1], k)}</a>`
+          + hrefTag(m[1], url);
+      } },
     // Bare URLs. The trailing-character class keeps sentence punctuation out
-    // of the link, which otherwise swallows the full stop after a URL.
+    // of the link, which otherwise swallows the full stop after a URL. The
+    // pattern only matches http and https, so the match is its own safe href.
     { re: /(?<![\w@.])(https?:\/\/[^\s<>()[\]]*[^\s<>()[\].,;:!?'"])/,
       build: (m, k) => k
         ? `<span class="md-link">${esc(m[1])}</span>`
-        : `<a href="${esc(safeUrl(m[1]))}" target="_blank" rel="noopener noreferrer">${esc(m[1])}</a>` },
+        : `<a href="${esc(m[1])}" target="_blank" rel="noopener noreferrer">${esc(m[1])}</a>` },
   ];
 
   function inlineHtml(src, keep) {

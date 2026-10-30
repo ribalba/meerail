@@ -1179,6 +1179,10 @@ mark.hit.hit-on { background: #ff8a3d; box-shadow: 0 0 0 2px #ff8a3d; }
 .md-line.md-fence, .md-line.md-in-code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .86em; }
 .md-link { color: var(--accent); text-decoration: underline; }
+/* A [text](target) whose target is no web or mail address. It is sent as the
+   text it is, not as a link, and this is the one place the writer can see that
+   before the mail goes out. The tooltip says what to change. */
+.md-link.md-link-bad { color: var(--warning); text-decoration-style: dashed; cursor: help; }
 /* The address printed after a link's text. Dimmed and set small: it is there
    to be read before clicking, not to compete with the sentence it sits in.
    Long URLs break mid-word rather than pushing the pane wide. */
