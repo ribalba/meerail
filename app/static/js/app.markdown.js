@@ -44,20 +44,27 @@ App.markdown = (function () {
   //     bracketed form <https://…> drops its brackets. A host written without
   //     its scheme gets https://, since address bars hide the scheme and people
   //     type the address the way they see it. A bare address gets mailto:.
-  //     Unicode format characters (category Cf: zero-width spaces and joiners,
-  //     direction marks, bidi isolates, the byte-order mark, soft hyphens) are
-  //     dropped. They ride along when text is copied out of web pages and chat
-  //     apps, they take no space on screen, and none of them belongs in an
-  //     address. An earlier list of five named characters missed the rest.
+  //     Characters that take no space on screen are dropped. These are the
+  //     Unicode format characters (category Cf, such as zero-width spaces and
+  //     joiners, direction marks, bidi isolates, the byte-order mark and soft
+  //     hyphens) and the variation selectors. None of them belongs in an
+  //     address. The one in the incident was U+FE0F, the selector that asks
+  //     for an emoji's colour form. It belonged to the 🗓 in front of the link
+  //     and had ended up inside the brackets. It is a combining mark and not a
+  //     format character, so a Cf-only rule still missed it. Naming characters
+  //     has now missed twice, so anything that is not printable ASCII and
+  //     stands in front of the scheme is dropped as well.
   //   * What still is not a web or mail address gets no link at all. The link
   //     rule then leaves the source as it was typed, and the editor marks it
   //     while it is being written.
-  const INVISIBLE = /\p{Cf}/gu;
+  const INVISIBLE = /[\p{Cf}\p{Variation_Selector}]/gu;
+  // Printable ASCII is the range ! to ~.
+  const BEFORE_SCHEME = /^[^!-~]+(?=https?:|mailto:)/i;
   const SCHEMELESS_HOST = /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}(?::\d+)?(?:[/?#]|$)/i;
   const MAIL_ADDRESS = /^[^\s@/:<>]+@(?:[a-z0-9-]+\.)+[a-z]{2,}$/i;
 
   function linkTarget(u) {
-    let t = String(u).replace(INVISIBLE, "");
+    let t = String(u).replace(INVISIBLE, "").replace(BEFORE_SCHEME, "");
     const bracketed = /^<(.+)>$/.exec(t);
     if (bracketed) t = bracketed[1];
     if (/^(https?:|mailto:)/i.test(t)) return t;
