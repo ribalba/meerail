@@ -36,18 +36,23 @@ App.markdown = (function () {
   // browser resolves it against the page it sits in, which inside meerail is
   // meerail itself, so the link opened http://localhost:8000/ in a new window.
   // A footer link of that kind went out dead in every mail one user sent for
-  // a week before anyone noticed (2026-10). Two things follow from it.
+  // a week before anyone noticed (2026-10). On screen the address started
+  // with https:// like any other, so something invisible sat in front of it.
+  // Two things follow from it.
   //
   //   * Targets are read the way people actually write them. CommonMark's
   //     bracketed form <https://…> drops its brackets. A host written without
   //     its scheme gets https://, since address bars hide the scheme and people
   //     type the address the way they see it. A bare address gets mailto:.
-  //     Zero-width characters, which come along when text is copied out of a
-  //     web page, are dropped.
+  //     Unicode format characters (category Cf: zero-width spaces and joiners,
+  //     direction marks, bidi isolates, the byte-order mark, soft hyphens) are
+  //     dropped. They ride along when text is copied out of web pages and chat
+  //     apps, they take no space on screen, and none of them belongs in an
+  //     address. An earlier list of five named characters missed the rest.
   //   * What still is not a web or mail address gets no link at all. The link
   //     rule then leaves the source as it was typed, and the editor marks it
   //     while it is being written.
-  const INVISIBLE = /[\u200b-\u200d\u2060\ufeff]/g;
+  const INVISIBLE = /\p{Cf}/gu;
   const SCHEMELESS_HOST = /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}(?::\d+)?(?:[/?#]|$)/i;
   const MAIL_ADDRESS = /^[^\s@/:<>]+@(?:[a-z0-9-]+\.)+[a-z]{2,}$/i;
 
