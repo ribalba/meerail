@@ -157,6 +157,31 @@ def get_db() -> Generator[Session, None, None]:
         db.close()
 
 
+# How many times a route runs its transaction when Postgres keeps choosing it as
+# the victim of a deadlock. One retry is what it takes in practice. The other
+# transaction has the locks by then and commits, and the second attempt queues
+# behind it like any ordinary lock wait.
+DEADLOCK_ATTEMPTS = 3
+
+
+def is_deadlock(exc: BaseException) -> bool:
+    """Did Postgres abort this statement to break a deadlock (SQLSTATE 40P01)?
+
+    The one database error a request can answer by simply running again.
+    Postgres rolls back only the victim, and the transaction it lost to goes on
+    and commits, so a second attempt finds the rows free or waits its turn for
+    them. Nothing of the failed attempt survives the rollback either, which is
+    what makes the retry safe for anything that only writes rows and leaves its
+    NOTIFYs until after the commit. Every other OperationalError (a dropped
+    connection, a lock_timeout) says something a retry would not change.
+
+    Read off the SQLSTATE rather than the exception class, so this module does
+    not have to import psycopg.
+    """
+    return (isinstance(exc, OperationalError)
+            and getattr(exc.orig, "sqlstate", None) == "40P01")
+
+
 # Shapes of the DDL below, mapped to the catalog query that tells us whether it
 # has already been applied. Anything not matched here is simply run.
 _COLUMN_ADD = re.compile(r"ALTER TABLE\s+(\w+)\s+ADD COLUMN IF NOT EXISTS\s+(\w+)", re.I)

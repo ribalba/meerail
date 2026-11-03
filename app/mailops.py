@@ -46,7 +46,11 @@ from core import undo
 from core.events import publish_command
 from core.ingest import derive_role, ensure_local_folder
 from core.mail.store import (
-    is_pending, move_in_flight, place_local, place_pending, recompute_counts,
+    is_pending, move_in_flight, place_local, place_pending,
+    # Under the name every caller of this module already uses. It recounts in
+    # id order, which is what keeps two requests from deadlocking on the same
+    # folder rows. Its docstring tells the story.
+    recompute_mailboxes as recompute,
 )
 from core.models import Account, Mailbox, Message, MessageLocation, PendingAction, utcnow
 
@@ -149,13 +153,6 @@ def announce(db: DBSession, account_ids: set[int], moved: int) -> None:
     for account_id in account_ids:
         wake_agent(db, account_id)
     events.publish({"type": "present", "moved": moved})
-
-
-def recompute(db: DBSession, mailbox_ids: set[int]) -> None:
-    for mid in mailbox_ids:
-        mb = db.get(Mailbox, mid)
-        if mb:
-            recompute_counts(db, mb)
 
 
 # --- where mail is filed ------------------------------------------------------

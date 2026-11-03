@@ -820,3 +820,31 @@ def recompute_counts(db: Session, mailbox: Mailbox) -> None:
     )
     mailbox.total_count = int(total or 0)
     mailbox.unread_count = int(unread or 0)
+
+
+def recompute_mailboxes(db: Session, mailbox_ids: set[int]) -> None:
+    """Recount several folders, always in ascending id order.
+
+    The order is the order the folder rows get locked in, and it has to be the
+    same in every transaction. recompute_counts starts with a flush, so the
+    UPDATE that writes one folder's counts goes out when the loop reaches the
+    next folder, and the row stays locked until the commit. This loop used to
+    walk the set as it came, and a Python set of ints has no stable order. Two
+    ids that land in the same slot come out in the order they were added, and
+    the slots change once the set grows past four entries. So trashing a
+    conversation and marking the next one read, which the reader does at the
+    same moment, could lock INBOX and a second folder both mails were filed in
+    in opposite orders. Postgres found the deadlock and shot the trash, and the
+    browser showed "Internal Server Error" (reported 2026-11-03). Sorted, the
+    second transaction simply waits for the first.
+
+    Every server path that recounts more than one folder in a transaction goes
+    through here for that reason (mailops.recompute is this function). The
+    thread trash and archive and the read and flag changes also run again when
+    they lose a deadlock anyway (app/routers/actions.py), for lock cycles this
+    order cannot rule out.
+    """
+    for mailbox_id in sorted(mailbox_ids):
+        mailbox = db.get(Mailbox, mailbox_id)
+        if mailbox is not None:
+            recompute_counts(db, mailbox)

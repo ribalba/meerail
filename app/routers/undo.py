@@ -56,7 +56,7 @@ from sqlalchemy.orm import Session as DBSession
 from .. import events, journal, mailops, reminders
 from core import undo
 from core.database import get_db
-from core.mail.store import drop_pending_placement, recompute_counts
+from core.mail.store import drop_pending_placement
 from core.models import Mailbox, Message, PendingAction, utcnow
 from ..deps import require_ui_auth
 
@@ -446,10 +446,9 @@ def undo_operation(op_id: str, db: DBSession = Depends(get_db)):
     if not restored and unreversible:
         raise HTTPException(status_code=400, detail=unreversible[0])
 
-    for mailbox_id in touched:
-        mb = db.get(Mailbox, mailbox_id)
-        if mb is not None:
-            recompute_counts(db, mb)
+    # In id order, like every other recount, so an undo cannot deadlock with
+    # the move or the mark-read running beside it (see mailops.recompute).
+    mailops.recompute(db, touched)
     db.commit()
 
     # The reverse move is a move like any other, so it gets the same nudge: left

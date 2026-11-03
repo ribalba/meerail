@@ -17,12 +17,13 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session as DBSession, selectinload
 from sqlalchemy.orm.exc import StaleDataError
 
 from .. import events, mailops
 from core import undo
-from core.database import get_db
+from core.database import DEADLOCK_ATTEMPTS, get_db, is_deadlock
 from ..deps import require_ui_auth
 from .messages import _resolve_mailbox_ids, account_ids_param, also_ids
 from core.models import Mailbox, Message, MessageLocation, parked_out
@@ -872,8 +873,9 @@ def bulk_park_all(req: BulkParkAllRequest, db: DBSession = Depends(get_db)):
     return {**_parked_reply(changed, op_id, req.parked), "done": remaining <= len(locs)}
 
 
-# Tries at a read or flag change while the message's placements move under it.
-# The second is the one that lands in practice; see _change_flags.
+# Tries at a read or flag change while the message's placements move under it,
+# or while Postgres breaks a deadlock with that move. The second is the one that
+# lands in practice; see _change_flags.
 _FLAG_ATTEMPTS = 3
 
 
@@ -897,6 +899,11 @@ def _change_flags(db: DBSession, message_id: int, change, value: bool) -> None:
     message that is gone altogether is a 404 from _get_message, exactly as if
     the request had arrived a moment later. Mail that keeps moving under every
     attempt gets a 409, which is what a change in flight answers elsewhere.
+
+    The same race can end in a deadlock as well, when the trash and the read
+    both recount folders the two mails share (reported 2026-11-03, see
+    _thread_move). Postgres then rolls back one of them, and when that is this
+    one it starts over like it does after a StaleDataError.
     """
     for _ in range(_FLAG_ATTEMPTS):
         msg = _get_message(db, message_id)
@@ -905,6 +912,10 @@ def _change_flags(db: DBSession, message_id: int, change, value: bool) -> None:
             db.commit()
             return
         except StaleDataError:
+            db.rollback()
+        except OperationalError as exc:
+            if not is_deadlock(exc):
+                raise
             db.rollback()
     raise HTTPException(
         status_code=409,
@@ -1065,6 +1076,46 @@ def _thread_move(db: DBSession, thread_id: str, account_ids: list[int], target_o
     instead of archiving one half and leaving the other in the inbox. Accounts
     that hold none of the thread are passed over, and only a thread that none
     of them holds is a 404.
+
+    Run again from the start when Postgres picks it as the victim of a
+    deadlock. Trashing a conversation and marking the next one read happen at
+    the same moment, because the reader opens the next mail without waiting for
+    the trash, and on 2026-11-03 the two took the same two folder rows in
+    opposite orders. The recount now locks folders in id order
+    (core/mail/store.py::recompute_mailboxes), which rules that cycle out, and
+    this catches the ones it cannot. The failed attempt has written nothing,
+    and the agent and the browsers are only told after the commit, so the
+    second attempt is the first anyone hears of it.
+    """
+    for _ in range(DEADLOCK_ATTEMPTS):
+        try:
+            moved, op_id, present = _file_thread(db, thread_id, account_ids, target_of,
+                                                 op_kind, spare_own_mail)
+            break
+        except OperationalError as exc:
+            if not is_deadlock(exc):
+                raise
+            db.rollback()
+    else:
+        raise HTTPException(
+            status_code=409,
+            detail="This conversation is busy with another change right now, so nothing "
+                   "was moved. Try again in a moment.")
+    for account_id in present:
+        mailops.wake_agent(db, account_id)
+    # One event for the conversation, not one per message: each publish() is a
+    # pg_notify round trip of its own (see mailops.announce), and nothing reads
+    # the message_id off these — to the UI they are just "something changed".
+    events.publish({"type": "present", "moved": moved})
+    return moved, op_id
+
+
+def _file_thread(db: DBSession, thread_id: str, account_ids: list[int], target_of,
+                 op_kind: str, spare_own_mail: bool) -> tuple[int, str, list[int]]:
+    """One attempt at _thread_move, up to and including the commit.
+
+    Returns how many messages moved, the undo id, and the accounts that held
+    the thread, which are the ones whose agent has to hear about it.
     """
     by_account: dict[int, list[Message]] = {}
     for msg in db.execute(
@@ -1097,13 +1148,7 @@ def _thread_move(db: DBSession, thread_id: str, account_ids: list[int], target_o
         raise HTTPException(status_code=409, detail=mailops.already_there(first))
     mailops.recompute(db, touched)
     db.commit()
-    for account_id in present:
-        mailops.wake_agent(db, account_id)
-    # One event for the conversation, not one per message: each publish() is a
-    # pg_notify round trip of its own (see mailops.announce), and nothing reads
-    # the message_id off these — to the UI they are just "something changed".
-    events.publish({"type": "present", "moved": moved})
-    return moved, op_id
+    return moved, op_id, present
 
 
 @router.post("/threads/{thread_id:path}/archive")

@@ -464,7 +464,13 @@ App.markdown = (function () {
       // lose it the same way.
       const sel = window.getSelection();
       if (node) sel.collapse(node, Math.max(0, Math.min(at, node.data.length)));
-      else sel.collapse(div, div.childNodes.length);
+      // A line without text is an empty line, and its only child is the <br>
+      // that gives it height. The caret goes in front of that <br>, where a
+      // click puts it too. Behind it, plain typing still worked, but an input
+      // method that started composing there lost the composition on its next
+      // key. A dead key on the empty line after Enter gave ´e instead of é,
+      // while it worked everywhere else (macOS, 2026-11).
+      else sel.collapse(div, 0);
     }
 
     function placeGlobal(off) {
