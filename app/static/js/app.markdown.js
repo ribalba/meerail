@@ -676,9 +676,33 @@ App.markdown = (function () {
     }
 
     // --- wiring ---
-    el.addEventListener("input", () => { sync(); record(false); });
+    //
+    // An input method can hold text in the editor before it commits it. A dead
+    // key on macOS works that way (´ then e gives é), and so do the
+    // press-and-hold accent menu and every CJK input method. While that text is
+    // being composed, the text node under the caret belongs to the input
+    // method. Repainting the line replaces that node, and the browser then
+    // drops the composition, so ´ stayed a lone ´ and the e arrived on its own
+    // (macOS, 2026-11). Nothing is repainted until the composition ends. The
+    // catch-up waits one task, because Safari may still be writing the
+    // committed text when compositionend fires.
+    let composing = false;
+    el.addEventListener("compositionstart", () => { composing = true; });
+    el.addEventListener("compositionend", () => {
+      composing = false;
+      setTimeout(() => { if (!composing) { sync(); record(false); } }, 0);
+    });
+    el.addEventListener("input", (e) => {
+      if (composing || e.isComposing) return;
+      sync();
+      record(false);
+    });
 
     el.addEventListener("keydown", (e) => {
+      // A key the input method is using, such as the Enter that picks a
+      // candidate, is not ours to handle. Safari reports the key that ends a
+      // composition with isComposing false but keyCode 229, hence both checks.
+      if (e.isComposing || e.keyCode === 229) return;
       const mod = e.metaKey || e.ctrlKey;
       if (mod && (e.key === "z" || e.key === "Z")) {
         e.preventDefault();
