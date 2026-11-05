@@ -191,10 +191,25 @@ App.compose = (function () {
     return out;
   }
 
+  // Only a drop that carries files is ours. Text dropped into a field is the
+  // browser's to insert, and the editor repaints it like anything typed (see
+  // sync() in app.markdown.js). This handler used to cancel every drop on the
+  // composer before it looked at what was dropped. So nothing dragged in as
+  // text ever arrived, whether into the body, the subject or an address field.
+  // It showed up as emojis dragged out of the macOS Character Viewer that
+  // never landed, while pasting the same emoji worked (reported 2026-11-04).
+  // Text that misses the fields is still cancelled. A link dropped there would
+  // otherwise load in place of meerail, or in the desktop app open the system
+  // browser.
   function onDrop(e) {
-    e.preventDefault();
     showDropHint(false);
-    if (!hasFiles(e)) return;
+    if (!hasFiles(e)) {
+      const field = e.target instanceof Element &&
+        (e.target.isContentEditable || e.target.matches("input, textarea"));
+      if (!field) e.preventDefault();
+      return;
+    }
+    e.preventDefault();
     const files = droppedFiles(e.dataTransfer);
     if (files.length) onFiles(files);          // sets its own status as it uploads
     else if (e.dataTransfer.items?.length) $("#compose-status").textContent = "Folders can't be attached.";
