@@ -395,9 +395,10 @@ App.markdown = (function () {
     let histTimer = null;
     // Told after every repaint. Painting replaces a line's nodes wholesale, so
     // anything that pointed into the old ones (the spelling checker's
-    // underlines, which are DOM Ranges) has to be drawn again from offsets.
-    let rendered = null;
-    const notify = () => { if (rendered) rendered(); };
+    // underlines and the find's highlights, which are DOM Ranges) has to be
+    // drawn again from offsets.
+    const rendered = [];
+    const notify = () => { for (const fn of rendered) fn(); };
 
     function paint(div, text, fence) {
       const { cls, html } = lineParts(text, fence);
@@ -587,6 +588,45 @@ App.markdown = (function () {
       return r;
     }
 
+    // rangeFor for many [start, end) spans at once, in order, none crossing a
+    // line. One walk down the draft instead of one per span, because a find
+    // for a common letter in a long quoted thread has tens of thousands of
+    // matches and rangeFor starts again from the top line for each end of each.
+    function rangesFor(spans) {
+      const out = [];
+      let i = 0;
+      let base = 0;
+      for (const d of lineDivs()) {
+        if (i >= spans.length) break;
+        const end = base + d.textContent.length;
+        if (spans[i][0] < end) {
+          const walk = document.createTreeWalker(d, NodeFilter.SHOW_TEXT);
+          let node = walk.nextNode();
+          let seen = 0;
+          // Offsets only grow within a line, so the walker never steps back.
+          const seek = (off) => {
+            while (node && seen + node.data.length < off) {
+              seen += node.data.length;
+              node = walk.nextNode();
+            }
+            return node ? [node, off - seen] : null;
+          };
+          while (i < spans.length && spans[i][0] < end) {
+            const [start, stop] = spans[i++];
+            const a = seek(start - base);
+            const b = seek(stop - base);
+            if (!a || !b) continue;
+            const r = document.createRange();
+            r.setStart(a[0], a[1]);
+            r.setEnd(b[0], b[1]);
+            out.push(r);
+          }
+        }
+        base = end + 1;
+      }
+      return out;
+    }
+
     function globalOffsetInLine(div) {
       const sel = window.getSelection();
       const r = document.createRange();
@@ -760,11 +800,14 @@ App.markdown = (function () {
         const last = el.lastElementChild;
         if (atEnd && last) placeInLine(last, norm(last.textContent).length);
       },
-      // For app.grammar.js, which draws on the text without owning it: told
-      // after every repaint, and able to turn source offsets into Ranges and
-      // back. The caret is -1 when it is not in the editor at all.
-      onRender(fn) { rendered = fn; },
+      // For app.grammar.js and app.composefind.js, which draw on the text
+      // without owning it: told after every repaint, and able to turn source
+      // offsets into Ranges and back. The caret is -1 when it is not in the
+      // editor at all, and the selection is null.
+      onRender(fn) { rendered.push(fn); },
       rangeFor,
+      rangesFor,
+      selection: selectionRange,
       caret: caretOffset,
       setCaret: placeGlobal,
     };

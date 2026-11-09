@@ -1158,6 +1158,22 @@ mark.hit.hit-on { background: #ff8a3d; box-shadow: 0 0 0 2px #ff8a3d; }
 }
 .compose-textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 
+/* Find in the message (Ctrl/Cmd+F), a row above the text it searches. Dressed
+   like the reader's find box, whose icon, count and arrow classes it shares. */
+.compose-find { flex: 0 0 auto; display: flex; align-items: center; gap: .1rem;
+  padding: 0 .2rem 0 .45rem; border-radius: 7px;
+  background: var(--bg-elev); border: 1px solid transparent; }
+.compose-find[hidden] { display: none; }
+.compose-find:focus-within { border-color: var(--accent); }
+.compose-find input { flex: 1 1 auto; min-width: 0; border: none; background: none;
+  color: var(--text); font: inherit; font-size: .82rem; padding: .3rem .35rem; }
+.compose-find input:focus { outline: none; }
+.compose-find.no-hits .find-count { color: var(--danger); }
+/* The same two colours as a find in the reader (mark.hit). They are pinned for
+   the same reason, to stay readable on the dark theme. */
+::highlight(compose-find-all) { background-color: #ffd84d; color: #1d1d1f; }
+::highlight(compose-find-on) { background-color: #ff8a3d; color: #1d1d1f; }
+
 /* --- Markdown live preview in the composer ---------------------------------
    The markers are never removed, only dimmed, so the field still shows the
    exact text that will be sent. Nothing here may change a glyph's advance

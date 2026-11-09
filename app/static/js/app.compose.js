@@ -56,6 +56,7 @@ App.compose = (function () {
     { show: "⌥/Alt ⇧ G", label: "Next spelling issue", ck: "grammar" },
     // Hidden by app.dictation.js unless dictation is set up and switched on.
     { show: "⌥/Alt ⇧ D", label: "Dictate", ck: "dictation" },
+    { show: "⌘/Ctrl F", label: "Find in message" },
     { show: "⌘/Ctrl ↵", label: "Send" },
     // The plain-Send key: ⌘↵ presses whichever button is the primary one, and
     // behind a thread that is Send & Archive. This one only ever sends.
@@ -613,6 +614,7 @@ App.compose = (function () {
     $("#compose-modal").hidden = true;
     if (App.grammar) App.grammar.onHide();
     if (App.dictation) App.dictation.onHide();
+    if (App.composeFind) App.composeFind.onHide();
   }
 
   // --- Minimize ---------------------------------------------------------
@@ -732,6 +734,7 @@ App.compose = (function () {
     $("#compose-modal").hidden = true;
     if (App.grammar) App.grammar.onHide();
     if (App.dictation) App.dictation.onHide();
+    if (App.composeFind) App.composeFind.onHide();
     renderBar();
     // Saved now rather than after the usual pause: nothing more is going to be
     // typed into it to set that timer off again.

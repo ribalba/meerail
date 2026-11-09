@@ -243,7 +243,7 @@ App.keys = (function () {
         // Display-only, like the other modified keys — handled ahead of the
         // table in handle(), since this one has to work with the caret already
         // in the find box, where pressing it again means "type over that".
-        { show: "⌘/Ctrl F", label: "Find in thread" },
+        { show: "⌘/Ctrl F", label: "Find in thread / draft" },
         { show: "⌘/Ctrl ↵", label: "Send message" },
         // Handled ahead of the table in handle() — modified keys never reach it.
         // Which of the three depends on the pane, and on pressing it twice.
@@ -289,8 +289,14 @@ App.keys = (function () {
   }
 
   function onEscape() {
-    // Only the × discards a draft, so Escape minimizes instead of closing.
-    if (App.compose.isOpen()) return App.compose.minimize();
+    // Only the × discards a draft, so Escape minimizes instead of closing. A find
+    // still open over the draft is the most recent thing set up in it, so that
+    // goes first. Escape with the caret in the find box never reaches here.
+    // app.composefind.js takes it there, so the press lands on the match.
+    if (App.compose.isOpen()) {
+      if (App.composeFind.isOpen()) return App.composeFind.close();
+      return App.compose.minimize();
+    }
     if (App.tasks.isOpen()) return App.tasks.close();
     if (App.calendar.isOpen()) return App.calendar.close();
     if (App.ai.offOpen()) return App.ai.closeOff();
@@ -427,7 +433,15 @@ App.keys = (function () {
     // thread, or when the caret is in some other field: App.reader decides
     // that and says so by answering false, and an unclaimed Ctrl+F still opens
     // the browser's find bar.
+    //
+    // With a draft on screen the key is about the draft, wherever in the window
+    // the keyboard is. The thread is behind the backdrop, so a find there could
+    // not be seen, and the browser's would light up the page behind it too.
     if (mod && !e.altKey && (e.key === "f" || e.key === "F")) {
+      if (App.compose.isOpen()) {
+        if (App.composeFind.open()) e.preventDefault();
+        return;
+      }
       if (App.reader.focusFind()) e.preventDefault();
       return;
     }

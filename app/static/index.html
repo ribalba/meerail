@@ -889,6 +889,24 @@
           <div class="compose-suggest" id="compose-suggest"></div></div>
         <div class="compose-row"><label>Subject</label>
           <input id="compose-subject" type="text" autocomplete="off" /></div>
+        <!-- Find in the message, Ctrl/Cmd+F from anywhere in this window. Above
+             the text it searches and pushing it down rather than floating over
+             it, where it would cover the match at the top of the editor. The
+             buttons are out of the tab ring because Enter and Shift+Enter do
+             their work, so Tab from the box goes straight into the message.
+             Driven by app.composefind.js. -->
+        <div class="compose-find" id="compose-find" hidden>
+          <span class="find-icon" aria-hidden="true"></span>
+          <input id="compose-find-input" type="text" placeholder="Find in message"
+            aria-label="Find in this message" autocomplete="off" spellcheck="false" />
+          <span class="find-count" id="compose-find-count" aria-live="polite"></span>
+          <button class="find-nav find-prev" id="compose-find-prev" type="button" tabindex="-1"
+            title="Previous match (Shift+Enter)" aria-label="Previous match" disabled></button>
+          <button class="find-nav find-next" id="compose-find-next" type="button" tabindex="-1"
+            title="Next match (Enter)" aria-label="Next match" disabled></button>
+          <button class="find-nav" id="compose-find-close" type="button" tabindex="-1"
+            title="Close (Esc)" aria-label="Close find"></button>
+        </div>
         <!-- Not a textarea: the body renders markdown as you type while keeping
              the markers in the text, which needs mixed styling in one field. -->
         <div id="compose-body" class="compose-textarea md-editor" contenteditable="plaintext-only"
@@ -1070,6 +1088,7 @@
   <script src="/static/js/app.compose.js"></script>
   <script src="/static/js/app.grammar.js"></script>
   <script src="/static/js/app.dictation.js"></script>
+  <script src="/static/js/app.composefind.js"></script>
   <script src="/static/js/app.outbox.js"></script>
   <script src="/static/js/app.tasks.js"></script>
   <script src="/static/js/app.calendar.js"></script>

@@ -1060,6 +1060,8 @@ App.shell = (function () {
       App.grammar.init();
       // Also after the composer, and also one question to the server.
       App.dictation.init();
+      // After the composer too, and it asks the server nothing.
+      App.composeFind.init();
       App.keys.init();
       App.bulk.init();
       App.tasks.init();
