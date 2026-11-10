@@ -619,6 +619,60 @@ def test_forward_carries_the_attachments(account):
     assert "report.pdf" in mime and "application/pdf" in mime
 
 
+def _mail_to_several(email: str, account_id: int, token: str, uid: int, html: bool) -> int:
+    """A message to one named and one bare address, with a Cc and a Bcc.
+    Returns its id."""
+    m = EmailMessage()
+    m["Message-ID"] = f"<fwdrcpt-{uuid.uuid4().hex}@t>"
+    m["Subject"] = f"Einladung {token}"
+    m["From"] = "Stefan <stefan@ex.com>"
+    m["To"] = f'"Joseph P. De Veaugh-Geiss" <joseph@ex.com>, {email}'
+    m["Cc"] = "Ada Lovelace <ada@ex.com>"
+    m["Bcc"] = "Secret Person <secret@ex.com>"
+    m["Date"] = format_datetime(T0)
+    m.set_content(f"{token} plain")
+    if html:
+        m.add_alternative(f"<html><body><p>{token} html</p></body></html>", subtype="html")
+    dbfixture.ingest_raw_message(email, m.as_bytes(), uid=uid)
+    _, found = api("GET", f"/api/search?q={token}&account_id={account_id}")
+    return found["rows"][0]["id"]
+
+
+def test_plain_forward_says_who_the_original_went_to(account):
+    """To and Cc appear by name above the original, and a Bcc never does."""
+    email, aid = account["email"], account["id"]
+    token = "FWDRCPTTXT" + uuid.uuid4().hex[:6]
+    mid = _mail_to_several(email, aid, token, uid=891, html=False)
+
+    _, ctx = api("GET", f"/api/compose/reply-context/{mid}?mode=forward")
+    assert ctx["body_text"].strip().split("\n\n")[0].splitlines() == [
+        "---------- Forwarded message ----------",
+        "From: Stefan <stefan@ex.com>",
+        f"Subject: Einladung {token}",
+        f"To: Joseph P. De Veaugh-Geiss <joseph@ex.com>, {email.lower()}",
+        "Cc: Ada Lovelace <ada@ex.com>",
+    ]
+    assert "secret" not in ctx["body_text"].lower()
+
+
+def test_html_forward_says_who_the_original_went_to(account):
+    """The same lines, escaped, in the body /send builds for an HTML original."""
+    email, aid = account["email"], account["id"]
+    token = "FWDRCPTHTML" + uuid.uuid4().hex[:6]
+    mid = _mail_to_several(email, aid, token, uid=892, html=True)
+
+    code, _ = api("POST", "/api/compose/send", {
+        "account_id": aid, "to": ["dest@example.com"], "subject": f"Fwd: {token}",
+        "body_text": "", "forward_of": mid})
+    assert code == 200
+
+    _, mime = _raw_mime_of_last_send(email)
+    html = message_from_string(mime, policy=policy.default).get_body(("html",)).get_content()
+    assert (f"To: Joseph P. De Veaugh-Geiss &lt;joseph@ex.com&gt;, {email.lower()}"
+            "<br>Cc: Ada Lovelace &lt;ada@ex.com&gt;</div>") in html
+    assert "secret" not in html.lower()
+
+
 # --- Forwarding HTML mail ----------------------------------------------------
 # An HTML original used to be forwarded as its text quoted into the composer,
 # which dropped every picture it carried as a cid: part. It now goes as HTML:

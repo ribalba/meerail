@@ -286,7 +286,25 @@ class _Forward(NamedTuple):
 
 
 def _forward_headers(msg: Message) -> list[str]:
-    return [f"From: {_format_sender(msg)}", f"Subject: {msg.subject or ''}"]
+    """The lines above a forwarded original, in the order core/mail/parse.py
+    writes them when it inlines an attached forward.
+
+    To and Cc are there so the reader can see who else already has this mail.
+    Without them a forward reads as if the original had been written to the
+    forwarder alone, and a colleague had to ask who it had really gone to. Bcc
+    stays out on purpose: it is the header whose point is not to be passed on.
+    A line with nobody on it is left out rather than written empty, which is
+    what mail to undisclosed recipients comes to.
+    """
+    lines = [f"From: {_format_sender(msg)}", f"Subject: {msg.subject or ''}"]
+    # By id, because the relationship promises no order and the rows were
+    # written in the order the sender listed the people.
+    people = sorted(msg.recipients, key=lambda r: r.id)
+    for label, kind in (("To", "to"), ("Cc", "cc")):
+        named = [_format_person(r.name, r.address) for r in people if r.kind == kind]
+        if named:
+            lines.append(f"{label}: {', '.join(named)}")
+    return lines
 
 
 def _forward_text(msg: Message) -> str:
@@ -926,11 +944,15 @@ def reply_context(message_id: int, mode: str = "reply", db: DBSession = Depends(
     }
 
 
+def _format_person(name: str | None, address: str | None) -> str:
+    """"Name <addr>" when the person has a display name, else the bare address."""
+    if name and address:
+        return f"{name} <{address}>"
+    return name or address
+
+
 def _format_sender(msg: Message) -> str:
-    """"Name <addr>" when the sender has a display name, else the bare address."""
-    if msg.from_name and msg.from_addr:
-        return f"{msg.from_name} <{msg.from_addr}>"
-    return msg.from_name or msg.from_addr
+    return _format_person(msg.from_name, msg.from_addr)
 
 
 def _quote(msg: Message) -> str:
