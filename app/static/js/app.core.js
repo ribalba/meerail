@@ -194,6 +194,10 @@ App.api = {
     return this.get("/api/messages?" + qs);
   },
   message(id, images) { return this.get(`/api/messages/${id}?images=${images ? 1 : 0}`); },
+  // A PDF attachment's pages, for the phone's viewer (app.mobile.js). It says
+  // how many there are and the shape of each. The pictures themselves are
+  // plain <img> addresses.
+  attachmentPages(id) { return this.get(`/api/attachments/${id}/pages`); },
   // `search` (optional) carries the query the thread was opened from, so the
   // server can point out which attachments the term was found in.
   //

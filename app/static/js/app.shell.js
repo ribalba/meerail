@@ -996,6 +996,12 @@ App.shell = (function () {
       if (e.key === "Enter") { e.preventDefault(); submitFolder(); }
     });
     $("#btn-refresh").addEventListener("click", requestRefresh);
+    // The folder page's own Compose and Search. Narrow layouts only, mail.css
+    // hides the pair above the breakpoint.
+    $("#btn-quick-compose").innerHTML = App.icon("edit", 18);
+    $("#btn-quick-search").innerHTML = App.icon("search", 18);
+    $("#btn-quick-compose").addEventListener("click", () => App.compose.openNew());
+    $("#btn-quick-search").addEventListener("click", quickSearch);
     $("#meerato-save").addEventListener("click", saveMeeratoUrl);
     $("#meercal-save").addEventListener("click", saveMeercal);
     // Enter in either field saves, the way it does in the send delay below.
@@ -1023,19 +1029,45 @@ App.shell = (function () {
       App.power.setEnabled(e.target.checked));
   }
 
+  // Where the app starts. That is All Inboxes when there is more than one
+  // account to have inboxes, and otherwise the one inbox there is. Null with
+  // no accounts.
+  function homeSelection() {
+    if (!sidebar) return null;
+    if (sidebar.smart.account_count > 1) return selections["unified"] || null;
+    if (!sidebar.accounts.length) return null;
+    const inbox = sidebar.accounts[0].mailboxes.find((m) => m.role === "inbox")
+      || sidebar.accounts[0].mailboxes[0];
+    return inbox ? selections["mb-" + inbox.id] || null : null;
+  }
+
+  // The folder page's Search button on a phone. The search box lives on the
+  // list page, so this turns to it, over the inbox, and puts the caret in the
+  // box. Which folder is underneath matters little, since a search covers all
+  // mailboxes until its scope says otherwise, but the inbox is the one nobody
+  // has to think about, and it is what clearing the search leaves you looking
+  // at.
+  //
+  // The page turn and the focus must not wait for anything. iOS only raises
+  // the keyboard for a focus that happens inside the tap itself, and select()
+  // is still loading the list when this returns.
+  function quickSearch() {
+    const home = homeSelection();
+    if (home && (!selection || selection.key !== home.key)) select(home);
+    App.mobile.show("list");
+    App.search.focusInput();
+  }
+
   function selectDefault() {
-    if (sidebar.smart.account_count > 1) select(selections["unified"]);
-    else if (sidebar.accounts.length) {
-      const inbox = sidebar.accounts[0].mailboxes.find((m) => m.role === "inbox")
-        || sidebar.accounts[0].mailboxes[0];
-      if (inbox) select(selections["mb-" + inbox.id]);
-    } else {
-      $("#list-title").textContent = "meerail";
-      document.getElementById("message-list").innerHTML =
-        `<div class="list-empty">No accounts yet.<br>Start a <code>meerail-agent</code> and its
-        accounts appear here automatically.</div>`;
-      openSettings();
-    }
+    const home = homeSelection();
+    if (home) { select(home); return; }
+    // An account with no folder in it yet. Its first sync fills the sidebar in.
+    if (sidebar.accounts.length) return;
+    $("#list-title").textContent = "meerail";
+    document.getElementById("message-list").innerHTML =
+      `<div class="list-empty">No accounts yet.<br>Start a <code>meerail-agent</code> and its
+      accounts appear here automatically.</div>`;
+    openSettings();
   }
 
   async function boot() {

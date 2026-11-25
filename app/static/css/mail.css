@@ -921,8 +921,10 @@ mark.hit.hit-on { background: #ff8a3d; box-shadow: 0 0 0 2px #ff8a3d; }
 /* The Back buttons, the bar holding one of them, and the attachment viewer the
    third one backs out of. All off at desktop widths, where the three panes are
    on screen at once and an attachment opens in a tab of its own; the narrow
-   block at the foot of this file turns them on. */
-.mobile-back, .mobile-nav, .att-viewer { display: none; }
+   block at the foot of this file turns them on. The folder page's own Compose
+   and Search go with them. At these widths the search box and the reader's
+   toolbar are on screen next to the folders already. */
+.mobile-back, .mobile-nav, .att-viewer, .sidebar-quick { display: none; }
 .tb-spacer { flex: 1; }
 /* Groups the bar the way Apple Mail does: compose | reply verbs | filing verbs. */
 .tb-sep { width: 1px; align-self: stretch; margin: .2rem .4rem; background: var(--border); }
@@ -2213,6 +2215,12 @@ mark.hit.hit-on { background: #ff8a3d; box-shadow: 0 0 0 2px #ff8a3d; }
     color: var(--accent); cursor: pointer; padding: .5rem .3rem .5rem 0; }
   .mobile-back svg { transform: rotate(90deg); }
   .mobile-back span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Compose and Search on the folder page, which is the page the app opens on
+     down here. Pushed to the left edge of the row the panel buttons share, and
+     in the accent colour the Back buttons use, because like those they are
+     the way on and not a setting. */
+  .sidebar-quick { display: flex; align-items: center; gap: .1rem; margin-right: auto; }
+  .sidebar-quick .icon-btn { color: var(--accent); }
   .pane-header { gap: .2rem; }
   .pane-header .pane-title { flex: 1; min-width: 0;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -2223,6 +2231,11 @@ mark.hit.hit-on { background: #ff8a3d; box-shadow: 0 0 0 2px #ff8a3d; }
     padding: 0 .9rem; background: var(--bg); border-bottom: 1px solid var(--border);
     position: sticky; top: 0; z-index: 6; }
   .reading-pane .reader-bar { top: 44px; }
+  /* Sticking to the top of the pane only keeps a bar on screen while the page
+     is not zoomed. Zoomed, the top of the pane is off screen, so app.mobile.js
+     moves these three to the corner of what is visible with a transform (see
+     "Zoomed in" there). Its arithmetic is done from the bar's top left. */
+  .mobile-nav, .reader-bar, .att-viewer-bar { transform-origin: 0 0; }
   /* Ten actions do not fit across a phone; let them scroll rather than wrap,
      which would change the bar's height and break the offset above. Only the
      verbs move — a find box you had to scroll the bar sideways to reach would
@@ -2246,9 +2259,10 @@ mark.hit.hit-on { background: #ff8a3d; box-shadow: 0 0 0 2px #ff8a3d; }
      The clear button goes — the close beside it already empties the box, and
      the two crosses would sit a finger's width apart. */
   .reader-find { flex: 1 1 auto; min-width: 0; margin-left: 0; }
+  /* Its text is 16px like every control down here. See the rule for all of
+     them further on. */
   .reader-find input, .reader-find:focus-within input, .reader-find.has-q input {
-    /* 16px, or iOS zooms the page in on focus and never zooms back out. */
-    width: auto; flex: 1 1 auto; font-size: 16px; }
+    width: auto; flex: 1 1 auto; }
   .find-clear { display: none; }
   .reader-bar.find-open .find-close { display: flex; flex: 0 0 auto; padding: .5rem .3rem .5rem .45rem; }
   /* Fingertips, not a mouse pointer. */
@@ -2307,10 +2321,16 @@ mark.hit.hit-on { background: #ff8a3d; box-shadow: 0 0 0 2px #ff8a3d; }
   .msg-check { position: static; transform: none; opacity: 1; width: 18px; height: 18px; }
   .msg-row .msg-gutter .unread-dot { visibility: visible; }
 
-  /* iOS zooms the page in on any input it considers small, and never zooms
-     back out. 16px is the threshold. */
-  .search-bar input, .compose-row input, #compose-from, .compose-textarea,
-  .modal-body input, .modal-body textarea { font-size: 16px; }
+  /* iOS zooms the page in when a control whose text is under 16px takes the
+     focus, and never zooms back out. This used to be a list of the controls
+     somebody had caught doing it. The ones nobody had (the two menus under the
+     search box, the reminder's time field, every menu in the settings) each
+     left the whole app slightly enlarged until the next reload, and a zoomed
+     page has its top edge off screen and every Back button with it. So it is
+     every control there is. !important because the point is that a rule
+     written later for one of them cannot opt out by being more specific. */
+  input, select, textarea, [contenteditable]:not([contenteditable="false"]) {
+    font-size: 16px !important; }
 
   /* Content the panes scroll needs to clear the home indicator. */
   .mailbox-tree, .message-list, .reader-content {
@@ -2336,9 +2356,6 @@ mark.hit.hit-on { background: #ff8a3d; box-shadow: 0 0 0 2px #ff8a3d; }
      and the home indicator. Gone for the same reason the sidebar sheet is. */
   .compose-keys { display: none; }
   .modal { width: min(480px, 94vw); max-height: 88vh; }
-  /* The rule above for inputs leaves selects out, and iOS zooms in on those
-     too. The meercal dialog's calendar menu is focused as soon as it opens. */
-  #calendar-modal select { font-size: 16px; }
   /* A fingertip's worth of button on the meercal strip. */
   .calendar-banner button { padding: .45rem .8rem; }
 
@@ -2355,7 +2372,9 @@ mark.hit.hit-on { background: #ff8a3d; box-shadow: 0 0 0 2px #ff8a3d; }
      thread has, in the one place a thread is not what you are looking at. */
   .att-viewer-bar { display: flex; align-items: center; gap: .3rem; flex: 0 0 auto;
     height: 44px; padding: 0 .4rem 0 .9rem;
-    background: var(--bg); border-bottom: 1px solid var(--border); }
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    /* Over the pages, for when a zoom has moved it down onto them. */
+    position: relative; z-index: 1; }
   .att-viewer-name { flex: 1; min-width: 0; text-align: center;
     font-size: .9rem; font-weight: 600;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -2363,4 +2382,20 @@ mark.hit.hit-on { background: #ff8a3d; box-shadow: 0 0 0 2px #ff8a3d; }
      mode to read as a sheet of paper rather than as the app going blank. */
   .att-viewer-frame { flex: 1; width: 100%; min-height: 0; border: 0;
     background: var(--bg-elev); }
+  /* A PDF, one picture per page (see app.mobile.js). The sheets run edge to
+     edge, because a phone has no width to spare for a margin beside an A4
+     page. Each has its shape set inline before its picture exists, so the
+     scroller is its full length from the start. White whatever the theme,
+     like a mail body. */
+  .att-viewer-pages { flex: 1; min-height: 0; overflow-y: auto; padding: .4rem 0;
+    background: var(--bg-elev); }
+  .att-page { width: 100%; margin: 0 0 .4rem; background: #fff; overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .22); }
+  .att-page:last-child { margin-bottom: 0; }
+  .att-page img { display: block; width: 100%; height: 100%; }
+  .att-page.failed { display: flex; align-items: center; justify-content: center;
+    padding: 1.5rem; text-align: center; font-size: .85rem; line-height: 1.45;
+    color: #6e6e73; }
+  .att-pages-note { padding: 1.4rem 1.2rem; text-align: center; font-size: .85rem;
+    line-height: 1.45; color: var(--text-muted); }
 }

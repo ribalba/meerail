@@ -7,7 +7,7 @@ import re
 import zipfile
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
 from sqlalchemy import Integer, String, and_, case, column, func, or_, select, tuple_, values
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session as DBSession
@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session as DBSession
 from core import ingest
 from core.database import get_db
 from core.mail.parse import html_to_text, is_calendar_part
-from .. import reminders as reminders_core, searchquery, spanning
+from .. import pdfpages, reminders as reminders_core, searchquery, spanning
 from ..deps import require_ui_auth
 from ..mail.render import sanitize_html
 from .mailboxes import ROLE_ORDER
@@ -630,6 +630,10 @@ def _message_detail(db: DBSession, msg: Message, load_remote: bool,
             {"id": a.id, "filename": a.filename, "content_type": a.content_type,
              "size": a.size_bytes, "is_inline": a.is_inline, "stored": a.stored,
              "has_thumb": a.has_thumb, "viewable": _inline_safe(a.content_type),
+             # A PDF the phone's viewer can ask for page by page (see
+             # app/pdfpages.py). Decided by the rule the page routes accept
+             # by, so the viewer never asks for pages it would be refused.
+             "paged": pdfpages.is_pdf(a.content_type),
              # Is there anything for a model to read? Extracted text, or the
              # picture itself. Decided here because only the server can see the
              # first of the two — see the AI router's "explain this attachment".
@@ -1019,6 +1023,80 @@ def attachment_thumb(attachment_id: int, db: DBSession = Depends(get_db)):
         headers={
             # Attachment bytes never change, so the preview never does either.
             "Cache-Control": "private, max-age=31536000, immutable",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+# --- A PDF, page by page -------------------------------------------------
+# For the phone's attachment viewer, which cannot leave a PDF to the browser
+# the way the desktop reader does. See app/pdfpages.py for why, and for the
+# guards around drawing a file somebody else wrote.
+
+def _pdf_payload(db: DBSession, attachment_id: int) -> bytes:
+    """The bytes of a stored PDF attachment on mail the user still has.
+
+    Columns and not the entity, so the extracted text and the thumbnail stay
+    in the database. The session is closed before the bytes are returned,
+    because what follows is a wait for the renderer's lock and then the
+    drawing itself. A phone asks for several pages at once, and each of those
+    requests would otherwise sit on a pooled connection it has finished with.
+    """
+    row = db.execute(
+        select(Attachment.message_pk, Attachment.content_type, Attachment.content)
+        .where(Attachment.id == attachment_id)
+    ).first()
+    if row is None or row.content is None:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    _readable(db, row.message_pk)   # nor do its pages outlive the message
+    if not pdfpages.is_pdf(row.content_type):
+        raise HTTPException(status_code=400, detail="Only a PDF can be shown page by page.")
+    payload = bytes(row.content)
+    db.close()
+    return payload
+
+
+@router.get("/attachments/{attachment_id}/pages")
+def attachment_pages(attachment_id: int, db: DBSession = Depends(get_db)):
+    """How many pages a PDF attachment has, and the shape of each.
+
+    `pages` holds one `[width, height]` per page, in points. The viewer draws
+    an empty sheet of that shape for every page and fetches a picture only for
+    the ones near the screen. `total` can be larger than the list is long, for
+    a document beyond what one listing describes.
+    """
+    payload = _pdf_payload(db, attachment_id)
+    try:
+        total, sizes = pdfpages.layout(payload)
+    except pdfpages.Unreadable as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"total": total, "pages": [[w, h] for w, h in sizes]}
+
+
+@router.get("/attachments/{attachment_id}/pages/{number}")
+def attachment_page(
+    attachment_id: int,
+    number: int = Path(ge=1),
+    w: int = Query(1200, ge=pdfpages.MIN_WIDTH, le=pdfpages.MAX_WIDTH),
+    db: DBSession = Depends(get_db),
+):
+    """One page of a PDF attachment as a picture `w` pixels wide. Pages count from 1."""
+    payload = _pdf_payload(db, attachment_id)
+    try:
+        content, media = pdfpages.render(payload, number, w)
+    except pdfpages.NoSuchPage:
+        raise HTTPException(status_code=404, detail=f"This PDF has no page {number}.")
+    except pdfpages.Unreadable as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return Response(
+        content=content,
+        media_type=media,
+        headers={
+            # The same bytes at the same width draw the same picture, so a page
+            # scrolled away from and back to comes out of the phone's cache.
+            # A week and not the thumbnail's year. These are a hundred times
+            # the size, and a document is read and then left alone.
+            "Cache-Control": "private, max-age=604800, immutable",
             "X-Content-Type-Options": "nosniff",
         },
     )

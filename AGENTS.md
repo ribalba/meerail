@@ -98,6 +98,7 @@ Any plain IMAP/SMTP account (Gmail, Fastmail, Dovecot) works the same way.
 | `app/llm.py`, `aiprompts.py`, `threadtext.py` | AI providers, prompts, and conversation flattening. |
 | `app/meercal.py` | The meercal client for "Add to meercal": calendar list, preview and import of an `.ics` attachment, all through the `nethost` guard. meercal does the iCalendar parsing. |
 | `app/grammar.py` | Grammar and spelling checks: the settings row, UTF-16 segment offsets, the LanguageTool client, and the privacy guard that refuses a public `grammar.url`. |
+| `app/pdfpages.py` | A PDF attachment as one picture per page, drawn with PyMuPDF when the phone's attachment viewer asks for it. A phone browser shows only the first page of a framed PDF, or none. Nothing is stored. The file is the sender's, so the module holds the guards: one lock around every PyMuPDF call (the library is not thread-safe and the server answers from a thread pool), and caps on file size, pages listed and pixels drawn. |
 | `app/dictation.py` | Dictation: the settings row, the client for the Whisper service (whisper-asr-webservice), the prompt built from the vocabulary and the draft before the cursor, the filter for text Whisper invents on silence, and the same privacy guard for `dictation.url`. The browser half is `app.dictation.js`, which cuts the recording at pauses, plus `app.dictation.worklet.js`, the microphone tap that is loaded as an AudioWorklet module and not as a `<script>` tag. |
 | `app/static/` | The SPA: `index.html`, `css/mail.css`, `js/app.*.js`. |
 | `tests/` | The pytest suite: `conftest.py` (safety guard), `dbfixture.py` (seeding), `helpers.py` (HTTP). |
@@ -362,7 +363,7 @@ these rules exists because something went wrong without it. The README section
 | `auth` | `/api/auth` | status, login, logout (ungated) |
 | `accounts` | `/api/accounts` | label, colour, footer; delete. The agent creates accounts. |
 | `mailboxes` | `/api/mailboxes` | sidebar tree, create/favorite/delete folder |
-| `messages` | `/api` | list, detail, thread, source, attachments, thumbs |
+| `messages` | `/api` | list, detail, thread, source, attachments, thumbs, PDF pages |
 | `actions` | `/api/messages` | mark, flag, move, trash, archive, bulk, empty trash, purge |
 | `compose` | `/api/compose` | staging attachments, send, drafts |
 | `grammar` | `/api/grammar` | config, languages, check, ignore |
@@ -404,7 +405,17 @@ these rules exists because something went wrong without it. The README section
 - **Keyboard.** The `SHORTCUTS` table in `app.keys.js` is the single source; it
   also renders the cheat sheet.
 - **Mobile.** The 900px breakpoint appears in three places that must agree:
-  `mail.css`, `app.mobile.js` and `app.swipe.js`.
+  `mail.css`, `app.mobile.js` and `app.swipe.js`. Three more things hold below
+  it:
+  - Every control is 16px (one `!important` rule in the narrow block). iOS
+    zooms the page in when a control with smaller text takes the focus and
+    never zooms back out.
+  - A bar with a Back button must stay reachable while the page is pinch
+    zoomed. `position: sticky` cannot do that, because a zoomed page has its
+    top off screen. `app.mobile.js` ("Zoomed in") moves the bars with the
+    visual viewport, and a new bar of that kind has to be added to its list.
+  - The attachment viewer shows a PDF as pictures of its pages
+    (`app/pdfpages.py`) and frames everything else.
 - **No safety net.** There are no JS tests and no linter, and a syntax error in
   any module takes down the whole app.
 - **Static files are baked into the server image.** Only

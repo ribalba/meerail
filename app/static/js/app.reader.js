@@ -1893,8 +1893,12 @@ App.reader = (function () {
         // Types the browser renders itself open in a tab; everything else keeps
         // downloading. `viewable` is the server's allowlist, not a guess here —
         // it decides what may be served with an inline disposition.
+        // `data-pages` is for the phone's viewer (app.mobile.js), which shows a
+        // PDF as one picture per page and needs to know which attachment to
+        // ask the server about. It names the attachment and nothing else.
         const link = a.viewable
           ? `href="/api/attachments/${a.id}?inline=1" target="_blank" rel="noopener"`
+            + (a.paged ? ` data-pages="${a.id}"` : "")
           : `href="/api/attachments/${a.id}" download="${App.esc(a.filename)}"`;
         // Previews are precomputed by the agent, so a chip shows one only once
         // that pass has run — mail read seconds after arriving falls back to the

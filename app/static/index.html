@@ -31,6 +31,17 @@
            sidebar is too narrow to hold five buttons and the name without the
            name being the thing that gives way. -->
       <div class="sidebar-tools">
+        <!-- Narrow layouts only, where this page is what the app opens on. A
+             phone is picked up to write a mail or to find one, and both used
+             to start with opening a folder just to reach the button. On the
+             left, away from the panel buttons, because these two are about
+             the mail and those are about the app. Wired by app.shell.js. -->
+        <span class="sidebar-quick">
+          <button class="icon-btn" id="btn-quick-compose" title="New Message"
+                  aria-label="New Message"></button>
+          <button class="icon-btn" id="btn-quick-search" title="Search all mail"
+                  aria-label="Search all mail"></button>
+        </span>
         <button class="icon-btn" id="btn-stats" title="Statistics"></button>
         <button class="icon-btn" id="btn-cleanup" title="Cleanup — mail you get over and over"></button>
         <button class="icon-btn" id="btn-agent" title="Agent status"></button>
@@ -196,7 +207,7 @@
        header that has. The two links on the right are the escape hatch for
        anything the frame will not render. -->
   <div class="att-viewer" id="att-viewer" hidden>
-    <div class="att-viewer-bar">
+    <div class="att-viewer-bar" id="att-viewer-bar">
       <button class="mobile-back" id="btn-back-message" aria-label="Back to the message">
         <span>Message</span>
       </button>
@@ -206,6 +217,12 @@
       <a class="icon-btn" id="att-viewer-save" title="Download" aria-label="Download"></a>
     </div>
     <iframe class="att-viewer-frame" id="att-viewer-frame" title="Attachment"></iframe>
+    <!-- A PDF is not framed. A phone browser draws the first page of a framed
+         PDF and stops there, so the viewer asks the server for the pages as
+         pictures and stacks them in here. Filled by app.mobile.js. The frame
+         above is still what a picture is shown in, and what a PDF falls back
+         to when the server cannot draw it. -->
+    <div class="att-viewer-pages" id="att-viewer-pages" hidden></div>
   </div>
 
   <!-- Settings / accounts modal -->
